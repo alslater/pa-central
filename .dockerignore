@@ -1,0 +1,13 @@
+**/__pycache__
+**/*.pyc
+**/.env
+**/node_modules
+backend/pa_fleet.db
+backend/pa_central.db
+backend/*.db
+backend/data
+.git
+.gitignore
+pa-plugin/
+docs/
+*.md

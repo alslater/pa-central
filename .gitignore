@@ -59,3 +59,8 @@ Thumbs.db
 *.swo
 
 .claude/
+backend/.python-version
+Pipfile
+superpowers/
+
+.agents/

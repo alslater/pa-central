@@ -1,0 +1,1465 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Design System — v6.0</title>
+  <meta name="description" content="Standalone catalog of the Essiell design system tokens and components." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+  /* Tokens (copied from src/design-system/tokens.css) */
+  /**
+ * Design System v6.0 — CSS bindings.
+ *
+ * Two sections per theme:
+ *   1. CANONICAL TOKENS — mirror tokens.ts exactly. One per meaning.
+ *   2. COMPAT ALIASES — keep shadcn primitives + legacy teller code
+ *      rendering. NOT part of the design system surface. Do not add
+ *      new references to these names.
+ */
+
+:root {
+  /* =========================================================
+   * 1. CANONICAL TOKENS
+   * ========================================================= */
+
+  /* Surfaces and ink */
+  --background: 36 38% 96%;
+  --foreground: 215 35% 11%;
+  --card: 36 50% 99%;
+  --muted: 36 28% 92%;
+  --muted-foreground: 215 14% 40%;
+  --border: 36 22% 82%;
+  --on-accent: 0 0% 100%;
+
+  /* Brand (teal) — identity only. Never on form controls/buttons/links. */
+  --brand: 174 92% 30%;
+  --brand-strong: 176 96% 22%;
+  --brand-tint: 168 60% 90%;
+  --brand-navy: 212 45% 18%;
+  --brand-foreground: 0 0% 100%;
+
+  /* Primary — ALL interactive controls + links */
+  --primary: 212 45% 18%;
+  --primary-foreground: 40 30% 98%;
+
+  /* Agent (AI / purple) */
+  --agent: 262 52% 50%;
+  --agent-strong: 248 47% 50%;
+  --agent-tint: 248 80% 96%;
+  --agent-foreground: 0 0% 100%;
+
+  /* Transaction direction — steel blue + plum/magenta */
+  --txn-sell: 210 65% 40%;
+  --txn-sell-text: 210 70% 32%;
+  --txn-buy: 330 55% 50%;
+  --txn-buy-text: 330 65% 38%;
+
+  /* Status — base tokens for indicators (dots, borders, badge backgrounds) */
+  --status-pass: 145 60% 38%;
+  --status-pass-text: 145 60% 28%;
+  --status-review: 38 92% 50%;
+  --status-review-text: 38 80% 30%;
+  --status-fail: 0 78% 56%;
+  --status-fail-text: 0 78% 40%;
+  --status-info: 211 90% 52%;
+  --status-info-text: 211 80% 38%;
+
+
+  /* Destructive — distinct from status-fail */
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* Qualifier (Transact theme layer) */
+  --qual-neutral: 205 12% 42%;
+  --qual-info: 211 90% 52%;
+  --qual-purple: 280 55% 45%;
+  --qual-amber: 38 92% 50%;
+  --qual-teal: 175 65% 30%;
+
+  /* Sidebar */
+  --sidebar: 200 32% 13%;
+  --sidebar-foreground: 195 18% 84%;
+  --sidebar-active: 200 30% 19%;
+  --sidebar-border: 200 26% 24%;
+
+  /* Form control / focus ring (independent from --primary). */
+  --input: 200 16% 86%;
+  --ring: 200 30% 16%;
+
+  /* Spacing */
+  --space-row: 0.5rem;
+  --space-stack-tight: 0.75rem;
+  --space-stack: 1rem;
+  --space-stack-loose: 1.5rem;
+  --space-section: 2.5rem;
+  --space-region: 4rem;
+
+  /* Radius */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.875rem;
+  --radius-lg: 1.25rem;
+  --radius-pill: 999px;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px 0 hsl(222 47% 11% / 0.06);
+  --shadow-md: 0 2px 8px -1px hsl(222 47% 11% / 0.08), 0 1px 3px -1px hsl(222 47% 11% / 0.06);
+  --shadow-lg: 0 12px 28px -8px hsl(222 47% 11% / 0.16), 0 4px 10px -4px hsl(222 47% 11% / 0.08);
+  --shadow-focus: 0 0 0 3px hsl(var(--ring) / 0.5);
+  --shadow-inset: inset 0 -1px 0 0 hsl(var(--border));
+
+  /* Interaction state */
+  --state-hover: hsl(var(--foreground) / 0.04);
+  --state-active: hsl(var(--foreground) / 0.08);
+  --state-disabled-opacity: 0.5;
+  --state-selected-bg: hsl(var(--primary) / 0.04);
+  --state-selected-border: hsl(var(--primary));
+  --state-focus: var(--shadow-focus);
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* Z-index */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-dropdown: 200;
+  --z-overlay: 300;
+  --z-toast: 400;
+
+  /* =========================================================
+   * 2. COMPAT ALIASES — do not reference in new code
+   * ========================================================= */
+
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+
+  /* shadcn accent maps to a muted hover; controls do not use brand. */
+  --accent: var(--muted);
+  --accent-foreground: var(--foreground);
+
+  --status-pass-foreground: var(--on-accent);
+  --status-review-foreground: var(--on-accent);
+  --status-fail-foreground: var(--on-accent);
+  --status-info-foreground: var(--on-accent);
+
+  /* Sidebar muted derived at 60% opacity (per v6 spec). */
+  --sidebar-muted: hsl(var(--sidebar-foreground) / 0.6);
+
+  /* Transitional aliases for legacy teller code */
+  --brand-emphasis: var(--brand-strong);
+  --brand-deep: var(--brand);
+  --brand-soft: var(--brand-tint);
+}
+
+.dark {
+  --background: 215 32% 7%;
+  --foreground: 40 25% 94%;
+  --card: 215 28% 12%;
+  --muted: 215 22% 18%;
+  --muted-foreground: 40 12% 64%;
+  --border: 215 22% 24%;
+  --on-accent: 0 0% 100%;
+
+  --brand: 172 78% 48%;
+  --brand-strong: 172 82% 56%;
+  --brand-tint: 172 40% 20%;
+  --brand-navy: 212 45% 18%;
+  --brand-foreground: 0 0% 100%;
+
+  --primary: 40 30% 96%;
+  --primary-foreground: 212 45% 14%;
+
+  --agent: 262 60% 66%;
+  --agent-strong: 248 55% 64%;
+  --agent-tint: 248 30% 22%;
+  --agent-foreground: 0 0% 100%;
+
+  --txn-sell: 210 60% 58%;
+  --txn-sell-text: 210 65% 70%;
+  --txn-buy: 330 50% 62%;
+  --txn-buy-text: 330 60% 74%;
+
+  --status-pass: 145 55% 48%;
+  --status-pass-text: 145 55% 58%;
+  --status-review: 38 90% 58%;
+  --status-review-text: 38 85% 62%;
+  --status-fail: 0 74% 62%;
+  --status-fail-text: 0 74% 68%;
+  --status-info: 211 88% 64%;
+  --status-info-text: 211 82% 68%;
+
+
+  --destructive: 0 78% 62%;
+  --destructive-foreground: 0 0% 100%;
+
+  --qual-neutral: 200 12% 62%;
+  --qual-info: 211 88% 64%;
+  --qual-purple: 280 60% 65%;
+  --qual-amber: 38 90% 58%;
+  --qual-teal: 175 60% 50%;
+
+  --sidebar: 200 30% 9%;
+  --sidebar-foreground: 195 16% 78%;
+  --sidebar-active: 200 26% 15%;
+  --sidebar-border: 200 22% 20%;
+
+  --input: 200 18% 22%;
+  --ring: 190 30% 80%;
+}
+
+/* ---- Tailwind v4 theme bindings ---- */
+@theme inline {
+  /* Canonical colours */
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-border: hsl(var(--border));
+  --color-on-accent: hsl(var(--on-accent));
+
+  --color-brand: hsl(var(--brand));
+  --color-brand-strong: hsl(var(--brand-strong));
+  --color-brand-tint: hsl(var(--brand-tint));
+  --color-brand-navy: hsl(var(--brand-navy));
+  --color-brand-foreground: hsl(var(--on-accent));
+
+  --color-agent: hsl(var(--agent));
+  --color-agent-strong: hsl(var(--agent-strong));
+  --color-agent-tint: hsl(var(--agent-tint));
+  --color-agent-foreground: hsl(var(--on-accent));
+
+  --color-txn-sell: hsl(var(--txn-sell));
+  --color-txn-sell-text: hsl(var(--txn-sell-text));
+  --color-txn-buy: hsl(var(--txn-buy));
+  --color-txn-buy-text: hsl(var(--txn-buy-text));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-status-pass: hsl(var(--status-pass));
+  --color-status-pass-text: hsl(var(--status-pass-text));
+  --color-status-review: hsl(var(--status-review));
+  --color-status-review-text: hsl(var(--status-review-text));
+  --color-status-fail: hsl(var(--status-fail));
+  --color-status-fail-text: hsl(var(--status-fail-text));
+  --color-status-info: hsl(var(--status-info));
+  --color-status-info-text: hsl(var(--status-info-text));
+
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-active: hsl(var(--sidebar-active));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-muted: var(--sidebar-muted);
+
+  /* Qualifier (Transact theme layer) */
+  --color-qual-neutral: hsl(var(--qual-neutral));
+  --color-qual-info: hsl(var(--qual-info));
+  --color-qual-purple: hsl(var(--qual-purple));
+  --color-qual-amber: hsl(var(--qual-amber));
+  --color-qual-teal: hsl(var(--qual-teal));
+
+  /* Compat aliases — for shadcn primitives, do not reference in new code */
+  --color-card-foreground: hsl(var(--foreground));
+  --color-popover: hsl(var(--card));
+  --color-popover-foreground: hsl(var(--foreground));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-secondary: hsl(var(--muted));
+  --color-secondary-foreground: hsl(var(--foreground));
+  --color-accent: hsl(var(--muted));
+  --color-accent-foreground: hsl(var(--foreground));
+
+  /* Radius */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.875rem;
+  --radius-lg: 1.25rem;
+  --radius-pill: 999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 hsl(222 47% 11% / 0.06);
+  --shadow-md: 0 2px 8px -1px hsl(222 47% 11% / 0.08), 0 1px 3px -1px hsl(222 47% 11% / 0.06);
+  --shadow-lg: 0 12px 28px -8px hsl(222 47% 11% / 0.16), 0 4px 10px -4px hsl(222 47% 11% / 0.08);
+
+  /* Font — Inter only */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* ---- Typography styles (the ONLY text API) ---- */
+
+@utility text-style-display {
+  font-family: var(--font-sans);
+  font-size: 2.5rem;        /* 40px */
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: hsl(var(--foreground));
+}
+@utility text-style-page-title {
+  font-family: var(--font-sans);
+  font-size: 1.75rem;       /* 28px */
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: hsl(var(--foreground));
+}
+@utility text-style-section-title {
+  font-family: var(--font-sans);
+  font-size: 1.125rem;      /* 18px */
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0;
+  color: hsl(var(--foreground));
+}
+@utility text-style-card-title {
+  font-family: var(--font-sans);
+  font-size: 0.875rem;      /* 14px */
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0;
+  color: hsl(var(--foreground));
+}
+@utility text-style-body {
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;     /* 13px */
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0;
+  color: hsl(var(--foreground));
+}
+@utility text-style-body-small {
+  font-family: var(--font-sans);
+  font-size: 0.75rem;       /* 12px */
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+  color: hsl(var(--muted-foreground));
+}
+@utility text-style-caption {
+  font-family: var(--font-sans);
+  font-size: 0.625rem;      /* 10px */
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+@utility text-style-tag {
+  font-family: var(--font-sans);
+  font-size: 0.5625rem;     /* 9px */
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* ---- Numeric / tabular ---- */
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- State helpers ---- */
+@utility state-disabled {
+  opacity: var(--state-disabled-opacity);
+  pointer-events: none;
+}
+@utility focus-ring {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+
+  /* --- Standalone overrides -------------------------------------------------
+   * tokens.css declares --font-sans inside Tailwind v4's @theme inline { }
+   * block, which browsers treat as an unknown at-rule and skip. Re-declare
+   * the font stack on :root so var(--font-sans) resolves in plain HTML, and
+   * apply Inter directly to every element so form controls inherit it too.
+   * ----------------------------------------------------------------------- */
+  :root, .dark {
+    --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; font-family: var(--font-sans); }
+  html, body { margin: 0; }
+  body {
+    font-family: var(--font-sans);
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-size: 0.8125rem;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  button, input, select, textarea { font-family: var(--font-sans); }
+  header.page {
+    padding: 2.5rem 2.5rem 1.5rem;
+    border-bottom: 1px solid hsl(var(--border));
+    background: hsl(var(--card));
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  }
+  header.page h1 { margin: 0; font-size: 1.75rem; font-weight: 600; letter-spacing: -0.02em; }
+  header.page p  { margin: 0.25rem 0 0; color: hsl(var(--muted-foreground)); font-size: 0.875rem; }
+  .theme-toggle {
+    padding: 0.5rem 0.875rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid hsl(var(--border));
+    background: transparent; color: inherit;
+    font-size: 0.8125rem; cursor: pointer;
+  }
+  .theme-toggle:hover { background: hsl(var(--foreground) / 0.04); }
+
+  main { padding: 2rem 2.5rem 4rem; max-width: 1280px; margin: 0 auto; }
+  section.section { margin-top: 3rem; }
+  section.section > h2 {
+    font-size: 1.125rem; font-weight: 600; margin: 0 0 0.5rem;
+    padding-bottom: 0.5rem; border-bottom: 1px solid hsl(var(--border));
+  }
+  section.section > p.lede { margin: 0 0 1.5rem; color: hsl(var(--muted-foreground)); font-size: 0.875rem; max-width: 70ch; }
+  .group { margin-top: 1.5rem; }
+  .group__title {
+    font-size: 0.625rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    color: hsl(var(--muted-foreground)); margin: 0 0 0.75rem;
+  }
+
+  /* Swatches */
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0.75rem; }
+  .swatch {
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius-md);
+    background: hsl(var(--card)); overflow: hidden;
+  }
+  .swatch__chip { height: 64px; border-bottom: 1px solid hsl(var(--border)); }
+  .swatch__meta { padding: 0.75rem; }
+  .swatch__name { font-size: 0.75rem; }
+  .swatch__desc { margin: 0.25rem 0 0.5rem; font-size: 0.75rem; color: hsl(var(--muted-foreground)); }
+  .swatch__hsl { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem 0.5rem; margin: 0; font-size: 0.6875rem; }
+  .swatch__hsl div { display: flex; flex-direction: column; }
+  .swatch__hsl dt { color: hsl(var(--muted-foreground)); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.5625rem; }
+  .swatch__hsl dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+  /* Typography rows */
+  .typo {
+    padding: 1rem 1.25rem;
+    border: 1px solid hsl(var(--border)); border-radius: var(--radius-md);
+    background: hsl(var(--card));
+    margin-bottom: 0.75rem;
+  }
+  .typo__sample { margin-bottom: 0.75rem; }
+  .typo__meta {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 0.25rem 0.75rem; margin: 0;
+  }
+  .typo__meta dt { font-size: 0.5625rem; color: hsl(var(--muted-foreground)); letter-spacing: 0.06em; text-transform: uppercase; }
+  .typo__meta dd { margin: 0; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+  .typo__usage { margin: 0.5rem 0 0; font-size: 0.75rem; color: hsl(var(--muted-foreground)); }
+
+  /* Metric rows (spacing / radii / shadows / states / motion / z) */
+  .metric {
+    padding: 1rem 1.25rem; border: 1px solid hsl(var(--border));
+    border-radius: var(--radius-md); background: hsl(var(--card));
+    margin-bottom: 0.75rem;
+  }
+  .metric--inline { display: flex; align-items: center; gap: 1rem; padding: 0.625rem 1rem; }
+  .metric--inline p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 0.75rem; }
+  .metric--inline code { font-size: 0.75rem; min-width: 14ch; }
+  .metric--inline span { font-variant-numeric: tabular-nums; font-size: 0.75rem; min-width: 14ch; color: hsl(var(--muted-foreground)); }
+  .metric__bar { height: 12px; background: hsl(var(--primary) / 0.6); border-radius: 4px; margin-bottom: 0.75rem; }
+  .metric__box { width: 72px; height: 72px; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); margin-bottom: 0.75rem; }
+  .metric__box--shadow { border: none; background: hsl(var(--card)); }
+  .metric__meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.25rem 0.75rem; margin: 0; }
+  .metric__meta dt { font-size: 0.5625rem; color: hsl(var(--muted-foreground)); letter-spacing: 0.06em; text-transform: uppercase; }
+  .metric__meta dd { margin: 0; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+  .metric__desc { margin: 0.5rem 0 0; font-size: 0.75rem; color: hsl(var(--muted-foreground)); }
+  .break { word-break: break-all; }
+  .subgroup { margin-top: 0.5rem; }
+  .subgroup h4 { font-size: 0.75rem; margin: 0.75rem 0 0.5rem; font-weight: 600; color: hsl(var(--muted-foreground)); text-transform: uppercase; letter-spacing: 0.06em; }
+
+  /* Components catalog */
+  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; }
+  .row--stack { flex-direction: column; align-items: flex-start; }
+  .row--cards { gap: 1rem; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+    height: 2.25rem; padding: 0 1rem; font: inherit; font-size: 0.8125rem; font-weight: 500;
+    border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer;
+    transition: background-color 200ms;
+  }
+  .btn:disabled { background: hsl(var(--muted)) !important; color: hsl(var(--muted-foreground)) !important; border-color: hsl(var(--border)) !important; cursor: not-allowed; }
+  .btn--primary     { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+  .btn--primary:hover{ background: hsl(var(--primary) / 0.9); }
+  .btn--secondary   { background: transparent; color: hsl(var(--foreground)); border-color: hsl(var(--border)); }
+  .btn--secondary:hover { background: hsl(var(--foreground) / 0.04); }
+  .btn--ghost       { background: transparent; color: hsl(var(--foreground)); }
+  .btn--ghost:hover { background: hsl(var(--foreground) / 0.04); }
+  .btn--destructive { background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground)); }
+  .btn--agent       { background: hsl(var(--agent)); color: hsl(var(--agent-foreground)); }
+  .btn--status-pass   { background: hsl(var(--status-pass));   color: hsl(var(--on-accent)); font-weight: 600; }
+  .btn--status-review { background: hsl(var(--status-review)); color: hsl(var(--on-accent)); font-weight: 600; }
+  .btn--status-fail   { background: hsl(var(--status-fail));   color: hsl(var(--on-accent)); font-weight: 600; }
+  .btn--status-info   { background: hsl(var(--status-info));   color: hsl(var(--on-accent)); font-weight: 600; }
+
+  .badge {
+    display: inline-flex; align-items: center; padding: 0.125rem 0.5rem; font-size: 0.5625rem;
+    font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; border-radius: var(--radius-sm);
+  }
+  .badge--neutral { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+  .badge--pass    { background: hsl(var(--status-pass) / 0.15);   color: hsl(var(--status-pass-text)); }
+  .badge--review  { background: hsl(var(--status-review) / 0.15); color: hsl(var(--status-review-text)); }
+  .badge--fail    { background: hsl(var(--status-fail) / 0.15);   color: hsl(var(--status-fail-text)); }
+  .badge--info    { background: hsl(var(--status-info) / 0.15);   color: hsl(var(--status-info-text)); }
+  .badge--sell    { background: hsl(var(--txn-sell) / 0.15);      color: hsl(var(--txn-sell-text)); }
+  .badge--buy     { background: hsl(var(--txn-buy) / 0.15);       color: hsl(var(--txn-buy-text)); }
+
+  .pill {
+    display: inline-flex; padding: 0.125rem 0.5rem; font-size: 0.5625rem; font-weight: 600;
+    letter-spacing: 0.02em; text-transform: uppercase; border-radius: var(--radius-pill);
+    background: transparent; border: 1px solid;
+  }
+  .pill--qual-neutral { color: hsl(var(--qual-neutral)); border-color: hsl(var(--qual-neutral)); }
+  .pill--qual-purple  { color: hsl(var(--qual-purple));  border-color: hsl(var(--qual-purple)); }
+  .pill--qual-teal    { color: hsl(var(--qual-teal));    border-color: hsl(var(--qual-teal)); }
+  .pill--qual-amber   { color: hsl(var(--qual-amber));   border-color: hsl(var(--qual-amber)); }
+
+  .field { display: flex; flex-direction: column; gap: 0.25rem; width: 100%; max-width: 320px; }
+  .field span { font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.06em; color: hsl(var(--muted-foreground)); }
+  .input {
+    height: 2.25rem; padding: 0 0.75rem; font: inherit; font-size: 0.8125rem;
+    background: hsl(var(--card)); color: hsl(var(--foreground));
+    border: 1px solid hsl(var(--input)); border-radius: var(--radius-sm);
+  }
+  .input:focus-visible { outline: none; border-color: hsl(var(--ring)); box-shadow: 0 0 0 3px hsl(var(--ring) / 0.35); }
+  .input:disabled { background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
+  .input--error { border-color: hsl(var(--status-fail)); }
+
+  .card {
+    background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+    border-radius: var(--radius-md); padding: 1rem; min-width: 220px; box-shadow: var(--shadow-sm);
+  }
+  .card--accent-sell { border-left: 3px solid hsl(var(--txn-sell)); }
+  .card--accent-buy  { border-left: 3px solid hsl(var(--txn-buy)); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: hsl(var(--muted)); padding: 0 0.25rem; border-radius: 4px; font-size: 0.75rem; }
+
+  /* Inline text-style utilities (mirror @utility blocks in tokens.css for plain HTML) */
+  .text-style-display       { font-size: 2.5rem;   font-weight: 700; line-height: 1.1;  letter-spacing: -0.02em; color: hsl(var(--foreground)); }
+  .text-style-page-title    { font-size: 1.75rem;  font-weight: 600; line-height: 1.25; letter-spacing: -0.02em; color: hsl(var(--foreground)); }
+  .text-style-section-title { font-size: 1.125rem; font-weight: 600; line-height: 1.3;  color: hsl(var(--foreground)); }
+  .text-style-card-title    { font-size: 0.875rem; font-weight: 500; line-height: 1.5;  color: hsl(var(--foreground)); margin: 0 0 0.25rem; }
+  .text-style-body          { font-size: 0.8125rem;font-weight: 400; line-height: 1.55; color: hsl(var(--foreground)); }
+  .text-style-body-small    { font-size: 0.75rem; font-weight: 400; line-height: 1.4;  color: hsl(var(--muted-foreground)); }
+  .text-style-caption       { font-size: 0.625rem;font-weight: 500; line-height: 1.3;  letter-spacing: 0.06em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+  .text-style-tag           { font-size: 0.5625rem;font-weight: 600;line-height: 1.25; letter-spacing: 0.02em; text-transform: uppercase; }
+</style>
+</head>
+<body>
+  <header class="page">
+    <div>
+      <h1>Essiell Design System</h1>
+      <p>v6.0 · Standalone reference — tokens, typography and core components.</p>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button">Toggle dark mode</button>
+  </header>
+  <main>
+    <section class="section">
+      <h2>Color</h2>
+      <p class="lede">Three colour concerns, zero overlap. Brand = identity. Primary = all interactive controls. Status = indicators only. Every swatch ships in both light and dark themes.</p>
+
+    <section class="group">
+      <h3 class="group__title">Surfaces &amp; ink</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--background));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--background</code>
+        <p class="swatch__desc">App background</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(36 38% 96%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(215 32% 7%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--foreground));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--foreground</code>
+        <p class="swatch__desc">Primary ink (also used on cards + popovers)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(215 35% 11%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(40 25% 94%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--card));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--card</code>
+        <p class="swatch__desc">Card / panel / popover surface</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(36 50% 99%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(215 28% 12%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--muted));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--muted</code>
+        <p class="swatch__desc">Muted surface (alt rows, disabled bg)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(36 28% 92%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(215 22% 18%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--muted-foreground));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--muted-foreground</code>
+        <p class="swatch__desc">Secondary ink (captions, hints, placeholders, neutral qualifier)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(215 14% 40%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(40 12% 64%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--border));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--border</code>
+        <p class="swatch__desc">Hairline border (also used for input outlines)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(36 22% 82%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(215 22% 24%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--on-accent));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--on-accent</code>
+        <p class="swatch__desc">Ink on every coloured fill (brand, agent, status, txn, destructive)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(0 0% 100%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(0 0% 100%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Brand (identity only)</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--brand));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--brand</code>
+        <p class="swatch__desc">Brand teal — identity only (logo, sidebar active icon, nav accents). Never on form controls or buttons.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(174 92% 30%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(172 78% 48%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--brand-strong));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--brand-strong</code>
+        <p class="swatch__desc">Hover state for brand elements (e.g. sidebar icon hover).</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(176 96% 22%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(172 82% 56%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--brand-tint));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--brand-tint</code>
+        <p class="swatch__desc">Soft brand surface. Marketing use, onboarding highlights.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(168 60% 90%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(172 40% 20%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--brand-navy));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--brand-navy</code>
+        <p class="swatch__desc">Navy companion — sidebar surface, dark headers. Same in both modes.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(212 45% 18%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(212 45% 18%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--brand-foreground));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--brand-foreground</code>
+        <p class="swatch__desc">Ink on brand surfaces. Always white.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(0 0% 100%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(0 0% 100%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Primary (all interactive controls)</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--primary));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--primary</code>
+        <p class="swatch__desc">All interactive controls. Buttons, checkboxes, toggles, radios, selected card borders, checkmarks, links.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(212 45% 18%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(40 30% 96%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--primary-foreground));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--primary-foreground</code>
+        <p class="swatch__desc">Ink on primary surfaces. White in light mode, dark in dark mode.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(40 30% 98%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(212 45% 14%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Agent (AI)</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--agent));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--agent</code>
+        <p class="swatch__desc">Agent / AI purple</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(262 52% 50%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(262 60% 66%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--agent-strong));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--agent-strong</code>
+        <p class="swatch__desc">Agent hover / pressed</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(248 47% 50%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(248 55% 64%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--agent-tint));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--agent-tint</code>
+        <p class="swatch__desc">Agent soft background</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(248 80% 96%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(248 30% 22%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--agent-foreground));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--agent-foreground</code>
+        <p class="swatch__desc">Ink on agent surfaces. Always white.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(0 0% 100%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(0 0% 100%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Transaction direction</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--txn-sell));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--txn-sell</code>
+        <p class="swatch__desc">Sell direction — steel blue. Badges, left border accents on staging cards and stat tiles.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(210 65% 40%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(210 60% 58%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--txn-buy));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--txn-buy</code>
+        <p class="swatch__desc">Buy direction — plum/magenta. Badges, left border accents on staging cards and stat tiles.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(330 55% 50%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(330 50% 62%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Status</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-pass));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-pass</code>
+        <p class="swatch__desc">Pass / OK / confirmed. Dots, borders, left accents, badge backgrounds.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(145 60% 38%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(145 55% 48%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-pass-text));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-pass-text</code>
+        <p class="swatch__desc">Pass — readable text on light backgrounds. ≈5.5:1 on white.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(145 60% 28%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(145 55% 58%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-review));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-review</code>
+        <p class="swatch__desc">Review / warning. Dots, borders, badge backgrounds.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(38 92% 50%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(38 90% 58%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-review-text));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-review-text</code>
+        <p class="swatch__desc">Review — readable text on light backgrounds. ≈5.8:1 on white.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(38 80% 30%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(38 85% 62%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-fail));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-fail</code>
+        <p class="swatch__desc">Fail / error. Dots, borders, badge backgrounds.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(0 78% 56%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(0 74% 62%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-fail-text));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-fail-text</code>
+        <p class="swatch__desc">Fail — readable text on light backgrounds. ≈7.2:1 on white.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(0 78% 40%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(0 74% 68%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-info));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-info</code>
+        <p class="swatch__desc">Info. Dots, borders, badge backgrounds.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(211 90% 52%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(211 88% 64%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--status-info-text));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--status-info-text</code>
+        <p class="swatch__desc">Info — readable text on light backgrounds. ≈5.8:1 on white.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(211 80% 38%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(211 82% 68%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--destructive));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--destructive</code>
+        <p class="swatch__desc">Destructive action (delete, cancel). Distinct from status-fail.</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(0 84% 60%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(0 78% 62%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Qualifier</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--qual-neutral));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--qual-neutral</code>
+        <p class="swatch__desc">PUBLIC qualifier</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(205 12% 42%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(200 12% 62%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--qual-info));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--qual-info</code>
+        <p class="swatch__desc">Info-tier qualifier</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(211 90% 52%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(211 88% 64%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--qual-purple));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--qual-purple</code>
+        <p class="swatch__desc">Purple-tier qualifier (e.g. PREFERENTIAL)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(280 55% 45%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(280 60% 65%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--qual-amber));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--qual-amber</code>
+        <p class="swatch__desc">Amber-tier qualifier (e.g. FCA PRE-BOOKED)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(38 92% 50%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(38 90% 58%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--qual-teal));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--qual-teal</code>
+        <p class="swatch__desc">Teal-tier qualifier (e.g. STAFF)</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(175 65% 30%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(175 60% 50%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    <section class="group">
+      <h3 class="group__title">Sidebar</h3>
+      <div class="swatches">
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--sidebar));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--sidebar</code>
+        <p class="swatch__desc">Sidebar surface</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(200 32% 13%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(200 30% 9%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--sidebar-foreground));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--sidebar-foreground</code>
+        <p class="swatch__desc">Sidebar ink</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(195 18% 84%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(195 16% 78%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--sidebar-active));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--sidebar-active</code>
+        <p class="swatch__desc">Active item background</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(200 30% 19%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(200 26% 15%)</dd></div>
+        </dl>
+      </div>
+    </article>
+    <article class="swatch">
+      <div class="swatch__chip" style="background: hsl(var(--sidebar-border));"></div>
+      <div class="swatch__meta">
+        <code class="swatch__name">--sidebar-border</code>
+        <p class="swatch__desc">Sidebar divider</p>
+        <dl class="swatch__hsl">
+          <div><dt>Light</dt><dd>hsl(200 26% 24%)</dd></div>
+          <div><dt>Dark</dt><dd>hsl(200 22% 20%)</dd></div>
+        </dl>
+      </div>
+    </article></div>
+    </section>
+    </section>
+
+    <section class="section">
+      <h2>Typography</h2>
+      <p class="lede">Inter only. Eight fixed compositions — never override size, weight or tracking ad-hoc. Heading levels match visual hierarchy.</p>
+
+    <article class="typo">
+      <div class="typo__sample text-style-display">The quick brown fox jumps over the lazy dog</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-display</code></dd></div>
+        <div><dt>size</dt><dd>40px</dd></div>
+        <div><dt>weight</dt><dd>700</dd></div>
+        <div><dt>line-height</dt><dd>1.1</dd></div>
+        <div><dt>tracking</dt><dd>-0.02em</dd></div>
+        <div><dt>color</dt><dd>foreground</dd></div>
+      </dl>
+      <p class="typo__usage">Marketing hero text. Never used in-app.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-page-title">The quick brown fox jumps over the lazy dog</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-page-title</code></dd></div>
+        <div><dt>size</dt><dd>28px</dd></div>
+        <div><dt>weight</dt><dd>600</dd></div>
+        <div><dt>line-height</dt><dd>1.25</dd></div>
+        <div><dt>tracking</dt><dd>-0.02em</dd></div>
+        <div><dt>color</dt><dd>foreground</dd></div>
+      </dl>
+      <p class="typo__usage">One per screen.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-section-title">The quick brown fox jumps over the lazy dog</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-section-title</code></dd></div>
+        <div><dt>size</dt><dd>18px</dd></div>
+        <div><dt>weight</dt><dd>600</dd></div>
+        <div><dt>line-height</dt><dd>1.3</dd></div>
+        <div><dt>tracking</dt><dd>normal</dd></div>
+        <div><dt>color</dt><dd>foreground</dd></div>
+      </dl>
+      <p class="typo__usage">Major divisions within a page.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-card-title">The quick brown fox jumps over the lazy dog</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-card-title</code></dd></div>
+        <div><dt>size</dt><dd>14px</dd></div>
+        <div><dt>weight</dt><dd>500</dd></div>
+        <div><dt>line-height</dt><dd>1.5</dd></div>
+        <div><dt>tracking</dt><dd>normal</dd></div>
+        <div><dt>color</dt><dd>foreground</dd></div>
+      </dl>
+      <p class="typo__usage">Titles within cards and panels.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-body">The quick brown fox jumps over the lazy dog</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-body</code></dd></div>
+        <div><dt>size</dt><dd>13px</dd></div>
+        <div><dt>weight</dt><dd>400</dd></div>
+        <div><dt>line-height</dt><dd>1.55</dd></div>
+        <div><dt>tracking</dt><dd>normal</dd></div>
+        <div><dt>color</dt><dd>foreground</dd></div>
+      </dl>
+      <p class="typo__usage">Default readable text.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-body-small">The quick brown fox jumps over the lazy dog</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-body-small</code></dd></div>
+        <div><dt>size</dt><dd>12px</dd></div>
+        <div><dt>weight</dt><dd>400</dd></div>
+        <div><dt>line-height</dt><dd>1.4</dd></div>
+        <div><dt>tracking</dt><dd>normal</dd></div>
+        <div><dt>color</dt><dd>muted-foreground</dd></div>
+      </dl>
+      <p class="typo__usage">Secondary information.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-caption">Eyebrow Label</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-caption</code></dd></div>
+        <div><dt>size</dt><dd>10px</dd></div>
+        <div><dt>weight</dt><dd>500</dd></div>
+        <div><dt>line-height</dt><dd>1.3</dd></div>
+        <div><dt>tracking</dt><dd>0.06em</dd></div>
+        <div><dt>color</dt><dd>muted-foreground</dd></div>
+      </dl>
+      <p class="typo__usage">Eyebrow labels. Always uppercase.</p>
+    </article>
+    <article class="typo">
+      <div class="typo__sample text-style-tag">Badge</div>
+      <dl class="typo__meta">
+        <div><dt>name</dt><dd><code>text-style-tag</code></dd></div>
+        <div><dt>size</dt><dd>9px</dd></div>
+        <div><dt>weight</dt><dd>600</dd></div>
+        <div><dt>line-height</dt><dd>1.25</dd></div>
+        <div><dt>tracking</dt><dd>0.02em</dd></div>
+        <div><dt>color</dt><dd>context</dd></div>
+      </dl>
+      <p class="typo__usage">Badge / pill text.</p>
+    </article>
+    </section>
+
+    <section class="section">
+      <h2>Spacing</h2>
+      <p class="lede">Six-step rhythm; pick by purpose, not by pixel value.</p>
+
+    <article class="metric">
+      <div class="metric__bar" style="width: 0.5rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--space-row</code></dd></div>
+        <div><dt>value</dt><dd>0.5rem (8px)</dd></div>
+      </dl>
+      <p class="metric__desc">Gap between items within a group</p>
+    </article>
+    <article class="metric">
+      <div class="metric__bar" style="width: 0.75rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--space-stack-tight</code></dd></div>
+        <div><dt>value</dt><dd>0.75rem (12px)</dd></div>
+      </dl>
+      <p class="metric__desc">Label to input, title to subtitle</p>
+    </article>
+    <article class="metric">
+      <div class="metric__bar" style="width: 1rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--space-stack</code></dd></div>
+        <div><dt>value</dt><dd>1rem (16px)</dd></div>
+      </dl>
+      <p class="metric__desc">Default vertical gap</p>
+    </article>
+    <article class="metric">
+      <div class="metric__bar" style="width: 1.5rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--space-stack-loose</code></dd></div>
+        <div><dt>value</dt><dd>1.5rem (24px)</dd></div>
+      </dl>
+      <p class="metric__desc">Between card groups</p>
+    </article>
+    <article class="metric">
+      <div class="metric__bar" style="width: 2.5rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--space-section</code></dd></div>
+        <div><dt>value</dt><dd>2.5rem (40px)</dd></div>
+      </dl>
+      <p class="metric__desc">Between major page sections</p>
+    </article>
+    <article class="metric">
+      <div class="metric__bar" style="width: 4rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--space-region</code></dd></div>
+        <div><dt>value</dt><dd>4rem (64px)</dd></div>
+      </dl>
+      <p class="metric__desc">Between page regions</p>
+    </article>
+    </section>
+
+    <section class="section">
+      <h2>Radius</h2>
+
+    <article class="metric">
+      <div class="metric__box" style="border-radius: 0.5rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--radius-sm</code></dd></div>
+        <div><dt>value</dt><dd>0.5rem</dd></div>
+      </dl>
+      <p class="metric__desc">Buttons, badges, inputs, tags</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box" style="border-radius: 0.875rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--radius-md</code></dd></div>
+        <div><dt>value</dt><dd>0.875rem</dd></div>
+      </dl>
+      <p class="metric__desc">Default — cards, panels, dropdowns</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box" style="border-radius: 1.25rem;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--radius-lg</code></dd></div>
+        <div><dt>value</dt><dd>1.25rem</dd></div>
+      </dl>
+      <p class="metric__desc">Modals, sheets, page-level cards</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box" style="border-radius: 999px;"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--radius-pill</code></dd></div>
+        <div><dt>value</dt><dd>999px</dd></div>
+      </dl>
+      <p class="metric__desc">Full pill — status pills, toggle buttons</p>
+    </article>
+    </section>
+
+    <section class="section">
+      <h2>Elevation</h2>
+      <p class="lede">Shadows raise surfaces, not borders alone.</p>
+
+    <article class="metric">
+      <div class="metric__box metric__box--shadow" style="box-shadow: 0 1px 2px 0 hsl(222 47% 11% / 0.06);"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--shadow-sm</code></dd></div>
+        <div><dt>value</dt><dd><code class="break">0 1px 2px 0 hsl(222 47% 11% / 0.06)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Card at rest</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box metric__box--shadow" style="box-shadow: 0 2px 8px -1px hsl(222 47% 11% / 0.08), 0 1px 3px -1px hsl(222 47% 11% / 0.06);"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--shadow-md</code></dd></div>
+        <div><dt>value</dt><dd><code class="break">0 2px 8px -1px hsl(222 47% 11% / 0.08), 0 1px 3px -1px hsl(222 47% 11% / 0.06)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Raised — hover cards, floating actions</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box metric__box--shadow" style="box-shadow: 0 12px 28px -8px hsl(222 47% 11% / 0.16), 0 4px 10px -4px hsl(222 47% 11% / 0.08);"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--shadow-lg</code></dd></div>
+        <div><dt>value</dt><dd><code class="break">0 12px 28px -8px hsl(222 47% 11% / 0.16), 0 4px 10px -4px hsl(222 47% 11% / 0.08)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Overlays — popovers, dropdowns, modals</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box metric__box--shadow" style="box-shadow: 0 0 0 3px hsl(var(--ring) / 0.5);"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--shadow-focus</code></dd></div>
+        <div><dt>value</dt><dd><code class="break">0 0 0 3px hsl(var(--ring) / 0.5)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Keyboard focus ring. 50% opacity ensures ≥3:1 contrast against all backgrounds.</p>
+    </article>
+    <article class="metric">
+      <div class="metric__box metric__box--shadow" style="box-shadow: inset 0 -1px 0 0 hsl(var(--border));"></div>
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--shadow-inset</code></dd></div>
+        <div><dt>value</dt><dd><code class="break">inset 0 -1px 0 0 hsl(var(--border))</code></dd></div>
+      </dl>
+      <p class="metric__desc">Section divider within a surface</p>
+    </article>
+    </section>
+
+    <section class="section">
+      <h2>Interaction state</h2>
+
+    <article class="metric">
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--state-hover</code></dd></div>
+        <div><dt>value</dt><dd><code>hsl(var(--foreground) / 0.04)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Generic hover background tint</p>
+    </article>
+    <article class="metric">
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--state-active</code></dd></div>
+        <div><dt>value</dt><dd><code>hsl(var(--foreground) / 0.08)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Generic pressed background tint</p>
+    </article>
+    <article class="metric">
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--state-focus</code></dd></div>
+        <div><dt>value</dt><dd><code>var(--shadow-focus)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Keyboard focus ring</p>
+    </article>
+    <article class="metric">
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--state-disabled</code></dd></div>
+        <div><dt>value</dt><dd><code>0.5</code></dd></div>
+      </dl>
+      <p class="metric__desc">Disabled element opacity</p>
+    </article>
+    <article class="metric">
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--state-selected-bg</code></dd></div>
+        <div><dt>value</dt><dd><code>hsl(var(--primary) / 0.04)</code></dd></div>
+      </dl>
+      <p class="metric__desc">Selected item background (primary at 4%)</p>
+    </article>
+    <article class="metric">
+      <dl class="metric__meta">
+        <div><dt>name</dt><dd><code>--state-selected-border</code></dd></div>
+        <div><dt>value</dt><dd><code>hsl(var(--primary))</code></dd></div>
+      </dl>
+      <p class="metric__desc">Selected item border accent (1.5px primary)</p>
+    </article>
+    </section>
+
+    <section class="section">
+      <h2>Motion</h2>
+
+  <div class="subgroup">
+    <h4>Duration</h4>
+
+      <article class="metric metric--inline">
+        <code>--duration-fast</code>
+        <span>120ms</span>
+        <p>Toggles, button taps, checkbox</p>
+      </article>
+      <article class="metric metric--inline">
+        <code>--duration-base</code>
+        <span>200ms</span>
+        <p>Hover, focus, small transitions</p>
+      </article>
+      <article class="metric metric--inline">
+        <code>--duration-slow</code>
+        <span>320ms</span>
+        <p>Enter / exit, modals, panels</p>
+      </article>
+  </div>
+  <div class="subgroup">
+    <h4>Easing</h4>
+
+      <article class="metric metric--inline">
+        <code>--ease-standard</code>
+        <span>cubic-bezier(0.2, 0, 0, 1)</span>
+        <p>All general transitions</p>
+      </article>
+      <article class="metric metric--inline">
+        <code>--ease-exit</code>
+        <span>cubic-bezier(0.4, 0, 1, 1)</span>
+        <p>Dismiss, close, fade-out</p>
+      </article>
+  </div>
+    </section>
+
+    <section class="section">
+      <h2>Z-index</h2>
+
+    <article class="metric metric--inline">
+      <code>--z-base</code>
+      <span>0</span>
+      <p>Default document flow</p>
+    </article>
+    <article class="metric metric--inline">
+      <code>--z-sticky</code>
+      <span>100</span>
+      <p>Sticky headers, footer bars, step indicators</p>
+    </article>
+    <article class="metric metric--inline">
+      <code>--z-dropdown</code>
+      <span>200</span>
+      <p>Dropdowns, select menus, autocomplete</p>
+    </article>
+    <article class="metric metric--inline">
+      <code>--z-overlay</code>
+      <span>300</span>
+      <p>Modals, sheets, the avatar menu</p>
+    </article>
+    <article class="metric metric--inline">
+      <code>--z-toast</code>
+      <span>400</span>
+      <p>Toast notifications, alerts above everything</p>
+    </article>
+    </section>
+
+    <section class="section">
+      <h2>Components</h2>
+      <p class="lede">A representative sample of the most-used recipes. Full source lives in <code>src/design-system/components.ts</code>.</p>
+
+  <section class="group">
+    <h3 class="group__title">Buttons</h3>
+    <div class="row">
+      <button class="btn btn--primary">Primary</button>
+      <button class="btn btn--secondary">Secondary</button>
+      <button class="btn btn--ghost">Ghost</button>
+      <button class="btn btn--destructive">Destructive</button>
+      <button class="btn btn--agent">Agent</button>
+      <button class="btn btn--primary" disabled>Disabled</button>
+    </div>
+    <div class="row">
+      <button class="btn btn--status-pass">Pass</button>
+      <button class="btn btn--status-review">Review</button>
+      <button class="btn btn--status-fail">Fail</button>
+      <button class="btn btn--status-info">Info</button>
+    </div>
+  </section>
+
+  <section class="group">
+    <h3 class="group__title">Badges & pills</h3>
+    <div class="row">
+      <span class="badge badge--neutral">Neutral</span>
+      <span class="badge badge--pass">Pass</span>
+      <span class="badge badge--review">Review</span>
+      <span class="badge badge--fail">Fail</span>
+      <span class="badge badge--info">Info</span>
+      <span class="badge badge--sell">Sell</span>
+      <span class="badge badge--buy">Buy</span>
+      <span class="pill pill--qual-neutral">PUBLIC</span>
+      <span class="pill pill--qual-purple">PREFERENTIAL</span>
+      <span class="pill pill--qual-teal">STAFF</span>
+      <span class="pill pill--qual-amber">FCA PRE-BOOKED</span>
+    </div>
+  </section>
+
+  <section class="group">
+    <h3 class="group__title">Inputs</h3>
+    <div class="row row--stack">
+      <label class="field"><span>Default</span><input class="input" placeholder="Type here..."></label>
+      <label class="field"><span>Disabled</span><input class="input" placeholder="Disabled" disabled></label>
+      <label class="field"><span>Error</span><input class="input input--error" value="Invalid"></label>
+    </div>
+  </section>
+
+  <section class="group">
+    <h3 class="group__title">Cards</h3>
+    <div class="row row--cards">
+      <div class="card">
+        <h4 class="text-style-card-title">Card title</h4>
+        <p class="text-style-body-small">Default card surface using <code>--card</code> with <code>--shadow-sm</code>.</p>
+      </div>
+      <div class="card card--accent-sell">
+        <h4 class="text-style-card-title">Sell line</h4>
+        <p class="text-style-body-small">Left border accent in <code>--txn-sell</code>.</p>
+      </div>
+      <div class="card card--accent-buy">
+        <h4 class="text-style-card-title">Buy line</h4>
+        <p class="text-style-body-small">Left border accent in <code>--txn-buy</code>.</p>
+      </div>
+    </div>
+  </section>
+    </section>
+  </main>
+  <script>
+    (function () {
+      var root = document.documentElement;
+      var btn = document.getElementById('themeToggle');
+      function apply(dark) {
+        root.classList.toggle('dark', dark);
+        root.style.colorScheme = dark ? 'dark' : 'light';
+        btn.textContent = dark ? 'Switch to light mode' : 'Toggle dark mode';
+      }
+      var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      apply(prefersDark);
+      btn.addEventListener('click', function () { apply(!root.classList.contains('dark')); });
+    })();
+  </script>
+</body>
+</html>

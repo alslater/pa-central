@@ -1,0 +1,43 @@
+[project]
+name = "pa-central-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0",
+    "cryptography>=42.0.0",
+    "redis[asyncio]>=5.0.0",
+    "croniter>=2.0.0",
+    "uvicorn[standard]>=0.29.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "pydantic[email]>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.0.0",
+    "python-multipart>=0.0.9",
+    "aiosqlite>=0.20.0",
+    "greenlet>=3.0.0",
+    "httpx>=0.27.0",
+    "psycopg2-binary>=2.9.0",
+    "pyotp>=2.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "anyio>=4.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.4.0",
+    "boto3>=1.34.0",
+    "aiosmtpd>=1.4.0",
+    "freezegun>=1.5.0",
+    "docker>=7.0.0",
+]
+
+[tool.fastapi]
+app = "app.main:app"
+
+[tool.uv]
+package = false
+required-version = ">=0.11.18"

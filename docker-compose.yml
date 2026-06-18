@@ -1,0 +1,86 @@
+# docker-compose.yml — development configuration
+#
+# NOT suitable for production use:
+#   - DEBUG=true disables TOTP (convenient locally, insecure in prod)
+#   - SECRET_KEY and SETTINGS_ENCRYPTION_KEY must be set in .env (see README)
+#   - SQLite is used by default (no horizontal scaling, no concurrent writers)
+#   - No TLS termination — traffic is plain HTTP
+#
+# For production, supply strong random keys, use PostgreSQL, put the app
+# behind a reverse proxy with TLS, and set DEBUG=false.
+
+services:
+
+  # ── PA Central server ─────────────────────────────────────────────────────
+  # Default storage: SQLite (zero external dependencies, good for a single dev machine).
+  # Switch to PostgreSQL by running with --profile pg and setting DATABASE_URL (see below).
+  pa-central:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"       # API + UI — http://localhost:8000
+    environment:
+      # WARNING: change both keys before exposing this to any network.
+      # Generate with: python3 -c "import secrets; print(secrets.token_hex(32))"
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in your environment or .env file}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:?Set SETTINGS_ENCRYPTION_KEY in your environment or .env file}
+
+      # SQLite by default. Override with a postgresql+asyncpg:// URL when using --profile pg.
+      DATABASE_URL: ${DATABASE_URL:-sqlite+aiosqlite:///./data/pa_central.db}
+
+      # If set, creates admin@localhost with this password on first startup.
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+
+      # DEBUG=true disables TOTP so you can log in without an authenticator app.
+      # Set to false (or remove) for any shared or production environment.
+      DEBUG: ${DEBUG:-true}
+    volumes:
+      - pa_central_data:/app/data   # persists the SQLite file across restarts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/docs')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── PostgreSQL (optional) ─────────────────────────────────────────────────
+  # Activate with: docker compose --profile pg up
+  # Then set DATABASE_URL so pa-central connects to it:
+  #   DATABASE_URL=postgresql+asyncpg://pa_central:pa_central_dev@postgres/pa_central
+  # The default password below is fine for local dev; use a strong password in production.
+  postgres:
+    image: postgres:16-alpine
+    profiles: [pg]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pa_central
+      POSTGRES_USER: pa_central
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pa_central_dev}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pa_central"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Scan task image (local Docker scanning) ───────────────────────────────
+  # This service exists only to build the scan task image locally.
+  # It exits immediately — it is never run as a long-lived container.
+  #
+  # Usage:
+  #   1. Build:  docker compose --profile local-scan build scan-task
+  #   2. Enable: set LOCAL_DOCKER_SCAN=true in pa-central's environment (or .env)
+  #              set UVICORN_HOST=0.0.0.0 so scan containers can reach the server
+  #              set FLEET_SYSTEM_API_KEY to any dev value
+  #   3. Trigger a scan from the Repo Scans page — the container posts results back
+  #      via host.docker.internal:8000 automatically.
+  scan-task:
+    build:
+      context: docker/scan_task
+    image: pa-central-scan-task:latest
+    profiles: [local-scan]
+    command: ["true"]   # exits immediately — build-only service
+
+volumes:
+  pa_central_data:
+  pg_data:
