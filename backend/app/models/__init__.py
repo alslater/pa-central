@@ -312,7 +312,8 @@ class RepoScan(Base):
     cron_schedule: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cron_timezone: Mapped[str | None] = mapped_column(String(100), nullable=True)
     pa_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    extra_args: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    scan_flags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subfolder: Mapped[str | None] = mapped_column(String(500), nullable=True)
     min_notify_severity: Mapped[AlertSeverity] = mapped_column(
         Enum(AlertSeverity), default=AlertSeverity.medium, nullable=False
     )

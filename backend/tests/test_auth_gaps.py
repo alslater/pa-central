@@ -319,6 +319,36 @@ class TestDashboardScoping:
         assert r.json()["total_hosts"] >= 1
 
 
+# ── /api/config-templates/validate ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestConfigValidateAuthGaps:
+    async def test_validate_requires_auth(self, client):
+        r = await client.post("/api/config-templates/validate", json={"toml_content": ""})
+        assert r.status_code == 401
+
+    async def test_validate_viewer_allowed(self, client, viewer_token):
+        r = await client.post(
+            "/api/config-templates/validate",
+            json={"toml_content": ""},
+            headers=auth(viewer_token),
+        )
+        assert r.status_code == 200
+
+
+# ── /api/repo-scans/scan-options ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestScanOptionsAuthGaps:
+    async def test_scan_options_requires_auth(self, client):
+        r = await client.get("/api/repo-scans/scan-options")
+        assert r.status_code == 401
+
+    async def test_scan_options_viewer_allowed(self, client, viewer_token):
+        r = await client.get("/api/repo-scans/scan-options", headers=auth(viewer_token))
+        assert r.status_code == 200
+
+
 # ── JWT sub type safety ────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

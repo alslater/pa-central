@@ -85,3 +85,152 @@ class TestRepoScanTrigger:
         )
         r = await client.post(f"/api/repo-scans/{scan['id']}/trigger", headers=auth(admin_token))
         assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+class TestScanOptions:
+    async def test_scan_options_returns_expected_shape(self, client, operator_token):
+        r = await client.get("/api/repo-scans/scan-options", headers=auth(operator_token))
+        assert r.status_code == 200
+        data = r.json()
+        assert "flags" in data
+        assert "exclusions" in data
+        assert isinstance(data["flags"], list)
+        assert isinstance(data["exclusions"], list)
+
+    async def test_scan_options_includes_known_flags(self, client, operator_token):
+        r = await client.get("/api/repo-scans/scan-options", headers=auth(operator_token))
+        assert r.status_code == 200
+        names = {f["name"] for f in r.json()["flags"]}
+        assert "scan_unpinned" in names
+        assert "scan_installed" in names
+        assert "requirements" in names
+
+    async def test_scan_options_flag_shape(self, client, operator_token):
+        r = await client.get("/api/repo-scans/scan-options", headers=auth(operator_token))
+        flag = next(f for f in r.json()["flags"] if f["name"] == "scan_unpinned")
+        assert flag["cli_flag"] == "--scan-unpinned"
+        assert flag["type"] == "bool"
+        assert isinstance(flag["help"], str)
+
+    async def test_scan_options_exclusions_include_scan_installed_requirements(self, client, operator_token):
+        r = await client.get("/api/repo-scans/scan-options", headers=auth(operator_token))
+        assert ["scan_installed", "requirements"] in r.json()["exclusions"]
+
+
+@pytest.mark.asyncio
+class TestSubfolderValidation:
+    """subfolder must be a relative path with no .. segments."""
+
+    async def test_create_accepts_valid_subfolder(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "backend"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["subfolder"] == "backend"
+
+    async def test_create_accepts_nested_subfolder(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "a/b/c"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 201, r.text
+
+    async def test_create_rejects_absolute_path(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "/etc/passwd"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_create_rejects_dotdot(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "../sibling"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_create_rejects_embedded_dotdot(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "a/../../b"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_patch_rejects_absolute_path(self, client, admin_token):
+        created = (await client.post("/api/repo-scans", json=REPO_PAYLOAD, headers=auth(admin_token))).json()
+        r = await client.patch(
+            f"/api/repo-scans/{created['id']}",
+            json={"subfolder": "/tmp"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_patch_rejects_dotdot(self, client, admin_token):
+        created = (await client.post("/api/repo-scans", json=REPO_PAYLOAD, headers=auth(admin_token))).json()
+        r = await client.patch(
+            f"/api/repo-scans/{created['id']}",
+            json={"subfolder": ".."},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_patch_accepts_valid_subfolder(self, client, admin_token):
+        created = (await client.post("/api/repo-scans", json=REPO_PAYLOAD, headers=auth(admin_token))).json()
+        r = await client.patch(
+            f"/api/repo-scans/{created['id']}",
+            json={"subfolder": "src/app"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["subfolder"] == "src/app"
+
+    async def test_create_normalizes_whitespace_only_to_none(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "   "},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["subfolder"] is None
+
+    async def test_create_normalizes_empty_string_to_none(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": ""},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["subfolder"] is None
+
+    async def test_create_normalizes_dot_to_none(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "."},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["subfolder"] is None
+
+    async def test_create_trims_whitespace_from_valid_subfolder(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "  backend  "},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["subfolder"] == "backend"
+
+    async def test_create_rejects_backslash(self, client, admin_token):
+        r = await client.post(
+            "/api/repo-scans",
+            json={**REPO_PAYLOAD, "subfolder": "a\\b"},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422, r.text

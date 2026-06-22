@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any  # noqa — used by field_validator
+from typing import Any, Literal  # noqa — used by field_validator
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
@@ -266,6 +266,32 @@ class ConfigAssignOut(OrmBase):
     assigned_at: datetime
 
 
+# ── Config template lint ──────────────────────────────────────────────────────
+
+class LintResult(BaseModel):
+    valid: bool
+    errors: list[str]
+    warnings: list[str]
+
+
+class ValidateRequest(BaseModel):
+    toml_content: str
+
+
+# ── Scan options ──────────────────────────────────────────────────────────────
+
+class ScanFlag(BaseModel):
+    name: str
+    cli_flag: str
+    help: str
+    type: Literal["bool", "str"]
+
+
+class ScanOptions(BaseModel):
+    flags: list[ScanFlag]
+    exclusions: list[list[str]]
+
+
 # ── Cooldown ──────────────────────────────────────────────────────────────────
 
 class CooldownCreate(BaseModel):
@@ -340,6 +366,23 @@ class RepoCredentialOut(OrmBase):
     updated_at: datetime
 
 
+def _validate_subfolder(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip()
+    if not v or v == ".":
+        return None
+    if len(v) > 500:
+        raise ValueError("subfolder must be 500 characters or fewer")
+    if "\\" in v:
+        raise ValueError("subfolder must use forward slashes")
+    from pathlib import PurePosixPath
+    p = PurePosixPath(v)
+    if p.is_absolute() or ".." in p.parts:
+        raise ValueError("subfolder must be a relative path with no .. segments")
+    return v
+
+
 class RepoScanCreate(BaseModel):
     name: str
     url: str
@@ -351,7 +394,13 @@ class RepoScanCreate(BaseModel):
     notify_recipients: list[str] | None = None
     config_template_id: int | None = None
     is_enabled: bool = True
-    extra_args: str | None = None
+    scan_flags: str | None = Field(None, max_length=4096)
+    subfolder: str | None = None
+
+    @field_validator("subfolder")
+    @classmethod
+    def subfolder_not_absolute(cls, v: str | None) -> str | None:
+        return _validate_subfolder(v)
 
 
 class RepoScanUpdate(BaseModel):
@@ -365,7 +414,13 @@ class RepoScanUpdate(BaseModel):
     notify_recipients: list[str] | None = None
     config_template_id: int | None = None
     is_enabled: bool | None = None
-    extra_args: str | None = None
+    scan_flags: str | None = Field(None, max_length=4096)
+    subfolder: str | None = None
+
+    @field_validator("subfolder")
+    @classmethod
+    def subfolder_not_absolute(cls, v: str | None) -> str | None:
+        return _validate_subfolder(v)
 
 
 class RepoScanOut(OrmBase):
@@ -377,7 +432,8 @@ class RepoScanOut(OrmBase):
     cron_schedule: str | None
     cron_timezone: str | None
     pa_version: str | None
-    extra_args: str | None
+    scan_flags: str | None
+    subfolder: str | None
     min_notify_severity: AlertSeverity
     notify_recipients: list[str] | None
     config_template_id: int | None

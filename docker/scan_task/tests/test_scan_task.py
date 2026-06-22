@@ -161,27 +161,32 @@ def test_clone_repo_failure_raises():
             )
 
 
+def _fake_run(output='{"findings": [], "sources": []}', returncode=0):
+    return MagicMock(returncode=returncode, stdout=output, stderr="")
+
+
 def test_run_pa_scan_parses_json_output(tmp_path):
     findings = [{"package": "requests", "severity": "high", "advisory_id": "GHSA-x"}]
-    output = json.dumps({"findings": findings})
+    output = json.dumps({"findings": findings, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout=output, stderr="")
-        count, result = scan_task.run_pa_scan(tmp_path, "")
+        count, result, sources = scan_task.run_pa_scan(tmp_path, "")
     assert count == 1
     assert result[0]["package"] == "requests"
+    assert sources == []
 
 
 def test_run_pa_scan_empty_findings(tmp_path):
     with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"findings": []}', stderr="")
-        count, result = scan_task.run_pa_scan(tmp_path, "")
+        mock_run.return_value = _fake_run()
+        count, result, sources = scan_task.run_pa_scan(tmp_path, "")
     assert count == 0
     assert result == []
 
 
 def test_run_pa_scan_passes_config_flag(tmp_path):
     with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"findings": []}', stderr="")
+        mock_run.return_value = _fake_run()
         scan_task.run_pa_scan(tmp_path, "[osv]\ncache_ttl_hours = 12")
         cmd = " ".join(mock_run.call_args[0][0])
         assert "--config" in cmd
@@ -189,10 +194,103 @@ def test_run_pa_scan_passes_config_flag(tmp_path):
 
 def test_run_pa_scan_no_config_flag_when_empty(tmp_path):
     with patch("subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"findings": []}', stderr="")
+        mock_run.return_value = _fake_run()
         scan_task.run_pa_scan(tmp_path, "")
         cmd = " ".join(mock_run.call_args[0][0])
         assert "--config" not in cmd
+
+
+# ── subfolder path handling ────────────────────────────────────────────────────
+
+def test_run_pa_scan_no_subfolder_uses_repo_root(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _fake_run()
+        scan_task.run_pa_scan(repo, "")
+    cmd = mock_run.call_args[0][0]
+    assert cmd[-1] == str(repo.resolve())
+
+
+def test_run_pa_scan_subfolder_appended_as_path(tmp_path):
+    repo = tmp_path / "repo"
+    sub = repo / "backend"
+    sub.mkdir(parents=True)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _fake_run()
+        scan_task.run_pa_scan(repo, "", subfolder="backend")
+    cmd = mock_run.call_args[0][0]
+    assert cmd[-1] == str(sub.resolve())
+
+
+def test_run_pa_scan_nested_subfolder(tmp_path):
+    repo = tmp_path / "repo"
+    sub = repo / "a" / "b"
+    sub.mkdir(parents=True)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _fake_run()
+        scan_task.run_pa_scan(repo, "", subfolder="a/b")
+    cmd = mock_run.call_args[0][0]
+    assert cmd[-1] == str(sub.resolve())
+
+
+def test_run_pa_scan_dotdot_subfolder_raises(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(RuntimeError, match="escapes the repository"):
+        scan_task.run_pa_scan(repo, "", subfolder="..")
+
+
+def test_run_pa_scan_symlink_escaping_repo_raises(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = repo / "escape"
+    link.symlink_to(outside)
+    with pytest.raises(RuntimeError, match="escapes the repository"):
+        scan_task.run_pa_scan(repo, "", subfolder="escape")
+
+
+# ── scan_flags passthrough ─────────────────────────────────────────────────────
+
+def test_run_pa_scan_flags_appended_before_path(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _fake_run()
+        scan_task.run_pa_scan(repo, "", scan_flags="--scan-unpinned")
+    cmd = mock_run.call_args[0][0]
+    unpinned_idx = cmd.index("--scan-unpinned")
+    path_idx = cmd.index(str(repo.resolve()))
+    assert unpinned_idx < path_idx
+
+
+def test_run_pa_scan_non_json_output_raises_runtime_error(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _fake_run(output="Traceback (most recent call last):\n  crash")
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            scan_task.run_pa_scan(repo, "")
+
+
+def test_run_pa_scan_invalid_scan_flags_raises_runtime_error(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pytest.raises(RuntimeError, match="invalid scan_flags quoting"):
+        scan_task.run_pa_scan(repo, "", scan_flags="--requirements='unterminated")
+
+
+def test_run_pa_scan_format_json_always_present(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = _fake_run()
+        scan_task.run_pa_scan(repo, "", scan_flags="--scan-unpinned")
+    cmd = mock_run.call_args[0][0]
+    assert "--format" in cmd
+    assert "json" in cmd
 
 
 def test_main_pip_failure_posts_failed_result():
@@ -235,7 +333,7 @@ def test_main_success_posts_success_result(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(1, findings)), \
+         patch("scan_task.run_pa_scan", return_value=(1, findings, [])), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -250,7 +348,7 @@ def test_main_cleans_up_tempdir_on_success(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [])), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [])), \
          patch("scan_task.post_result"), \
          patch("shutil.rmtree") as mock_rm, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):

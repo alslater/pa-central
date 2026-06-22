@@ -96,5 +96,6 @@ async def build_scan_task_env(scan: Any, result_id: int, credential: Any = None)
         "FLEET_API_URL": app_settings.fleet_base_url,
         "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
         "PA_CONFIG_TOML": "",  # filled by caller if config template assigned
-        "PA_EXTRA_ARGS": getattr(scan, 'extra_args', None) or "",
+        "PA_SCAN_FLAGS": getattr(scan, 'scan_flags', None) or "",
+        "PA_SUBFOLDER": getattr(scan, 'subfolder', None) or "",
     }

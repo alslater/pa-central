@@ -221,3 +221,76 @@ class TestDefaultTemplate:
         defaults = [t for t in r.json() if t["is_default"]]
         assert len(defaults) == 1
         assert defaults[0]["id"] == tmpl["id"]
+
+
+@pytest.mark.asyncio
+class TestConfigTemplateValidate:
+    async def test_validate_valid_toml_returns_valid(self, client, operator_token):
+        r = await client.post(
+            "/api/config-templates/validate",
+            json={"toml_content": "[osv]\ncache_ttl_hours = 24"},
+            headers=auth(operator_token),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["valid"] is True
+        assert data["errors"] == []
+
+    async def test_validate_bad_toml_returns_errors(self, client, operator_token):
+        r = await client.post(
+            "/api/config-templates/validate",
+            json={"toml_content": "[bad toml"},
+            headers=auth(operator_token),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["valid"] is False
+        assert len(data["errors"]) >= 1
+
+    async def test_validate_unknown_key_returns_warning(self, client, operator_token):
+        r = await client.post(
+            "/api/config-templates/validate",
+            json={"toml_content": "bogus_key = true"},
+            headers=auth(operator_token),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["valid"] is True
+        assert any("bogus_key" in w for w in data["warnings"])
+
+    async def test_validate_rejects_oversized_payload(self, client, operator_token):
+        oversized = "# " + "x" * (64 * 1024)
+        r = await client.post(
+            "/api/config-templates/validate",
+            json={"toml_content": oversized},
+            headers=auth(operator_token),
+        )
+        assert r.status_code == 413
+
+    async def test_create_response_shape_matches_get(self, client, operator_token):
+        r = await client.post(
+            "/api/config-templates",
+            json={"name": "lint-test", "toml_content": "[osv]\ncache_ttl_hours = 24"},
+            headers=auth(operator_token),
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert "lint" not in data
+        assert "toml_content" in data
+
+    async def test_update_response_shape_matches_get(self, client, operator_token):
+        create = await client.post(
+            "/api/config-templates",
+            json={"name": "lint-patch-test", "toml_content": "[osv]\ncache_ttl_hours = 24"},
+            headers=auth(operator_token),
+        )
+        tmpl_id = create.json()["id"]
+        r = await client.patch(
+            f"/api/config-templates/{tmpl_id}",
+            json={"toml_content": "bogus_key = true"},
+            headers=auth(operator_token),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "lint" not in data
+        assert "toml_content" in data

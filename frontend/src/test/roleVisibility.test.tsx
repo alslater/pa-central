@@ -243,7 +243,7 @@ describe('RepoScans page — action buttons', () => {
     id: 1, name: 'api-repo', url: 'https://github.com/org/api', branch: 'main',
     is_enabled: true, cron_schedule: null, cron_timezone: null,
     credential_id: null, config_template_id: null, pa_version: null,
-    extra_args: null, min_notify_severity: 'medium' as const,
+    scan_flags: null, subfolder: null, min_notify_severity: 'medium' as const,
     notify_recipients: [], last_scan_at: null,
     created_at: '2024-01-01T00:00:00Z',
   }
