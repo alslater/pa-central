@@ -5,11 +5,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models import ConfigTemplate, ConfigAssignment, Host, User
 from app.schemas import (
-    ConfigTemplateCreate, ConfigTemplateUpdate, ConfigTemplateOut, ConfigAssignOut
+    ConfigTemplateCreate, ConfigTemplateUpdate, ConfigTemplateOut,
+    ConfigAssignOut, ValidateRequest, LintResult,
 )
 from app.api.deps import get_current_user, require_operator, require_admin
+from app.services.config_lint import lint_toml
 
 router = APIRouter(prefix="/config-templates", tags=["config"])
+
+
+_MAX_VALIDATE_BYTES = 64 * 1024  # 64 KB — well above any real config template
+
+
+@router.post("/validate", response_model=LintResult)
+async def validate_template(
+    body: ValidateRequest,
+    _: User = Depends(get_current_user),
+):
+    if len(body.toml_content.encode()) > _MAX_VALIDATE_BYTES:
+        raise HTTPException(413, detail=f"Payload exceeds maximum allowed size ({_MAX_VALIDATE_BYTES // 1024} KB)")
+    return lint_toml(body.toml_content)
 
 
 @router.get("", response_model=list[ConfigTemplateOut])
@@ -61,11 +76,14 @@ async def update_template(
 
     if "is_default" in body.model_fields_set:
         if body.is_default:
-            existing = (await db.execute(
-                select(ConfigTemplate).where(ConfigTemplate.is_default.is_(True))
-            )).scalar_one_or_none()
-            if existing and existing.id != tmpl_id:
-                existing.is_default = False
+            others = (await db.execute(
+                select(ConfigTemplate).where(
+                    ConfigTemplate.is_default.is_(True),
+                    ConfigTemplate.id != tmpl_id,
+                )
+            )).scalars().all()
+            for other in others:
+                other.is_default = False
             tmpl.is_default = True
         else:
             tmpl.is_default = False

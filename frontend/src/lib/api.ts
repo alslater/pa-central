@@ -113,7 +113,7 @@ export interface RepoScan {
   id: number; name: string; url: string; branch: string
   cron_schedule: string | null; cron_timezone: string | null; is_enabled: boolean
   credential_id: number | null
-  config_template_id: number | null; pa_version: string | null; extra_args: string | null
+  config_template_id: number | null; pa_version: string | null; scan_flags: string | null; subfolder: string | null
   min_notify_severity: AlertSeverity; notify_recipients: string[]
   last_scan_at: string | null; created_at: string; updated_at: string
 }
@@ -136,6 +136,24 @@ export interface RepoScanResultWithName extends RepoScanResult {
 export interface SystemSetting {
   key: string; value: string | null; value_type: SettingValueType
   updated_at: string; updated_by_id: number | null
+}
+
+export interface LintResult {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+export interface ScanFlag {
+  name: string
+  cli_flag: string
+  help: string
+  type: 'bool' | 'str'
+}
+
+export interface ScanOptions {
+  flags: ScanFlag[]
+  exclusions: string[][]
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -204,6 +222,10 @@ export const api = {
     assign: (tmplId: number, hostId: number) =>
       request(`/config-templates/${tmplId}/assign/${hostId}`, { method: 'POST' }),
     forHost: (hostId: number) => request<ConfigTemplate | null>(`/config-templates/for-host/${hostId}`),
+    validate: (toml_content: string, signal?: AbortSignal) =>
+      request<LintResult>('/config-templates/validate', {
+        method: 'POST', body: JSON.stringify({ toml_content }), signal,
+      }),
   },
 
   ingest: {
@@ -261,7 +283,7 @@ export const api = {
       name: string; url: string; branch: string
       credential_id?: number | null
       cron_schedule?: string | null; cron_timezone?: string | null; is_enabled?: boolean
-      config_template_id?: number | null; pa_version?: string | null; extra_args?: string | null
+      config_template_id?: number | null; pa_version?: string | null; scan_flags?: string | null; subfolder?: string | null
       min_notify_severity?: AlertSeverity; notify_recipients?: string[]
     }) => request<RepoScan>('/repo-scans', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: number, data: Partial<RepoScan>) =>
@@ -270,5 +292,6 @@ export const api = {
     trigger: (id: number) => request<RepoScanResult>(`/repo-scans/${id}/trigger`, { method: 'POST' }),
     results: (id: number) => request<RepoScanResult[]>(`/repo-scans/${id}/results`),
     allResults: (limit?: number) => request<RepoScanResultWithName[]>(`/repo-scans/results${limit ? `?limit=${limit}` : ''}`),
+    scanOptions: () => request<ScanOptions>('/repo-scans/scan-options'),
   },
 }

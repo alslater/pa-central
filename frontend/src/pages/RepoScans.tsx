@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
-  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType,
+  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions,
 } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { useAuth } from '@/hooks/useAuth'
@@ -8,6 +8,7 @@ import { Card, Button, Input, Select, Modal, useToast, Empty, RepoScanStatusBadg
 import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settings2 } from 'lucide-react'
 import { CronField } from '@/components/CronField'
 import { TimezoneField } from '@/components/TimezoneField'
+import { parseScanArgs, assembleScanArgs, compileFlags, scanArgsReducer } from '@/lib/scanArgs'
 
 const SEV_OPTIONS: AlertSeverity[] = ['info', 'low', 'warning', 'medium', 'high', 'critical']
 const CRED_OPTIONS: CredentialType[] = ['none', 'https_token', 'ssh_key']
@@ -260,15 +261,134 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
   )
 }
 
+// ── Structured scan args field ────────────────────────────────────────────────
+
+// ── ScanArgsField component ───────────────────────────────────────────────────
+//
+// UNCONTROLLED after mount: defaultScanFlags seeds state once, then the
+// component owns bools/strs internally. External resets MUST use a key prop
+// that changes when the source record changes (e.g. key={scan.id}).
+// Do NOT remove the key without replacing it with a controlled sync mechanism.
+
+
+function ScanArgsField({
+  options,
+  defaultScanFlags,
+  onChange,
+}: {
+  options: ScanOptions
+  /** One-time seed. To reset from outside, remount via a changed key prop. */
+  defaultScanFlags: string
+  onChange: (assembled: string) => void
+}) {
+  // compiledFlags is derived from options.flags which is stable after mount.
+  const compiledFlags = useMemo(() => compileFlags(options.flags), [options.flags])
+
+  // useReducer lazy initializer: parse runs exactly once per mount.
+  const [{ bools, strs }, dispatch] = useReducer(
+    scanArgsReducer,
+    { defaultScanFlags, compiledFlags },
+    ({ defaultScanFlags, compiledFlags }) => parseScanArgs(defaultScanFlags, compiledFlags),
+  )
+
+  const flagByName = useMemo(
+    () => new Map(options.flags.map((f: ScanFlag) => [f.name, f])),
+    [options.flags],
+  )
+
+  // Store onChange in a ref so the effect below doesn't need it as a dependency.
+  // This avoids render loops when callers pass inline lambdas.
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+
+  // Track the last emitted string so we only call onChange when the value changes,
+  // avoiding redundant parent state updates (including the no-op on initial mount).
+  // Seeded with the initial assembled value so mount doesn't fire a redundant update.
+  const lastEmittedRef = useRef(assembleScanArgs(bools, strs, options.flags))
+
+  // Call onChange after every state change with the latest assembled value.
+  // useReducer guarantees bools/strs are from the most recent committed state.
+  // options.flags is stable after mount (component is uncontrolled, key={scan.id} resets it).
+  useEffect(() => {
+    const assembled = assembleScanArgs(bools, strs, options.flags)
+    if (assembled === lastEmittedRef.current) return
+    lastEmittedRef.current = assembled
+    onChangeRef.current(assembled)
+  }, [bools, strs, options.flags])
+
+  const isExcluded = (flagName: string) => {
+    for (const pair of options.exclusions) {
+      if (!pair.includes(flagName)) continue
+      const other = pair.find(p => p !== flagName)
+      if (!other) continue
+      const otherFlag = flagByName.get(other)
+      if (!otherFlag) continue
+      if (otherFlag.type === 'bool' && bools[other]) return true
+      if (otherFlag.type === 'str' && other in strs) return true
+    }
+    return false
+  }
+
+  const toggleBool = (name: string) => {
+    dispatch({ type: 'toggle_bool', name, exclusions: options.exclusions, flagByName })
+  }
+
+  const setStr = (name: string, val: string) => {
+    dispatch({ type: 'set_str', name, val, exclusions: options.exclusions, flagByName })
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>Scan options</span>
+      {options.flags.map((flag: ScanFlag) => {
+        const excluded = isExcluded(flag.name)
+        if (flag.type === 'bool') {
+          return (
+            <div key={flag.name} style={{ opacity: excluded ? 0.4 : 1 }}>
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 13, cursor: excluded ? 'not-allowed' : 'pointer',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={!!bools[flag.name]}
+                  disabled={excluded}
+                  onChange={() => toggleBool(flag.name)}
+                />
+                <span>{flag.cli_flag}</span>
+              </label>
+              {flag.help && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, marginLeft: 22 }}>{flag.help}</div>}
+            </div>
+          )
+        }
+        return (
+          <div key={flag.name} style={{ opacity: excluded ? 0.4 : 1 }}>
+            <Input
+              label={flag.cli_flag}
+              value={strs[flag.name] ?? ''}
+              disabled={excluded}
+              onChange={e => setStr(flag.name, e.target.value)}
+              placeholder={flag.help}
+            />
+            {flag.help && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{flag.help}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Scan card / edit form ──────────────────────────────────────────────────────
 
 function ScanCard({
-  scan, credentials, templates, defaultTz, isOperator, isAdmin, onUpdate, onDelete, onTrigger,
+  scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, isOperator, isAdmin, onUpdate, onDelete, onTrigger,
 }: {
   scan: RepoScan
   credentials: RepoCredential[]
   templates: ConfigTemplate[]
   defaultTz: string | null
+  scanOptions: ScanOptions | null
+  scanOptionsVersion: number
   isOperator: boolean
   isAdmin: boolean
   onUpdate: (id: number, patch: Partial<RepoScan>) => void
@@ -365,7 +485,7 @@ function ScanCard({
 
       {editing && isOperator && (
         <div style={{ borderTop: '1px solid var(--border)' }}>
-          <EditForm scan={scan} credentials={credentials} templates={templates} defaultTz={defaultTz} onSave={patch => { onUpdate(scan.id, patch); setEditing(false) }} />
+          <EditForm scan={scan} credentials={credentials} templates={templates} defaultTz={defaultTz} scanOptions={scanOptions} scanOptionsVersion={scanOptionsVersion} onSave={patch => { onUpdate(scan.id, patch); setEditing(false) }} />
         </div>
       )}
 
@@ -380,12 +500,14 @@ function ScanCard({
 
 
 function EditForm({
-  scan, credentials, templates, defaultTz, onSave,
+  scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, onSave,
 }: {
   scan: RepoScan
   credentials: RepoCredential[]
   templates: ConfigTemplate[]
   defaultTz: string | null
+  scanOptions: ScanOptions | null
+  scanOptionsVersion: number
   onSave: (patch: Partial<RepoScan>) => void
 }) {
   const [form, setForm] = useState({
@@ -398,7 +520,8 @@ function EditForm({
     credential_id: scan.credential_id ?? '',
     config_template_id: scan.config_template_id ?? '',
     pa_version: scan.pa_version ?? '',
-    extra_args: scan.extra_args ?? '',
+    scan_flags: scan.scan_flags ?? '',
+    subfolder: scan.subfolder ?? '',
     min_notify_severity: scan.min_notify_severity,
     notify_recipients: (scan.notify_recipients ?? []).join(', '),
   })
@@ -416,7 +539,8 @@ function EditForm({
       credential_id: form.credential_id ? Number(form.credential_id) : null,
       config_template_id: form.config_template_id ? Number(form.config_template_id) : null,
       pa_version: form.pa_version || null,
-      extra_args: form.extra_args || null,
+      scan_flags: form.scan_flags || null,
+      subfolder: form.subfolder || null,
       min_notify_severity: form.min_notify_severity as AlertSeverity,
       notify_recipients: form.notify_recipients.split(',').map(s => s.trim()).filter(Boolean),
     })
@@ -433,7 +557,22 @@ function EditForm({
         </div>
         <TimezoneField value={form.cron_timezone} onChange={v => set('cron_timezone', v)} placeholder={`default: ${defaultTz ?? 'UTC'}`} />
         <Input label="PA version" placeholder="latest" value={form.pa_version} onChange={e => set('pa_version', e.target.value)} />
-        <Input label="Extra args" placeholder="e.g. --requirements requirements-dev.txt" value={form.extra_args} onChange={e => set('extra_args', e.target.value)} />
+        <Input label="Subfolder" placeholder="e.g. backend (leave blank to scan repo root)" value={form.subfolder} onChange={e => set('subfolder', e.target.value)} />
+        {scanOptions ? (
+          <div style={{ gridColumn: 'span 2' }}>
+            {/* key remounts on scan change or if scanOptions is ever refreshed */}
+            <ScanArgsField
+              key={`${scan.id}-${scanOptionsVersion}`}
+              options={scanOptions}
+              defaultScanFlags={form.scan_flags}
+              onChange={v => set('scan_flags', v)}
+            />
+          </div>
+        ) : (
+          <div style={{ gridColumn: 'span 2', fontSize: 12, color: 'var(--text-muted)' }}>
+            Scan options unavailable — save without changes or reload to edit scan flags.
+          </div>
+        )}
         <Select label="Credential" value={String(form.credential_id)} onChange={e => set('credential_id', e.target.value)}>
           <option value="">— none —</option>
           {credentials.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -459,17 +598,19 @@ function EditForm({
 }
 
 function AddModal({
-  credentials, templates, defaultTz, onClose, onCreate,
+  credentials, templates, defaultTz, scanOptions, scanOptionsVersion, onClose, onCreate,
 }: {
   credentials: RepoCredential[]
   templates: ConfigTemplate[]
   defaultTz: string | null
+  scanOptions: ScanOptions | null
+  scanOptionsVersion: number
   onClose: () => void
   onCreate: (data: Parameters<typeof api.repoScans.create>[0]) => void
 }) {
   const [form, setForm] = useState({
     name: '', url: '', branch: 'main', cron_schedule: '', cron_timezone: '',
-    credential_id: '', config_template_id: '', pa_version: '', extra_args: '',
+    credential_id: '', config_template_id: '', pa_version: '', scan_flags: '', subfolder: '',
     min_notify_severity: 'medium' as AlertSeverity,
     notify_recipients: '', is_enabled: true,
   })
@@ -484,7 +625,8 @@ function AddModal({
       credential_id: form.credential_id ? Number(form.credential_id) : null,
       config_template_id: form.config_template_id ? Number(form.config_template_id) : null,
       pa_version: form.pa_version || null,
-      extra_args: form.extra_args || null,
+      scan_flags: form.scan_flags || null,
+      subfolder: form.subfolder || null,
       min_notify_severity: form.min_notify_severity,
       notify_recipients: form.notify_recipients.split(',').map(s => s.trim()).filter(Boolean),
       is_enabled: form.is_enabled,
@@ -500,7 +642,19 @@ function AddModal({
         <CronField value={form.cron_schedule} onChange={v => set('cron_schedule', v)} placeholder="0 * * * * (leave blank for manual only)" timezone={form.cron_timezone || defaultTz} />
         <TimezoneField value={form.cron_timezone} onChange={v => set('cron_timezone', v)} placeholder={`default: ${defaultTz ?? 'UTC'}`} />
         <Input label="PA version" placeholder="latest from PyPI" value={form.pa_version} onChange={e => set('pa_version', e.target.value)} />
-        <Input label="Extra args" placeholder="e.g. --requirements requirements-dev.txt" value={form.extra_args} onChange={e => set('extra_args', e.target.value)} />
+        <Input label="Subfolder" placeholder="e.g. backend (leave blank to scan repo root)" value={form.subfolder} onChange={e => set('subfolder', e.target.value)} />
+        {scanOptions ? (
+          <ScanArgsField
+            key={scanOptionsVersion}
+            options={scanOptions}
+            defaultScanFlags={form.scan_flags}
+            onChange={v => set('scan_flags', v)}
+          />
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Scan options unavailable — save without changes or reload to edit scan flags.
+          </div>
+        )}
         <Select label="Credential" value={form.credential_id} onChange={e => set('credential_id', e.target.value)}>
           <option value="">— none —</option>
           {credentials.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -544,6 +698,19 @@ export default function RepoScans() {
   const isAdmin = user?.role === 'admin'
 
   const [defaultTz, setDefaultTz] = useState<string | null>(null)
+  const [scanOptions, setScanOptions] = useState<ScanOptions | null>(null)
+  const [scanOptionsVersion, setScanOptionsVersion] = useState(0)
+
+  useEffect(() => {
+    let mounted = true
+    api.repoScans.scanOptions()
+      .then(opts => { if (mounted) { setScanOptions(opts); setScanOptionsVersion(v => v + 1) } })
+      .catch(e => {
+        if (!mounted) return
+        console.error('Failed to load scan options:', e)
+      })
+    return () => { mounted = false }
+  }, [])
 
   const load = () =>
     Promise.all([api.repoScans.list(), api.repoCredentials.list(), api.configs.list(), api.systemSettings.list()])
@@ -642,7 +809,7 @@ export default function RepoScans() {
 
       {Toast}
       {showAdd && (
-        <AddModal credentials={credentials} templates={templates} defaultTz={defaultTz} onClose={() => setShowAdd(false)} onCreate={handleCreate} />
+        <AddModal credentials={credentials} templates={templates} defaultTz={defaultTz} scanOptions={scanOptions} scanOptionsVersion={scanOptionsVersion} onClose={() => setShowAdd(false)} onCreate={handleCreate} />
       )}
       {showAddCredential && (
         <Modal title="Add credential" onClose={() => setShowAddCredential(false)}>
@@ -667,6 +834,8 @@ export default function RepoScans() {
                 credentials={credentials}
                 templates={templates}
                 defaultTz={defaultTz}
+                scanOptions={scanOptions}
+                scanOptionsVersion={scanOptionsVersion}
                 isOperator={isOperator}
                 isAdmin={isAdmin}
                 onUpdate={handleUpdate}

@@ -1,10 +1,95 @@
-import { useEffect, useState } from 'react'
-import { api, ConfigTemplate, Host } from '@/lib/api'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { api, ConfigTemplate, Host, LintResult } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, Select, useToast, Empty, timeAgo } from '@/components/ui'
 import { TomlEditor, validateToml } from '@/components/TomlEditor'
 import { Plus, Trash2, Link, Star, RotateCcw } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
+
+interface UseLintDebounceResult {
+  lintResult: LintResult | null
+  lintPending: boolean
+  lintError: boolean
+  runLint: (toml: string) => void
+  setLintResult: (r: LintResult | null) => void
+}
+
+const LINT_DEBOUNCE_MS = 500  // fast enough to feel responsive, slow enough to avoid hammering on every keystroke
+
+function useLintDebounce(): UseLintDebounceResult {
+  const [lintResult, setLintResult] = useState<LintResult | null>(null)
+  const [lintPending, setLintPending] = useState(false)
+  const [lintError, setLintError] = useState(false)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const runLint = useCallback((toml: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    abortRef.current?.abort()
+    abortRef.current = null  // prevent the AbortError handler from clearing lintPending during debounce
+    setLintPending(true)
+    setLintError(false)
+    debounceRef.current = setTimeout(() => {
+      const controller = new AbortController()
+      abortRef.current = controller
+      api.configs.validate(toml, controller.signal)
+        .then(r => {
+          if (controller !== abortRef.current) return
+          setLintResult(r); setLintPending(false); setLintError(false)
+        })
+        // On server error, keep lintResult so the save button can still use the last
+        // known-good result. lintError=true shows the banner; the stale result is intentional.
+        .catch(e => {
+          if (e?.name === 'AbortError') {
+            // Clear pending only when this was the latest request (unmount/navigation abort).
+            // If a newer runLint already replaced abortRef, it owns pending state.
+            if (controller === abortRef.current) setLintPending(false)
+          } else {
+            if (controller !== abortRef.current) return
+            setLintPending(false)
+            setLintError(true)
+          }
+        })
+    }, LINT_DEBOUNCE_MS)
+  }, [])
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    abortRef.current?.abort()
+    // Null out so in-flight promise handlers fail the identity check and skip state updates.
+    abortRef.current = null
+  }, [])
+  return { lintResult, lintPending, lintError, runLint, setLintResult }
+}
+
+function LintMessages({ result, lintError }: { result: LintResult | null; lintError?: boolean }) {
+  const hasErrors = !!result && result.errors.length > 0
+  const hasWarnings = !!result && result.warnings.length > 0
+  if (!hasErrors && !hasWarnings && !lintError) return null
+  return (
+    <div aria-live="polite" aria-atomic="true">
+      {lintError && (
+        <div style={{ fontSize: 12, color: 'hsl(var(--status-warning-text, 38 92% 50%))' }}>
+          <span aria-hidden="true">⚠ </span>Server validation unavailable — syntax check only
+        </div>
+      )}
+      {hasErrors && (
+        <div role="alert">
+          <ul role="list" aria-label="Validation errors" style={{ margin: lintError ? '4px 0 0' : 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {result!.errors.map((e, i) => (
+              <li key={`${i}-${e}`} style={{ fontSize: 12, color: 'var(--err)' }}><span aria-hidden="true">✕ </span>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {hasWarnings && (
+        <ul role="list" aria-label="Validation warnings" style={{ margin: (hasErrors || lintError) ? '4px 0 0' : 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {result!.warnings.map((w, i) => (
+            <li key={`${i}-${w}`} style={{ fontSize: 12, color: 'hsl(var(--status-warning-text, 38 92% 50%))' }}><span aria-hidden="true">⚠ </span>{w}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
 
 const DEFAULT_TOML = `# Fleet-managed package-alert configuration.
 # [log], [cli_log], and [scheduler] are intentionally omitted — manage those per-host.
@@ -70,6 +155,11 @@ export default function Configs() {
   const isOperator = user?.role === 'admin' || user?.role === 'operator'
   const isAdmin = user?.role === 'admin'
 
+  const { lintResult, lintPending, lintError, runLint, setLintResult } = useLintDebounce()
+  // lintError means the server is unavailable; the TOML syntax was still checked locally,
+  // so allow save. Otherwise block on an explicit invalid result.
+  const lintBlocksSave = !lintError && lintResult !== null && !lintResult.valid
+
   const load = async () => {
     const myHosts = await api.hosts.list()
     setHosts(myHosts)
@@ -93,9 +183,18 @@ export default function Configs() {
     setSelected(t)
     setEditToml(null)
     setEditDesc(null)
+    setLintResult(null)
+    runLint(t.toml_content)
   }
 
-  const discardEdits = () => { setEditToml(null); setEditDesc(null) }
+  const discardEdits = () => {
+    setEditToml(null)
+    setEditDesc(null)
+    if (selected) {
+      setLintResult(null)
+      runLint(selected.toml_content)
+    }
+  }
 
   const saveEdits = async () => {
     if (!selected) return
@@ -105,10 +204,10 @@ export default function Configs() {
         description: (editDesc ?? selected.description) || undefined,
         toml_content: editToml ?? selected.toml_content,
       })
-      setSelected(updated)
       setTemplates(prev => prev.map(t => t.id === updated.id ? updated : t))
       setEditToml(null)
       setEditDesc(null)
+      selectTemplate(updated)
       show('Template saved')
     } catch (e: any) {
       show(e.message, 'err')
@@ -207,7 +306,7 @@ export default function Configs() {
                   {isDirty && (
                     <>
                       <Button variant="ghost" onClick={discardEdits}><RotateCcw size={13} />Discard</Button>
-                      <Button variant="primary" onClick={saveEdits} disabled={tomlInvalid || saving}>{saving ? 'Saving…' : 'Save'}</Button>
+                      <Button variant="primary" onClick={saveEdits} disabled={tomlInvalid || saving || lintPending || lintBlocksSave}>{saving ? 'Saving…' : 'Save'}</Button>
                     </>
                   )}
                   {!isDirty && !selected.is_default && isOperator && (
@@ -221,10 +320,15 @@ export default function Configs() {
               <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                 <TomlEditor
                   value={currentToml}
-                  onChange={isOperator ? (v) => setEditToml(v) : () => {}}
+                  onChange={isOperator ? (v) => { setEditToml(v); runLint(v) } : () => {}}
                   minHeight={400}
                   showError={isDirty}
                 />
+                {(lintResult || lintError) && (
+                  <div style={{ padding: '8px 18px' }}>
+                    <LintMessages result={lintResult} lintError={lintError} />
+                  </div>
+                )}
               </div>
             </Card>
           )
@@ -234,7 +338,7 @@ export default function Configs() {
       {showAdd && (
         <AddTemplateModal
           onClose={() => setShowAdd(false)}
-          onSaved={(t) => { load(); setShowAdd(false); setSelected(t); show('Template created') }}
+          onSaved={(t) => { load(); setShowAdd(false); selectTemplate(t); show('Template created') }}
         />
       )}
 
@@ -256,6 +360,14 @@ function AddTemplateModal({ onClose, onSaved }: { onClose: () => void; onSaved: 
   const [toml, setToml] = useState(DEFAULT_TOML)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const { lintResult, lintPending, lintError, runLint } = useLintDebounce()
+  // lintError means the server is unavailable; the TOML syntax was still checked locally,
+  // so allow save. Otherwise block on an explicit invalid result.
+  const lintBlocksSave = !lintError && lintResult !== null && !lintResult.valid
+
+  // Lint once on mount with the initial toml value. runLint is stable (useCallback([])).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { runLint(toml) }, [])
 
   const save = async () => {
     setSaving(true); setError('')
@@ -277,13 +389,14 @@ function AddTemplateModal({ onClose, onSaved }: { onClose: () => void; onSaved: 
         <div>
           <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>TOML content *</span>
           <div style={{ marginTop: 4 }}>
-            <TomlEditor value={toml} onChange={setToml} minHeight={300} />
+            <TomlEditor value={toml} onChange={v => { setToml(v); runLint(v) }} minHeight={300} />
           </div>
         </div>
+        <LintMessages result={lintResult} lintError={lintError} />
         {error && <div style={{ color: 'var(--err)', fontSize: 12 }}>{error}</div>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={save} disabled={!name || !toml || !!validateToml(toml) || saving}>{saving ? 'Saving…' : 'Create'}</Button>
+          <Button variant="primary" onClick={save} disabled={!name || !toml || !!validateToml(toml) || lintPending || lintBlocksSave || saving}>{saving ? 'Saving…' : 'Create'}</Button>
         </div>
       </div>
     </Modal>

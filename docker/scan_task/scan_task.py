@@ -17,7 +17,8 @@ Environment variables (all required unless noted):
   FLEET_API_URL           — base URL of the fleet app
   FLEET_SYSTEM_API_KEY    — API key for fleet app authentication
   PA_CONFIG_TOML          — (optional) TOML config content for pa scan-project
-  PA_EXTRA_ARGS           — (optional) extra CLI args passed to pa scan-project (shell-quoted)
+  PA_SCAN_FLAGS           — (optional) shell-quoted CLI args for pa scan-project (--flag=value form, split via shlex)
+  PA_SUBFOLDER            — (optional) repo subdirectory to scan (relative path; defaults to repo root)
 """
 import json
 import os
@@ -175,8 +176,14 @@ def clone_repo(
 
 # ── pa scan-project ────────────────────────────────────────────────────────────
 
-def run_pa_scan(repo_path: Path, config_toml: str, extra_args: str = "") -> tuple[int, list[dict], list[str]]:
+def run_pa_scan(
+    repo_path: Path,
+    config_toml: str,
+    scan_flags: str = "",
+    subfolder: str = "",
+) -> tuple[int, list[dict], list[str]]:
     """Run pa scan-project. Returns (finding_count, findings, sources)."""
+    import shlex
     cmd = [str(Path(sys.executable).parent / "pa"), "scan-project", "--format", "json"]
     config_tmp = None
     if config_toml:
@@ -185,11 +192,32 @@ def run_pa_scan(repo_path: Path, config_toml: str, extra_args: str = "") -> tupl
             config_tmp = f.name
         cmd += ["--config", config_tmp]
 
-    if extra_args:
-        import shlex
-        cmd += shlex.split(extra_args)
+    if scan_flags:
+        # scan_flags cannot contain --format, --config, --details, --fmt, or a PATH
+        # argument because the value is a closed system:
+        #   1. The only write path is the frontend ScanArgsField, which assembles flags
+        #      solely from the list returned by the /repo-scans/scan-options API.
+        #   2. That API calls get_scan_options() (backend/app/services/scan_options.py),
+        #      which filters every param through _EXCLUDED_PARAMS before returning it.
+        #   3. _EXCLUDED_PARAMS = {"path", "format", "fmt", "details", "config"} — all
+        #      of the flags that could override the safe defaults above.
+        # The DB field is operator-only (requires the "operator" role to write) and is
+        # never accepted as raw user freetext; ScanArgsField is the only UI surface.
+        # Runtime validation is intentionally minimal because scan_flags is expected to
+        # come from the backend-filtered scan-options list.
+        try:
+            cmd += shlex.split(scan_flags)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid scan_flags quoting: {exc}") from exc
 
-    cmd.append(str(repo_path))
+    # PATH argument: subdirectory within the cloned repo, or repo root.
+    # subfolder is validated at the API layer (no absolute paths, no .. segments),
+    # but we resolve both paths and assert containment here as defence-in-depth.
+    scan_path = (repo_path / subfolder).resolve() if subfolder else repo_path.resolve()
+    repo_root = repo_path.resolve()
+    if repo_root != scan_path and repo_root not in scan_path.parents:
+        raise RuntimeError(f"subfolder '{subfolder}' escapes the repository directory")
+    cmd.append(str(scan_path))
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -202,11 +230,14 @@ def run_pa_scan(repo_path: Path, config_toml: str, extra_args: str = "") -> tupl
 
     try:
         data = json.loads(result.stdout)
-        findings = data.get("findings", [])
-        sources = data.get("sources", [])
-        return len(findings), findings, sources
-    except json.JSONDecodeError:
-        return 0, [], []
+    except json.JSONDecodeError as exc:
+        snippet = result.stdout[:200].replace("\n", " ")
+        raise RuntimeError(
+            f"pa scan-project output was not valid JSON: {exc}. Output: {snippet!r}"
+        ) from exc
+    findings = data.get("findings", [])
+    sources = data.get("sources", [])
+    return len(findings), findings, sources
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -260,8 +291,9 @@ def main() -> None:
 
         # 4. Run scan
         try:
-            extra_args = get_env("PA_EXTRA_ARGS", "")
-            finding_count, findings, sources = run_pa_scan(repo_path, config_toml, extra_args)
+            scan_flags = get_env("PA_SCAN_FLAGS", "")
+            subfolder = get_env("PA_SUBFOLDER", "")
+            finding_count, findings, sources = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
         except RuntimeError as exc:
             post_result(fleet_url, fleet_key, result_id, "failed",
                         pa_version=pa_version, error_message=str(exc))

@@ -53,6 +53,8 @@ async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -
         notify_recipients=body.notify_recipients,
         config_template_id=body.config_template_id,
         is_enabled=body.is_enabled,
+        scan_flags=body.scan_flags,
+        subfolder=body.subfolder,
         created_by_id=user.id,
     )
     db.add(scan)
@@ -179,7 +181,8 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
         "FLEET_API_URL": app_settings.fleet_base_url,
         "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
         "PA_CONFIG_TOML": config_toml,
-        "PA_EXTRA_ARGS": scan.extra_args or "",
+        "PA_SCAN_FLAGS": scan.scan_flags or "",
+        "PA_SUBFOLDER": scan.subfolder or "",
     }
     try:
         if app_settings.local_docker_scan:
