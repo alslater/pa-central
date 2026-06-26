@@ -1,7 +1,7 @@
 """Pydantic v2 schemas for API request/response."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Literal  # noqa — used by field_validator
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
@@ -396,6 +396,8 @@ class RepoScanCreate(BaseModel):
     is_enabled: bool = True
     scan_flags: str | None = Field(None, max_length=4096)
     subfolder: str | None = None
+    sla_high_days: int | None = Field(None, gt=0)
+    sla_medium_days: int | None = Field(None, gt=0)
 
     @field_validator("subfolder")
     @classmethod
@@ -416,6 +418,8 @@ class RepoScanUpdate(BaseModel):
     is_enabled: bool | None = None
     scan_flags: str | None = Field(None, max_length=4096)
     subfolder: str | None = None
+    sla_high_days: int | None = Field(None, gt=0)
+    sla_medium_days: int | None = Field(None, gt=0)
 
     @field_validator("subfolder")
     @classmethod
@@ -442,6 +446,11 @@ class RepoScanOut(OrmBase):
     created_by_id: int
     created_at: datetime
     updated_at: datetime
+    sla_high_days: int | None
+    sla_medium_days: int | None
+    breach: bool
+    breach_count: int
+    scan_config_hash: str | None
 
 
 class RepoScanResultOut(OrmBase):
@@ -463,6 +472,9 @@ class RepoScanResultOut(OrmBase):
 class RepoScanResultWithName(RepoScanResultOut):
     scan_name: str
     scan_url: str
+    # Current open-breach state for the scan (not the state at the time of this result).
+    scan_breach: bool
+    scan_breach_count: int
 
 
 class RepoScanResultIngest(BaseModel):
@@ -474,3 +486,58 @@ class RepoScanResultIngest(BaseModel):
     findings: list[dict] | None = None
     sources: list[str] | None = None
     error_message: str | None = None
+
+
+# ── Finding Record ─────────────────────────────────────────────────────────────
+
+class FindingRecordOut(OrmBase):
+    id: int
+    repo_scan_id: int
+    advisory_id: str
+    package: str
+    ecosystem: str
+    severity: str
+    first_found_at: datetime
+    closed_at: datetime | None
+    reopen_count: int
+    accepted_by_id: int | None
+    accepted_at: datetime | None
+    accepted_reason: str | None
+    accepted_until: date | None
+    # Detail fields (captured at first appearance)
+    summary: str | None = None
+    details: str | None = None
+    package_version: str | None = None
+    fixed_versions: str | None = None
+    url: str | None = None
+    is_malicious: bool | None = None
+    # Computed — must be set by the API layer before returning
+    is_accepted: bool
+    days_open: int
+    sla_days: int | None
+    in_breach: bool
+    scan_name: str | None = None
+
+
+class FindingAcceptBody(BaseModel):
+    reason: str = Field(..., max_length=1000)
+    accepted_until: date | None = None
+
+    @field_validator('accepted_until')
+    @classmethod
+    def accepted_until_must_be_future(cls, v: date | None) -> date | None:
+        if v is not None and v <= date.today():
+            raise ValueError('accepted_until must be a future date')
+        return v
+
+
+class FindingSettingsOut(BaseModel):
+    sla_high_days: int
+    sla_medium_days: int
+    finding_retention_days: int
+
+
+class FindingSettingsPut(BaseModel):
+    sla_high_days: int = Field(..., gt=0)
+    sla_medium_days: int = Field(..., gt=0)
+    finding_retention_days: int = Field(..., gt=0)

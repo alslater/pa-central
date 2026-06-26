@@ -8,10 +8,11 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from app.models import RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, SystemSetting, utcnow
+from app.models import RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, SystemSetting, FindingRecord, utcnow
 from app.core.config import settings as app_settings
+from app.services.finding_lifecycle import DEFAULT_FINDING_RETENTION, _parse_int
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ async def trigger_scan(scan: Any, db_factory: Any) -> None:
             status=RepoScanStatus.running,
             triggered_by=ScanTrigger.scheduled,
             started_at=utcnow(),
+            scan_config_hash=tracked_scan.scan_config_hash,
         )
         session.add(result)
         await session.flush()
@@ -207,9 +209,6 @@ async def prune_old_results(db_factory: Any) -> None:
     retention_days = settings.get("scan_result_retention_days")
     retention_count = settings.get("scan_result_retention_count")
 
-    if not retention_days and not retention_count:
-        return
-
     async with db_factory() as session:
         if retention_days:
             try:
@@ -252,5 +251,14 @@ async def prune_old_results(db_factory: Any) -> None:
                         )
                         for old in excess.scalars().all():
                             await session.delete(old)
+
+        # Purge old closed finding records
+        finding_days = _parse_int(settings.get("finding_retention_days"), DEFAULT_FINDING_RETENTION)
+        finding_cutoff = utcnow() - timedelta(days=finding_days)
+        await session.execute(
+            delete(FindingRecord)
+            .where(FindingRecord.closed_at.isnot(None))
+            .where(FindingRecord.closed_at < finding_cutoff)
+        )
 
         await session.commit()
