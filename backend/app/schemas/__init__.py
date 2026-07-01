@@ -1,7 +1,7 @@
 """Pydantic v2 schemas for API request/response."""
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Any, Literal  # noqa — used by field_validator
 
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
@@ -499,6 +499,7 @@ class FindingRecordOut(OrmBase):
     severity: str
     first_found_at: datetime
     closed_at: datetime | None
+    closed_reason: str | None = None
     reopen_count: int
     accepted_by_id: int | None
     accepted_at: datetime | None
@@ -523,10 +524,18 @@ class FindingAcceptBody(BaseModel):
     reason: str = Field(..., max_length=1000)
     accepted_until: date | None = None
 
+    @field_validator('reason')
+    @classmethod
+    def reason_must_not_be_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError('reason must not be blank')
+        return stripped
+
     @field_validator('accepted_until')
     @classmethod
     def accepted_until_must_be_future(cls, v: date | None) -> date | None:
-        if v is not None and v <= date.today():
+        if v is not None and v <= datetime.now(timezone.utc).date():
             raise ValueError('accepted_until must be a future date')
         return v
 

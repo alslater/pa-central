@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from app.scheduler.scheduler import (
     is_due, next_run_after, should_trigger_scan,
 )
+from app.models import FindingRecord, AlertSeverity, RepoScan
 
 
 # ── Unit: cron evaluation ─────────────────────────────────────────────────────
@@ -201,6 +202,7 @@ async def test_prune_by_days_deletes_old_results(mock_db_factory):
             MagicMock(key="scan_result_retention_count", value=None),
         ])))),
         MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[old])))),
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
     ])
     session.delete = AsyncMock()
     session.commit = AsyncMock()
@@ -213,7 +215,11 @@ async def test_prune_by_days_deletes_old_results(mock_db_factory):
 
 
 @pytest.mark.asyncio
-async def test_prune_no_op_when_no_retention_settings(mock_db_factory):
+async def test_prune_findings_default_when_no_scan_retention_settings(mock_db_factory):
+    """When no scan_result retention settings exist, findings are still purged
+    at the default 365-day threshold. The early-return no-op was removed;
+    prune_old_results always runs finding purge."""
+    from sqlalchemy.sql.dml import Delete
     factory, session = mock_db_factory
     session.execute = AsyncMock(return_value=MagicMock(
         scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
@@ -221,4 +227,90 @@ async def test_prune_no_op_when_no_retention_settings(mock_db_factory):
     session.delete = AsyncMock()
     from app.scheduler.scheduler import prune_old_results
     await prune_old_results(factory)
+
+    # ORM-level delete() must not be called (no individual record deletions).
     session.delete.assert_not_called()
+
+    # The bulk finding-purge DELETE must have been executed.
+    delete_calls = [
+        call for call in session.execute.call_args_list
+        if call.args and isinstance(call.args[0], Delete)
+    ]
+    assert delete_calls, "expected a bulk DELETE statement for finding retention purge"
+
+
+# ── Finding retention pruning ─────────────────────────────────────────────────
+
+def _make_finding(repo_scan_id, closed_days_ago=None):
+    now = datetime.now(timezone.utc)
+    return FindingRecord(
+        repo_scan_id=repo_scan_id,
+        advisory_id="GHSA-r", package="pkg", ecosystem="pypi",
+        severity=AlertSeverity.high,
+        first_found_at=now - timedelta(days=400),
+        closed_at=(now - timedelta(days=closed_days_ago)) if closed_days_ago is not None else None,
+        reopen_count=0,
+    )
+
+
+@pytest.mark.asyncio
+class TestFindingRetentionPrune:
+    async def test_old_closed_finding_pruned(self, db, admin_user):
+        scan = RepoScan(name="rs", url="https://g.com/r.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        old_finding = _make_finding(scan.id, closed_days_ago=400)
+        db.add(old_finding)
+        await db.commit()
+
+        from app.scheduler.scheduler import prune_old_results
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert all(r.id != old_finding.id for r in rows)
+
+    async def test_recent_closed_finding_not_pruned(self, db, admin_user):
+        scan = RepoScan(name="rs2", url="https://g.com/r2.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        recent_finding = _make_finding(scan.id, closed_days_ago=10)
+        db.add(recent_finding)
+        await db.commit()
+
+        from app.scheduler.scheduler import prune_old_results
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert any(r.id == recent_finding.id for r in rows)
+
+    async def test_open_finding_never_pruned(self, db, admin_user):
+        scan = RepoScan(name="rs3", url="https://g.com/r3.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        open_finding = _make_finding(scan.id, closed_days_ago=None)
+        db.add(open_finding)
+        await db.commit()
+
+        from app.scheduler.scheduler import prune_old_results
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        rows = (await db.execute(select(FindingRecord).where(FindingRecord.closed_at.is_(None)))).scalars().all()
+        assert any(r.id == open_finding.id for r in rows)

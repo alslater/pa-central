@@ -1,34 +1,39 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timezone
 
-from sqlalchemy import and_, func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.elements import ClauseElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AlertSeverity, FindingRecord, RepoScan, RepoScanResult, SystemSetting, utcnow
+from app.models import AlertSeverity, FindingRecord, RepoScan, RepoScanResult, RepoScanStatus, SystemSetting, utcnow
 from app.schemas import FindingRecordOut
 
-def accepted_sql_expr() -> ClauseElement:
-    """SQL expression: finding is currently accepted (accepted_at set and not expired)."""
+def accepted_sql_expr(today: date) -> ClauseElement:
+    """SQL expression: finding is currently accepted (accepted_at set and not expired).
+
+    Accepts an explicit UTC date so the SQL filter matches the Python is_accepted()
+    function exactly, regardless of the DB session timezone.
+    """
     return and_(
         FindingRecord.accepted_at.isnot(None),
         or_(
             FindingRecord.accepted_until.is_(None),
-            FindingRecord.accepted_until > func.current_date(),
+            FindingRecord.accepted_until > today,
         ),
     )
 
 
-def not_accepted_sql_expr() -> ClauseElement:
+def not_accepted_sql_expr(today: date) -> ClauseElement:
     """SQL expression: finding is NOT currently accepted (complement of accepted_sql_expr)."""
     return or_(
         FindingRecord.accepted_at.is_(None),
         and_(
             FindingRecord.accepted_until.isnot(None),
-            FindingRecord.accepted_until <= func.current_date(),
+            FindingRecord.accepted_until <= today,
         ),
     )
 
@@ -48,11 +53,11 @@ def compute_scan_config_hash(
     subfolder: str | None,
     config_template_id: int | None,
 ) -> str:
-    raw = f"{scan_flags or ''}|{subfolder or ''}|{config_template_id or ''}"
+    raw = json.dumps([scan_flags, subfolder, config_template_id], separators=(',', ':'))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _parse_int(value: str | None, default: int) -> int:
+def parse_int(value: str | None, default: int) -> int:
     try:
         parsed = int(value) if value else default
         return parsed if parsed >= 1 else default
@@ -68,9 +73,9 @@ async def get_global_sla(db: AsyncSession) -> tuple[int, int, int]:
         )
     )
     settings = {s.key: s.value for s in rows.scalars().all()}
-    high = _parse_int(settings.get("sla_high_days"), DEFAULT_SLA_HIGH)
-    medium = _parse_int(settings.get("sla_medium_days"), DEFAULT_SLA_MEDIUM)
-    retention = _parse_int(settings.get("finding_retention_days"), DEFAULT_FINDING_RETENTION)
+    high = parse_int(settings.get("sla_high_days"), DEFAULT_SLA_HIGH)
+    medium = parse_int(settings.get("sla_medium_days"), DEFAULT_SLA_MEDIUM)
+    retention = parse_int(settings.get("finding_retention_days"), DEFAULT_FINDING_RETENTION)
     return high, medium, retention
 
 
@@ -129,6 +134,7 @@ def build_finding_out(
         severity=record.severity.value,
         first_found_at=record.first_found_at,
         closed_at=record.closed_at,
+        closed_reason=record.closed_reason,
         reopen_count=record.reopen_count,
         accepted_by_id=record.accepted_by_id,
         accepted_at=record.accepted_at,
@@ -161,6 +167,30 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
         if key not in incoming:
             incoming[key] = f
 
+    # Detect config change: compare this result's hash against the most recent
+    # prior successful result. NULL hashes are treated as "unknown" — no reset
+    # (conservative; covers pre-upgrade rows).
+    if result.scan_config_hash is not None:
+        prev_hash_row = await db.execute(
+            select(RepoScanResult.scan_config_hash)
+            .where(RepoScanResult.repo_scan_id == result.repo_scan_id)
+            .where(RepoScanResult.id != result.id)
+            .where(RepoScanResult.status == RepoScanStatus.success)
+            .where(RepoScanResult.scan_config_hash.isnot(None))
+            .order_by(RepoScanResult.completed_at.desc())
+            .limit(1)
+        )
+        prev_hash = prev_hash_row.scalar_one_or_none()
+        if prev_hash is not None and prev_hash != result.scan_config_hash:
+            close_time = result.completed_at or datetime.now(timezone.utc)
+            await db.execute(
+                update(FindingRecord)
+                .where(FindingRecord.repo_scan_id == result.repo_scan_id)
+                .where(FindingRecord.closed_at.is_(None))
+                .values(closed_at=close_time, closed_reason="config_change")
+                .execution_options(synchronize_session="fetch")
+            )
+
     open_rows = await db.execute(
         select(FindingRecord)
         .where(FindingRecord.repo_scan_id == result.repo_scan_id)
@@ -192,6 +222,7 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
             )
             .where(FindingRecord.repo_scan_id == result.repo_scan_id)
             .where(FindingRecord.closed_at.isnot(None))
+            .where(FindingRecord.closed_reason.is_(None))
             .where(
                 tuple_(
                     FindingRecord.advisory_id,
@@ -233,33 +264,45 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
             fixed_versions = raw_fixed or None
         else:
             fixed_versions = None
-        def _str_or_none(v: object) -> str | None:
-            return str(v) if v is not None and not isinstance(v, (dict, list)) else None
+        def _str_or_none(v: object, max_len: int | None = None) -> str | None:
+            if v is None or isinstance(v, (dict, list)):
+                return None
+            s = str(v)
+            return s[:max_len] if max_len and len(s) > max_len else s
 
         raw_is_malicious = finding.get("is_malicious")
         is_malicious: bool | None = bool(raw_is_malicious) if isinstance(raw_is_malicious, bool) else None
 
         record = FindingRecord(
             repo_scan_id=result.repo_scan_id,
-            advisory_id=advisory_id,
-            package=package,
-            ecosystem=ecosystem,
+            advisory_id=advisory_id[:200],
+            package=package[:200],
+            ecosystem=ecosystem[:100],
             severity=severity,
-            summary=_str_or_none(finding.get("summary")),
+            summary=_str_or_none(finding.get("summary"), 2000),
             details=_str_or_none(finding.get("details")),
-            package_version=_str_or_none(finding.get("version")),
+            package_version=_str_or_none(finding.get("version"), 200),
             fixed_versions=fixed_versions,
-            url=_str_or_none(finding.get("url")),
+            url=_str_or_none(finding.get("url"), 500),
             is_malicious=is_malicious,
             first_found_at=now,
             reopen_count=reopen_count,
         )
         # Use a savepoint so a concurrent-ingest conflict on the partial unique
         # index doesn't abort the whole transaction — just skip the duplicate.
-        async with await db.begin_nested():
-            try:
-                db.add(record)
-                await db.flush([record])
-            except IntegrityError:
-                # The open record already exists (concurrent ingest); treat as persisting.
-                pass
+        # Explicit begin/rollback avoids async-CM re-entrancy issues with the
+        # SQLAlchemy after_transaction_end hook used in the test fixture.
+        sp = await db.begin_nested()
+        try:
+            db.add(record)
+            await db.flush([record])
+            await sp.commit()
+        except IntegrityError:
+            # The open record already exists (concurrent ingest); treat as persisting.
+            await sp.rollback()
+            # Expunge the pending instance so SQLAlchemy won't try to flush it
+            # again on the outer commit and re-raise the same IntegrityError.
+            db.expunge(record)
+        except Exception:
+            await sp.rollback()
+            raise

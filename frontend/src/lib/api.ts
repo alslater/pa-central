@@ -114,8 +114,11 @@ export interface RepoScan {
   cron_schedule: string | null; cron_timezone: string | null; is_enabled: boolean
   credential_id: number | null
   config_template_id: number | null; pa_version: string | null; scan_flags: string | null; subfolder: string | null
+  sla_high_days: number | null; sla_medium_days: number | null
   min_notify_severity: AlertSeverity; notify_recipients: string[]
-  last_scan_at: string | null; created_at: string; updated_at: string
+  last_scan_at: string | null; created_at: string; updated_at: string; created_by_id: number
+  breach: boolean; breach_count: number
+  scan_config_hash: string | null
 }
 
 export interface RepoScanResult {
@@ -131,6 +134,42 @@ export interface RepoScanResult {
 
 export interface RepoScanResultWithName extends RepoScanResult {
   scan_name: string; scan_url: string
+  /** Current open-breach state for the scan, not the state at the time of this result. */
+  scan_breach: boolean; scan_breach_count: number
+}
+
+export interface FindingRecord {
+  id: number
+  repo_scan_id: number
+  advisory_id: string
+  package: string
+  ecosystem: string
+  severity: AlertSeverity
+  first_found_at: string
+  closed_at: string | null
+  closed_reason: string | null
+  reopen_count: number
+  accepted_by_id: number | null
+  accepted_at: string | null
+  accepted_reason: string | null
+  accepted_until: string | null
+  summary: string | null
+  details: string | null
+  package_version: string | null
+  fixed_versions: string | null
+  url: string | null
+  is_malicious: boolean | null
+  is_accepted: boolean
+  days_open: number
+  sla_days: number | null
+  in_breach: boolean
+  scan_name: string | null
+}
+
+export interface FindingSettings {
+  sla_high_days: number
+  sla_medium_days: number
+  finding_retention_days: number
 }
 
 export interface SystemSetting {
@@ -220,7 +259,7 @@ export const api = {
       request<ConfigTemplate>(`/config-templates/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: number) => request<void>(`/config-templates/${id}`, { method: 'DELETE' }),
     assign: (tmplId: number, hostId: number) =>
-      request(`/config-templates/${tmplId}/assign/${hostId}`, { method: 'POST' }),
+      request<void>(`/config-templates/${tmplId}/assign/${hostId}`, { method: 'POST' }),
     forHost: (hostId: number) => request<ConfigTemplate | null>(`/config-templates/for-host/${hostId}`),
     validate: (toml_content: string, signal?: AbortSignal) =>
       request<LintResult>('/config-templates/validate', {
@@ -293,5 +332,36 @@ export const api = {
     results: (id: number) => request<RepoScanResult[]>(`/repo-scans/${id}/results`),
     allResults: (limit?: number) => request<RepoScanResultWithName[]>(`/repo-scans/results${limit ? `?limit=${limit}` : ''}`),
     scanOptions: () => request<ScanOptions>('/repo-scans/scan-options'),
+  },
+
+  findings: {
+    listAll: (params?: {
+      severity?: AlertSeverity[]
+      breach?: boolean
+      accepted?: boolean
+      repo_scan_id?: number
+      limit?: number
+    }): Promise<FindingRecord[]> => {
+      const q = new URLSearchParams()
+      if (params?.severity) params.severity.forEach(s => q.append('severity', s))
+      if (params?.breach !== undefined) q.set('breach', String(params.breach))
+      if (params?.accepted !== undefined) q.set('accepted', String(params.accepted))
+      if (params?.repo_scan_id !== undefined) q.set('repo_scan_id', String(params.repo_scan_id))
+      if (params?.limit !== undefined) q.set('limit', String(params.limit))
+      const qs = q.toString()
+      return request<FindingRecord[]>(`/findings${qs ? `?${qs}` : ''}`)
+    },
+    listForRepo: (repoScanId: number): Promise<FindingRecord[]> =>
+      request<FindingRecord[]>(`/repo-scans/${repoScanId}/findings`),
+    accept: (id: number, body: { reason: string; accepted_until?: string }): Promise<FindingRecord> =>
+      request<FindingRecord>(`/findings/${id}/accept`, { method: 'POST', body: JSON.stringify(body) }),
+    revokeAccept: (id: number): Promise<FindingRecord> =>
+      request<FindingRecord>(`/findings/${id}/accept`, { method: 'DELETE' }),
+  },
+
+  findingSettings: {
+    get: (): Promise<FindingSettings> => request<FindingSettings>('/settings/findings'),
+    update: (body: FindingSettings): Promise<FindingSettings> =>
+      request<FindingSettings>('/settings/findings', { method: 'PUT', body: JSON.stringify(body) }),
   },
 }

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,7 +56,7 @@ def _breach_candidates_stmt(scan_ids: list[int], now: datetime, min_sla: int | N
         .where(FindingRecord.repo_scan_id.in_(scan_ids))
         .where(FindingRecord.closed_at.is_(None))
         .where(FindingRecord.severity.in_(_SLA_SEVERITIES))
-        .where(not_accepted_sql_expr())
+        .where(not_accepted_sql_expr(now.date()))
     )
     if min_sla is not None:
         # Breach is defined as age.days > sla_days, so a finding found exactly
@@ -170,7 +170,7 @@ async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -
 ViewerDep = Annotated[User, Depends(require_viewer)]
 
 @router.get("/results")
-async def list_all_results(db: DbDep, _: ViewerDep, limit: int = 100) -> list[RepoScanResultWithName]:
+async def list_all_results(db: DbDep, _: ViewerDep, limit: int = Query(100, ge=1, le=500)) -> list[RepoScanResultWithName]:
     rows = await db.execute(
         select(
             RepoScanResult,
@@ -242,8 +242,8 @@ async def update_repo_scan(scan_id: int, body: RepoScanUpdate, db: DbDep, _: Ope
     scan = await db.get(RepoScan, scan_id)
     if not scan:
         raise HTTPException(404, "Repo scan not found")
-    updates = body.model_dump(exclude_none=True)
-    if "credential_id" in updates and updates["credential_id"] is not None:
+    updates = body.model_dump(exclude_unset=True)
+    if updates.get("credential_id") is not None:
         if not await db.get(RepoCredential, updates["credential_id"]):
             raise HTTPException(404, "Credential not found")
     for k, v in updates.items():
@@ -297,11 +297,11 @@ async def get_repo_scan_findings(scan_id: int, db: DbDep, _: AdminDep) -> list[F
         .where(FindingRecord.closed_at.is_(None))
         .order_by(
             case(
-                (FindingRecord.severity == 'critical', 0),
-                (FindingRecord.severity == 'high', 1),
-                (FindingRecord.severity == 'medium', 2),
-                (FindingRecord.severity == 'warning', 3),
-                (FindingRecord.severity == 'low', 4),
+                (FindingRecord.severity == AlertSeverity.critical, 0),
+                (FindingRecord.severity == AlertSeverity.high, 1),
+                (FindingRecord.severity == AlertSeverity.medium, 2),
+                (FindingRecord.severity == AlertSeverity.warning, 3),
+                (FindingRecord.severity == AlertSeverity.low, 4),
                 else_=5,
             ),
             FindingRecord.first_found_at,

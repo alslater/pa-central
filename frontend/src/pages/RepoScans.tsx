@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
-  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions,
+  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions, FindingRecord,
 } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { useAuth } from '@/hooks/useAuth'
-import { Card, Button, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, FindingsTable, timeAgo } from '@/components/ui'
+import { Card, Button, Drawer, FindingAcceptForm, FindingRecordDetail, FindingRevokeButton, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, FindingsTable, SeverityBadge, timeAgo } from '@/components/ui'
 import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settings2 } from 'lucide-react'
 import { CronField } from '@/components/CronField'
 import { TimezoneField } from '@/components/TimezoneField'
@@ -261,6 +261,137 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
   )
 }
 
+// ── Findings panel ─────────────────────────────────────────────────────────────
+
+function FindingDetailDrawer({ f, onClose, onAccepted, show }: { f: FindingRecord; onClose: () => void; onAccepted: () => void; show: (msg: string, kind: 'ok' | 'err') => void }) {
+  const [accepting, setAccepting] = React.useState(false)
+
+  return (
+    <Drawer title={`${f.package} — ${f.advisory_id}`} onClose={onClose}>
+      <FindingRecordDetail f={f}>
+        <div className="mt-4 pt-4 border-t border-border">
+          {f.is_accepted ? (
+            <FindingRevokeButton finding={f} onDone={onAccepted} show={show} />
+          ) : accepting ? (
+            <FindingAcceptForm
+              finding={f}
+              onDone={() => { setAccepting(false); onAccepted() }}
+              onCancel={() => setAccepting(false)}
+              show={show}
+            />
+          ) : (
+            <Button variant="secondary" onClick={() => setAccepting(true)} className="text-[12px] px-3 h-8">Accept finding</Button>
+          )}
+        </div>
+      </FindingRecordDetail>
+    </Drawer>
+  )
+}
+
+function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, kind: 'ok' | 'err') => void }) {
+  const [findings, setFindings] = React.useState<FindingRecord[] | null>(null)
+  const [loading, setLoading] = React.useState(true)
+  const [loadError, setLoadError] = React.useState(false)
+  const [selected, setSelected] = React.useState<FindingRecord | null>(null)
+
+  const reqSeq = React.useRef(0)
+
+  const reload = React.useCallback((background = false) => {
+    const seq = ++reqSeq.current
+    setLoadError(false)
+    if (!background) { setLoading(true); setFindings(null) }
+    api.findings.listForRepo(scanId).then(data => {
+      if (seq !== reqSeq.current) return
+      setFindings(data)
+      setLoading(false)
+      // Refresh the selected finding if still open
+      setSelected(prev => prev ? data.find(f => f.id === prev.id) ?? null : null)
+    }).catch((e: Error) => {
+      if (seq !== reqSeq.current) return
+      setLoading(false)
+      if (!background) setLoadError(true)
+      show(e.message ?? 'Failed to load findings', 'err')
+    })
+  }, [scanId, show])
+
+  React.useEffect(() => {
+    reload()
+    return () => { reqSeq.current++ }
+  }, [reload])
+
+  if (loading && !findings) return <div className="p-3 text-[13px] text-muted-foreground">Loading findings…</div>
+  if (loadError) return (
+    <div className="p-3 text-[13px] text-status-fail-text flex items-center gap-2">
+      Failed to load findings.
+      <button type="button" onClick={() => reload()} className="underline hover:no-underline">Retry</button>
+    </div>
+  )
+  const rows = findings ?? []
+  if (rows.length === 0) return <div className="px-4 py-2"><Empty message="No open findings." /></div>
+
+  return (
+    <>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="text-left border-b border-border">
+              <th className="px-4 py-2 text-style-caption">Severity</th>
+              <th className="px-4 py-2 text-style-caption">Package</th>
+              <th className="px-4 py-2 text-style-caption">Ecosystem</th>
+              <th className="px-4 py-2 text-style-caption">Advisory</th>
+              <th className="px-4 py-2 text-style-caption">Open since</th>
+              <th className="px-4 py-2 text-style-caption">SLA</th>
+              <th className="px-4 py-2 text-style-caption">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(f => (
+              <tr
+                key={f.id}
+                className="border-b border-border/50 hover:bg-muted/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
+                tabIndex={0}
+                role="button"
+                aria-label={`${f.package} ${f.advisory_id} — view details`}
+                onClick={() => setSelected(f)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(f) } }}
+              >
+                <td className="px-4 py-2"><SeverityBadge severity={f.severity} /></td>
+                <td className="px-4 py-2 font-mono">
+                  {f.package}
+                  {f.reopen_count > 0 && (
+                    <span className="ml-1.5 text-[11px] text-status-review-text">↩×{f.reopen_count}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-muted-foreground">{f.ecosystem}</td>
+                <td className="px-4 py-2 font-mono text-muted-foreground">{f.advisory_id}</td>
+                <td className={`px-4 py-2 font-medium ${f.in_breach ? 'text-status-fail-text' : 'text-muted-foreground'}`}>{f.days_open}d</td>
+                <td className="px-4 py-2 text-muted-foreground">{f.sla_days ? `${f.sla_days}d` : '—'}</td>
+                <td className="px-4 py-2">
+                  {f.is_accepted ? (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-info/12 text-status-info-text" title={f.accepted_reason ?? undefined}>Accepted</span>
+                  ) : f.in_breach ? (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-fail/12 text-status-fail-text">Breaching</span>
+                  ) : (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Open</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <FindingDetailDrawer
+          f={selected}
+          onClose={() => setSelected(null)}
+          onAccepted={() => { reload(true); setSelected(null) }}
+          show={show}
+        />
+      )}
+    </>
+  )
+}
+
 // ── Structured scan args field ────────────────────────────────────────────────
 
 // ── ScanArgsField component ───────────────────────────────────────────────────
@@ -381,7 +512,7 @@ function ScanArgsField({
 // ── Scan card / edit form ──────────────────────────────────────────────────────
 
 function ScanCard({
-  scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, isOperator, isAdmin, onUpdate, onDelete, onTrigger,
+  scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, isOperator, isAdmin, onUpdate, onDelete, onTrigger, show,
 }: {
   scan: RepoScan
   credentials: RepoCredential[]
@@ -394,8 +525,10 @@ function ScanCard({
   onUpdate: (id: number, patch: Partial<RepoScan>) => void
   onDelete: (scan: RepoScan) => void
   onTrigger: (scan: RepoScan) => Promise<void>
+  show: (msg: string, kind: 'ok' | 'err') => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const [expandedTab, setExpandedTab] = useState<'results' | 'findings'>('results')
   const [editing, setEditing] = useState(false)
   const [latestStatus, setLatestStatus] = useState<RepoScanResult['status'] | null>(null)
   const [resultsRefreshKey, setResultsRefreshKey] = useState(0)
@@ -451,7 +584,20 @@ function ScanCard({
           animation: isRunning ? 'pulse 1s ease-in-out infinite' : 'none',
         }} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13 }}>{scan.name}</div>
+          <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {scan.name}
+            {scan.breach && (
+              <button
+                type="button"
+                className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-status-fail/12 text-status-fail-text cursor-pointer shrink-0 border-none"
+                onClick={() => { setExpanded(true); setExpandedTab('findings') }}
+                title={`${scan.breach_count} finding${scan.breach_count !== 1 ? 's' : ''} breaching SLA`}
+                aria-label={`${scan.breach_count} finding${scan.breach_count !== 1 ? 's' : ''} breaching SLA — view findings`}
+              >
+                SLA breach ×{scan.breach_count}
+              </button>
+            )}
+          </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {scan.url} · {scan.branch}
             {credName && <> · <KeyRound size={10} style={{ verticalAlign: 'middle' }} /> {credName}</>}
@@ -491,7 +637,34 @@ function ScanCard({
 
       {expanded && (
         <div style={{ borderTop: '1px solid var(--border)' }}>
-          <ResultsPanel scan={scan} refreshKey={resultsRefreshKey} />
+          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', padding: '0 16px' }}>
+            {(['results', 'findings'] as const).map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setExpandedTab(t)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  padding: '8px 12px', fontSize: 12, fontWeight: 500,
+                  color: expandedTab === t ? 'var(--text-primary)' : 'var(--text-muted)',
+                  borderBottom: `2px solid ${expandedTab === t ? 'hsl(var(--brand))' : 'transparent'}`,
+                  marginBottom: -1,
+                }}
+              >
+                {t === 'results' ? 'Results' : 'Findings'}
+                {t === 'findings' && scan.breach_count > 0 && (
+                  <span style={{ marginLeft: 4, fontSize: 11, fontWeight: 600, padding: '1px 5px', borderRadius: 8, background: '#fee2e2', color: '#b91c1c' }}>
+                    {scan.breach_count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+          {expandedTab === 'results' ? (
+            <ResultsPanel scan={scan} refreshKey={resultsRefreshKey} />
+          ) : (
+            <FindingsPanel scanId={scan.id} show={show} />
+          )}
         </div>
       )}
     </Card>
@@ -522,28 +695,50 @@ function EditForm({
     pa_version: scan.pa_version ?? '',
     scan_flags: scan.scan_flags ?? '',
     subfolder: scan.subfolder ?? '',
+    sla_high_days: scan.sla_high_days ?? null,
+    sla_medium_days: scan.sla_medium_days ?? null,
     min_notify_severity: scan.min_notify_severity,
     notify_recipients: (scan.notify_recipients ?? []).join(', '),
   })
 
   const set = (k: string, v: unknown) => setForm(prev => ({ ...prev, [k]: v }))
 
+  const [confirmOpen, setConfirmOpen] = React.useState(false)
+  const [pendingPatch, setPendingPatch] = React.useState<Partial<RepoScan> | null>(null)
+
+  const buildPatch = (): Partial<RepoScan> => ({
+    name: form.name,
+    url: form.url,
+    branch: form.branch,
+    cron_schedule: form.cron_schedule || null,
+    cron_timezone: form.cron_timezone || null,
+    is_enabled: form.is_enabled,
+    credential_id: form.credential_id ? Number(form.credential_id) : null,
+    config_template_id: form.config_template_id ? Number(form.config_template_id) : null,
+    pa_version: form.pa_version || null,
+    scan_flags: form.scan_flags || null,
+    subfolder: form.subfolder || null,
+    sla_high_days: form.sla_high_days,
+    sla_medium_days: form.sla_medium_days,
+    min_notify_severity: form.min_notify_severity as AlertSeverity,
+    notify_recipients: form.notify_recipients.split(',').map((s: string) => s.trim()).filter(Boolean),
+  })
+
+  const configChanged = (): boolean => {
+    const scanFlagsChanged = (form.scan_flags || null) !== scan.scan_flags
+    const subfolderChanged = (form.subfolder || null) !== scan.subfolder
+    const templateChanged = (form.config_template_id ? Number(form.config_template_id) : null) !== scan.config_template_id
+    return scanFlagsChanged || subfolderChanged || templateChanged
+  }
+
   const submit = () => {
-    onSave({
-      name: form.name,
-      url: form.url,
-      branch: form.branch,
-      cron_schedule: form.cron_schedule || null,
-      cron_timezone: form.cron_timezone || null,
-      is_enabled: form.is_enabled,
-      credential_id: form.credential_id ? Number(form.credential_id) : null,
-      config_template_id: form.config_template_id ? Number(form.config_template_id) : null,
-      pa_version: form.pa_version || null,
-      scan_flags: form.scan_flags || null,
-      subfolder: form.subfolder || null,
-      min_notify_severity: form.min_notify_severity as AlertSeverity,
-      notify_recipients: form.notify_recipients.split(',').map(s => s.trim()).filter(Boolean),
-    })
+    const patch = buildPatch()
+    if (configChanged()) {
+      setPendingPatch(patch)
+      setConfirmOpen(true)
+    } else {
+      onSave(patch)
+    }
   }
 
   return (
@@ -558,6 +753,22 @@ function EditForm({
         <TimezoneField value={form.cron_timezone} onChange={v => set('cron_timezone', v)} placeholder={`default: ${defaultTz ?? 'UTC'}`} />
         <Input label="PA version" placeholder="latest" value={form.pa_version} onChange={e => set('pa_version', e.target.value)} />
         <Input label="Subfolder" placeholder="e.g. backend (leave blank to scan repo root)" value={form.subfolder} onChange={e => set('subfolder', e.target.value)} />
+        <Input
+          label="SLA: High/Critical (days)"
+          type="number"
+          min={1}
+          placeholder="Global default"
+          value={form.sla_high_days ?? ''}
+          onChange={e => { if (e.target.value === '') { set('sla_high_days', null); return } const n = Number(e.target.value); set('sla_high_days', Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : null) }}
+        />
+        <Input
+          label="SLA: Medium (days)"
+          type="number"
+          min={1}
+          placeholder="Global default"
+          value={form.sla_medium_days ?? ''}
+          onChange={e => { if (e.target.value === '') { set('sla_medium_days', null); return } const n = Number(e.target.value); set('sla_medium_days', Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : null) }}
+        />
         {scanOptions ? (
           <div style={{ gridColumn: 'span 2' }}>
             {/* key remounts on scan change or if scanOptions is ever refreshed */}
@@ -593,6 +804,17 @@ function EditForm({
         </label>
         <Button variant="primary" onClick={submit}>Save</Button>
       </div>
+      {confirmOpen && pendingPatch && (
+        <Modal title="Scan configuration changed" onClose={() => { setConfirmOpen(false); setPendingPatch(null) }}>
+          <p className="text-sm text-muted-foreground mb-5">
+            Changing scan options, subfolder, or config template will close all open findings for this scan on the next run, because the results are no longer comparable.
+          </p>
+          <div className="flex gap-2 justify-end">
+            <Button variant="secondary" onClick={() => { setConfirmOpen(false); setPendingPatch(null) }}>Cancel</Button>
+            <Button onClick={() => { setConfirmOpen(false); onSave(pendingPatch); setPendingPatch(null) }}>Save anyway</Button>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -841,6 +1063,7 @@ export default function RepoScans() {
                 onUpdate={handleUpdate}
                 onDelete={handleDelete}
                 onTrigger={handleTrigger}
+                show={show}
               />
             ))
           )

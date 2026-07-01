@@ -14,6 +14,7 @@ from app.models import Alert, Scan, ConfigAssignment, ConfigTemplate, CooldownEn
 from app.schemas import HeartbeatPayload, AlertPayload, AlertOut, ScanPayload, ScanOut, CooldownOut, RepoScanResultIngest
 from app.api.deps import get_api_key, resolve_host, require_system_key
 from app.api.alerts import broadcast_alert
+from app.services.finding_lifecycle import update_finding_records
 
 ApiKeyDep = Annotated[tuple, Depends(get_api_key)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -271,6 +272,10 @@ async def ingest_repo_scan_result(
     result.sources = body.sources
     result.error_message = body.error_message
     result.completed_at = utcnow()
+
+    if body.status == RepoScanStatus.success:
+        await update_finding_records(db, result)
+
     await db.commit()
 
     # Release Valkey lock so next trigger can proceed

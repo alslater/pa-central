@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 
 from app.models import RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, SystemSetting, FindingRecord, utcnow
 from app.core.config import settings as app_settings
-from app.services.finding_lifecycle import DEFAULT_FINDING_RETENTION, _parse_int
+from app.services.finding_lifecycle import DEFAULT_FINDING_RETENTION, parse_int
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ async def prune_old_results(db_factory: Any) -> None:
                             await session.delete(old)
 
         # Purge old closed finding records
-        finding_days = _parse_int(settings.get("finding_retention_days"), DEFAULT_FINDING_RETENTION)
+        finding_days = parse_int(settings.get("finding_retention_days"), DEFAULT_FINDING_RETENTION)
         finding_cutoff = utcnow() - timedelta(days=finding_days)
         await session.execute(
             delete(FindingRecord)

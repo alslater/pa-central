@@ -135,7 +135,7 @@ export function Scans() {
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <thead>
                       <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                        {['Status', 'Scan', 'Trigger', 'Findings', 'Scanned', ''].map(h => (
+                        {['Status', 'Scan', 'Trigger', 'Findings', 'Breach', 'Scanned', ''].map(h => (
                           <th key={h} style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
                         ))}
                       </tr>
@@ -165,6 +165,15 @@ export function Scans() {
                               </td>
                               <td style={{ padding: '10px 16px', fontSize: 12, color: 'var(--text-secondary)' }}>{r.triggered_by}</td>
                               <td style={{ padding: '10px 16px', fontSize: 12, color: (r.finding_count ?? 0) > 0 ? 'var(--warn)' : 'var(--ok)', fontWeight: 600 }}>{r.finding_count ?? 0}</td>
+                              <td style={{ padding: '10px 16px' }}>
+                                {r.scan_breach_count > 0 ? (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[12px] font-semibold bg-status-fail/12 text-status-fail-text">
+                                    {r.scan_breach_count}
+                                  </span>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </td>
                               <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)' }}>{r.started_at ? timeAgo(r.started_at) : '—'}</td>
                               <td style={{ padding: '10px 16px', color: 'var(--text-muted)' }}>
                                 {hasFindings && (isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
@@ -172,7 +181,7 @@ export function Scans() {
                             </tr>
                             {isExpanded && hasFindings && (
                               <tr key={`${r.id}-findings`} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                                <td colSpan={6} style={{ background: 'var(--bg-raised)', padding: 0 }}>
+                                <td colSpan={7} style={{ background: 'var(--bg-raised)', padding: 0 }}>
                                   <FindingsTable findings={r.findings!} />
                                 </td>
                               </tr>

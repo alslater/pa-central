@@ -64,3 +64,4 @@ Pipfile
 superpowers/
 
 .agents/
+backend/backfill_findings.py

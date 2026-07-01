@@ -6,6 +6,7 @@ Create Date: 2026-06-26 00:00:00.000000
 """
 from typing import Sequence, Union
 import hashlib
+import json
 
 from alembic import op
 import sqlalchemy as sa
@@ -19,7 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def _hash(scan_flags, subfolder, config_template_id) -> str:
-    raw = f"{scan_flags or ''}|{subfolder or ''}|{config_template_id or ''}"
+    raw = json.dumps([scan_flags, subfolder, config_template_id], separators=(',', ':'))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

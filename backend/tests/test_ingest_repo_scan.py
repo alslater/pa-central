@@ -27,8 +27,8 @@ class TestComputeScanConfigHash:
         b = compute_scan_config_hash(None, None, 2)
         assert a != b
 
-    def test_none_and_empty_string_are_equivalent(self):
-        assert compute_scan_config_hash(None, None, None) == compute_scan_config_hash("", "", None)
+    def test_none_and_empty_string_are_distinct(self):
+        assert compute_scan_config_hash(None, None, None) != compute_scan_config_hash("", "", None)
 
 TEST_SYSTEM_KEY = "test-fleet-system-key-for-tests"
 
@@ -303,3 +303,137 @@ class TestFindingLifecycleIngest:
             .where(FindingRecord.closed_at.is_(None))
         )).scalars().all()
         assert len(open_rows) == 1
+
+
+class TestConfigChangeReset:
+    async def test_config_change_closes_open_findings_with_reason(self, db, repo_scan):
+        """When scan_config_hash changes between results, open findings are closed with closed_reason='config_change'."""
+        from app.services.finding_lifecycle import update_finding_records, compute_scan_config_hash
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        import datetime
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        r1 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=compute_scan_config_hash("--include-dev", None, None),
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-aaa", "package": "requests", "ecosystem": "pypi", "severity": "high"}],
+            completed_at=now,
+        )
+        db.add(r1)
+        await db.flush()
+        await update_finding_records(db, r1)
+        await db.flush()
+
+        open_rows = (await db.execute(
+            select(FindingRecord).where(FindingRecord.repo_scan_id == repo_scan.id).where(FindingRecord.closed_at.is_(None))
+        )).scalars().all()
+        assert len(open_rows) == 1
+
+        r2 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=compute_scan_config_hash("--no-dev", None, None),
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-aaa", "package": "requests", "ecosystem": "pypi", "severity": "high"}],
+            completed_at=now,
+        )
+        db.add(r2)
+        await db.flush()
+        await update_finding_records(db, r2)
+        await db.flush()
+
+        all_rows = (await db.execute(
+            select(FindingRecord).where(FindingRecord.repo_scan_id == repo_scan.id)
+        )).scalars().all()
+        closed = [r for r in all_rows if r.closed_at is not None]
+        assert len(closed) == 1
+        assert closed[0].closed_reason == "config_change"
+
+        open_after = [r for r in all_rows if r.closed_at is None]
+        assert len(open_after) == 1
+        assert open_after[0].reopen_count == 0  # config reset — not a true reopen
+
+    async def test_same_config_hash_does_not_reset(self, db, repo_scan):
+        """When scan_config_hash is unchanged, findings carry over normally."""
+        from app.services.finding_lifecycle import update_finding_records, compute_scan_config_hash
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        import datetime
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        h = compute_scan_config_hash(None, None, None)
+
+        r1 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=h,
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-bbb", "package": "flask", "ecosystem": "pypi", "severity": "medium"}],
+            completed_at=now,
+        )
+        db.add(r1)
+        await db.flush()
+        await update_finding_records(db, r1)
+        await db.flush()
+
+        r2 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=h,
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-bbb", "package": "flask", "ecosystem": "pypi", "severity": "medium"}],
+            completed_at=now,
+        )
+        db.add(r2)
+        await db.flush()
+        await update_finding_records(db, r2)
+        await db.flush()
+
+        all_rows = (await db.execute(
+            select(FindingRecord).where(FindingRecord.repo_scan_id == repo_scan.id)
+        )).scalars().all()
+        assert len(all_rows) == 1
+        assert all_rows[0].closed_at is None
+        assert all_rows[0].closed_reason is None
+
+    async def test_null_hash_does_not_reset(self, db, repo_scan):
+        """When scan_config_hash is NULL (pre-upgrade result), no reset occurs."""
+        from app.services.finding_lifecycle import update_finding_records
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        import datetime
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        r1 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=None,
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-ccc", "package": "django", "ecosystem": "pypi", "severity": "high"}],
+            completed_at=now,
+        )
+        db.add(r1)
+        await db.flush()
+        await update_finding_records(db, r1)
+        await db.flush()
+
+        r2 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=None,
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-ccc", "package": "django", "ecosystem": "pypi", "severity": "high"}],
+            completed_at=now,
+        )
+        db.add(r2)
+        await db.flush()
+        await update_finding_records(db, r2)
+        await db.flush()
+
+        all_rows = (await db.execute(
+            select(FindingRecord).where(FindingRecord.repo_scan_id == repo_scan.id)
+        )).scalars().all()
+        assert len(all_rows) == 1
+        assert all_rows[0].closed_at is None
