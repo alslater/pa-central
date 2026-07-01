@@ -30,6 +30,9 @@ KEY_TYPES: dict[str, SettingValueType] = {
     "scan_result_retention_count": SettingValueType.int,
     "app_base_url": SettingValueType.string,
     "default_cron_timezone": SettingValueType.string,
+    "sla_high_days": SettingValueType.int,
+    "sla_medium_days": SettingValueType.int,
+    "finding_retention_days": SettingValueType.int,
 }
 
 

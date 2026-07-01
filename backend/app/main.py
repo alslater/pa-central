@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 
 from app.core.config import settings
 from app.core.database import init_db
-from app.api import auth, hosts, api_keys, ingest, alerts, scans, config_templates, cooldown, dashboard, users, system_settings, repo_scans, repo_credentials, scan_options
+from app.api import auth, hosts, api_keys, ingest, alerts, scans, config_templates, cooldown, dashboard, users, system_settings, repo_scans, repo_credentials, scan_options, findings
 
 
 async def _run_migrations() -> None:
@@ -138,6 +138,7 @@ for router in [
     scan_options.router,
     repo_scans.router,
     repo_credentials.router,
+    findings.router,
 ]:
     app.include_router(router, prefix="/api")
 

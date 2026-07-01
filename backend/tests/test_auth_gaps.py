@@ -37,6 +37,14 @@ class TestRepoScansAuthGaps:
         r = await client.get("/api/repo-scans/results")
         assert r.status_code == 401
 
+    async def test_repo_scan_findings_requires_auth(self, client):
+        r = await client.get("/api/repo-scans/1/findings")
+        assert r.status_code == 401
+
+    async def test_repo_scan_findings_non_admin_forbidden(self, client, operator_token):
+        r = await client.get("/api/repo-scans/1/findings", headers=auth(operator_token))
+        assert r.status_code == 403
+
 
 # ── /api/scans ─────────────────────────────────────────────────────────────────
 
@@ -366,3 +374,54 @@ class TestJwtSubTypeSafety:
         totp_token = create_totp_session_token(admin_user.id)
         r = await client.get("/api/auth/me", headers=auth(totp_token))
         assert r.status_code == 401
+
+
+# ── /api/findings ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestFindingsAuthGaps:
+    async def test_list_findings_requires_auth(self, client):
+        r = await client.get("/api/findings")
+        assert r.status_code == 401
+
+    async def test_list_findings_non_admin_forbidden(self, client, operator_token):
+        r = await client.get("/api/findings", headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_list_findings_admin_ok(self, client, admin_token):
+        r = await client.get("/api/findings", headers=auth(admin_token))
+        assert r.status_code == 200
+
+    async def test_accept_finding_requires_auth(self, client):
+        r = await client.post("/api/findings/999/accept", json={"reason": "ok"})
+        assert r.status_code == 401
+
+    async def test_accept_finding_non_admin_forbidden(self, client, operator_token):
+        r = await client.post("/api/findings/999/accept", json={"reason": "ok"}, headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_revoke_accept_requires_auth(self, client):
+        r = await client.delete("/api/findings/999/accept")
+        assert r.status_code == 401
+
+    async def test_revoke_accept_non_admin_forbidden(self, client, operator_token):
+        r = await client.delete("/api/findings/999/accept", headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_get_settings_findings_requires_auth(self, client):
+        r = await client.get("/api/settings/findings")
+        assert r.status_code == 401
+
+    async def test_get_settings_findings_non_admin_forbidden(self, client, operator_token):
+        r = await client.get("/api/settings/findings", headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_put_settings_findings_requires_auth(self, client):
+        r = await client.put("/api/settings/findings", json={"sla_high_days": 14, "sla_medium_days": 90, "finding_retention_days": 365})
+        assert r.status_code == 401
+
+    async def test_put_settings_findings_non_admin_forbidden(self, client, operator_token):
+        r = await client.put("/api/settings/findings",
+            json={"sla_high_days": 14, "sla_medium_days": 90, "finding_retention_days": 365},
+            headers=auth(operator_token))
+        assert r.status_code == 403

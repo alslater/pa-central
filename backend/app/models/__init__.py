@@ -5,11 +5,11 @@ Import each symbol from here or import the module.
 from __future__ import annotations
 
 import enum
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import (
-    Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, JSON
+    Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, String, Text, JSON
 )
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -314,12 +314,15 @@ class RepoScan(Base):
     pa_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     scan_flags: Mapped[str | None] = mapped_column(Text, nullable=True)
     subfolder: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    scan_config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     min_notify_severity: Mapped[AlertSeverity] = mapped_column(
         Enum(AlertSeverity), default=AlertSeverity.medium, nullable=False
     )
     notify_recipients: Mapped[list | None] = mapped_column(JSON, nullable=True)
     config_template_id: Mapped[int | None] = mapped_column(ForeignKey("config_templates.id"), nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sla_high_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sla_medium_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_scan_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
@@ -352,5 +355,53 @@ class RepoScanResult(Base):
     started_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     notified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    scan_config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     repo_scan: Mapped[RepoScan] = relationship("RepoScan", back_populates="results")
+
+
+# ── Finding Record ────────────────────────────────────────────────────────────
+
+class FindingRecord(Base):
+    __tablename__ = "finding_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    repo_scan_id: Mapped[int] = mapped_column(
+        ForeignKey("repo_scans.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Identity key — three columns; not unique (episodes repeat)
+    advisory_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    package: Mapped[str] = mapped_column(String(200), nullable=False)
+    ecosystem: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    severity: Mapped[AlertSeverity] = mapped_column(
+        Enum(AlertSeverity), nullable=False
+    )
+
+    # Detail fields captured at first appearance
+    summary: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    details: Mapped[Optional[str]] = mapped_column(Text(), nullable=True)
+    package_version: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    fixed_versions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    is_malicious: Mapped[Optional[bool]] = mapped_column(Boolean(), nullable=True)
+
+    first_found_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime(), nullable=True)
+    closed_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    reopen_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Acceptance
+    accepted_by_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime(), nullable=True)
+    accepted_reason: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    accepted_until: Mapped[Optional[date]] = mapped_column(Date(), nullable=True)
+
+    __table_args__ = (
+        Index("ix_finding_records_identity", "repo_scan_id", "advisory_id", "package", "ecosystem"),
+        Index("ix_finding_records_closed_at", "closed_at"),
+    )
