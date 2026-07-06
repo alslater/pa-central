@@ -67,23 +67,23 @@ function LintMessages({ result, lintError }: { result: LintResult | null; lintEr
   return (
     <div aria-live="polite" aria-atomic="true">
       {lintError && (
-        <div style={{ fontSize: 12, color: 'hsl(var(--status-warning-text, 38 92% 50%))' }}>
+        <div className="lint-warning-text">
           <span aria-hidden="true">⚠ </span>Server validation unavailable — syntax check only
         </div>
       )}
       {hasErrors && (
         <div role="alert">
-          <ul role="list" aria-label="Validation errors" style={{ margin: lintError ? '4px 0 0' : 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <ul aria-label="Validation errors" className={`lint-list${lintError ? ' mt-1' : ''}`}>
             {result!.errors.map((e, i) => (
-              <li key={`${i}-${e}`} style={{ fontSize: 12, color: 'var(--err)' }}><span aria-hidden="true">✕ </span>{e}</li>
+              <li key={`${i}-${e}`} className="lint-error-text"><span aria-hidden="true">✕ </span>{e}</li>
             ))}
           </ul>
         </div>
       )}
       {hasWarnings && (
-        <ul role="list" aria-label="Validation warnings" style={{ margin: (hasErrors || lintError) ? '4px 0 0' : 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <ul aria-label="Validation warnings" className={`lint-list${(hasErrors || lintError) ? ' mt-1' : ''}`}>
           {result!.warnings.map((w, i) => (
-            <li key={`${i}-${w}`} style={{ fontSize: 12, color: 'hsl(var(--status-warning-text, 38 92% 50%))' }}><span aria-hidden="true">⚠ </span>{w}</li>
+            <li key={`${i}-${w}`} className="lint-warning-text"><span aria-hidden="true">⚠ </span>{w}</li>
           ))}
         </ul>
       )}
@@ -160,24 +160,30 @@ export default function Configs() {
   // so allow save. Otherwise block on an explicit invalid result.
   const lintBlocksSave = !lintError && lintResult !== null && !lintResult.valid
 
-  const load = async () => {
-    const myHosts = await api.hosts.list()
-    setHosts(myHosts)
-    if (isOperator) {
-      api.configs.list().then(setTemplates).finally(() => setLoading(false))
-    } else {
-      // Developer: only show templates assigned to their own hosts
-      const assigned = await Promise.all(myHosts.map(h => api.configs.forHost(h.id)))
-      const unique = Object.values(
-        Object.fromEntries(
-          assigned.filter((t): t is ConfigTemplate => t !== null).map(t => [t.id, t])
+  const load = useCallback(async () => {
+    try {
+      const myHosts = await api.hosts.list()
+      setHosts(myHosts)
+      if (isOperator) {
+        const templates = await api.configs.list()
+        setTemplates(templates)
+      } else {
+        // Developer: only show templates assigned to their own hosts
+        const assigned = await Promise.all(myHosts.map(h => api.configs.forHost(h.id)))
+        const unique = Object.values(
+          Object.fromEntries(
+            assigned.filter((t): t is ConfigTemplate => t !== null).map(t => [t.id, t])
+          )
         )
-      )
-      setTemplates(unique)
+        setTemplates(unique)
+      }
+    } catch (e: any) {
+      show(e.message ?? 'Failed to load', 'err')
+    } finally {
       setLoading(false)
     }
-  }
-  useEffect(() => { load() }, [])
+  }, [isOperator, show])
+  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
 
   const selectTemplate = (t: ConfigTemplate) => {
     setSelected(t)
@@ -237,32 +243,20 @@ export default function Configs() {
         subtitle="TOML configurations to push to hosts"
         action={isOperator ? <Button variant="primary" onClick={() => setShowAdd(true)}><Plus size={13} />New template</Button> : undefined}
       />
-      <div style={{ padding: '24px 28px', overflow: 'auto', display: 'flex', gap: 16 }}>
+      <div className="configs-layout">
         {/* List */}
-        <div style={{ width: 260, flexShrink: 0 }}>
-          {loading ? <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div> :
+        <div className="configs-list-col">
+          {loading ? <div className="loading-text">Loading…</div> :
             templates.length === 0 ? <Empty message="No templates yet." /> : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="configs-list-stack">
                 {templates.map(t => (
-                  <button key={t.id} onClick={() => selectTemplate(t)} style={{
-                    background: selected?.id === t.id ? 'var(--accent-dim)' : 'var(--bg-surface)',
-                    border: `1px solid ${selected?.id === t.id ? 'var(--accent-border)' : 'var(--border)'}`,
-                    borderRadius: 'var(--radius)', padding: '10px 14px', cursor: 'pointer',
-                    textAlign: 'left', color: 'var(--text-primary)',
-                  }}>
-                    <div style={{ fontWeight: 500, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <button key={t.id} type="button" onClick={() => selectTemplate(t)} className={`config-list-btn${selected?.id === t.id ? ' active' : ''}`}>
+                    <div className="config-list-btn-name">
                       {t.name}
-                      {t.is_default && (
-                        <span style={{
-                          fontSize: 10, fontWeight: 600, padding: '1px 6px',
-                          borderRadius: 3, background: 'rgba(56,139,253,0.15)',
-                          color: '#388bfd', border: '1px solid rgba(56,139,253,0.3)',
-                          letterSpacing: '0.04em', textTransform: 'uppercase' as const,
-                        }}>Default</span>
-                      )}
+                      {t.is_default && <span className="badge-default">Default</span>}
                     </div>
-                    {t.description && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{t.description}</div>}
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>Updated {timeAgo(t.updated_at)}</div>
+                    {t.description && <div className="config-list-btn-desc">{t.description}</div>}
+                    <div className="config-list-btn-meta">Updated {timeAgo(t.updated_at)}</div>
                   </button>
                 ))}
               </div>
@@ -277,32 +271,28 @@ export default function Configs() {
           const currentDesc = editDesc ?? (selected.description ?? '')
           const tomlInvalid = !!validateToml(currentToml)
           return (
-            <Card style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <Card className="config-detail-card">
               {/* Toolbar */}
-              <div style={{ padding: '10px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div className="config-detail-toolbar">
+                <div className="config-toolbar-name-col">
+                  <div className="config-toolbar-name">
                     {selected.name}
-                    {selected.is_default && (
-                      <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 3, background: 'hsl(var(--status-info)/0.15)', color: 'hsl(var(--status-info-text))', border: '1px solid hsl(var(--status-info)/0.3)', letterSpacing: '0.04em', textTransform: 'uppercase' as const }}>Default</span>
-                    )}
-                    {isDirty && (
-                      <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 3, background: 'hsl(var(--status-review)/0.15)', color: 'hsl(var(--status-review-text))', border: '1px solid hsl(var(--status-review)/0.3)', letterSpacing: '0.04em', textTransform: 'uppercase' as const }}>Unsaved</span>
-                    )}
+                    {selected.is_default && <span className="badge-default">Default</span>}
+                    {isDirty && <span className="badge-unsaved">Unsaved</span>}
                   </div>
                   {isOperator && (
                     <input
                       value={currentDesc}
                       onChange={e => setEditDesc(e.target.value)}
                       placeholder="Description"
-                      style={{ fontSize: 12, color: 'var(--text-secondary)', background: 'transparent', border: 'none', outline: 'none', fontFamily: 'var(--font-ui)', width: '100%' }}
+                      className="config-desc-input"
                     />
                   )}
                   {!isOperator && selected.description && (
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{selected.description}</div>
+                    <div className="config-toml-label">{selected.description}</div>
                   )}
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <div className="config-toolbar-actions">
                   {isDirty && (
                     <>
                       <Button variant="ghost" onClick={discardEdits}><RotateCcw size={13} />Discard</Button>
@@ -317,7 +307,7 @@ export default function Configs() {
                 </div>
               </div>
               {/* Editor */}
-              <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div className="config-editor-section">
                 <TomlEditor
                   value={currentToml}
                   onChange={isOperator ? (v) => { setEditToml(v); runLint(v) } : () => {}}
@@ -325,7 +315,7 @@ export default function Configs() {
                   showError={isDirty}
                 />
                 {(lintResult || lintError) && (
-                  <div style={{ padding: '8px 18px' }}>
+                  <div className="lint-messages-padding">
                     <LintMessages result={lintResult} lintError={lintError} />
                   </div>
                 )}
@@ -383,18 +373,18 @@ function AddTemplateModal({ onClose, onSaved }: { onClose: () => void; onSaved: 
 
   return (
     <Modal title="New config template" onClose={onClose}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="modal-form">
         <Input label="Name *" value={name} onChange={e => setName(e.target.value)} placeholder="production-default" />
         <Input label="Description" value={description} onChange={e => setDescription(e.target.value)} />
         <div>
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>TOML content *</span>
-          <div style={{ marginTop: 4 }}>
+          <span className="config-toml-label">TOML content *</span>
+          <div className="mt-1">
             <TomlEditor value={toml} onChange={v => { setToml(v); runLint(v) }} minHeight={300} />
           </div>
         </div>
         <LintMessages result={lintResult} lintError={lintError} />
-        {error && <div style={{ color: 'var(--err)', fontSize: 12 }}>{error}</div>}
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        {error && <div className="lint-error-text">{error}</div>}
+        <div className="modal-actions">
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={save} disabled={!name || !toml || !!validateToml(toml) || lintPending || lintBlocksSave || saving}>{saving ? 'Saving…' : 'Create'}</Button>
         </div>
@@ -419,12 +409,12 @@ function AssignModal({ template, hosts, onClose, onSaved }: {
 
   return (
     <Modal title={`Assign "${template.name}"`} onClose={onClose}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="modal-form-sm">
         <Select label="Host" value={hostId} onChange={e => setHostId(e.target.value)}>
           <option value="">Select a host…</option>
           {hosts.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
         </Select>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <div className="modal-actions">
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={save} disabled={!hostId || saving}>{saving ? 'Assigning…' : 'Assign'}</Button>
         </div>

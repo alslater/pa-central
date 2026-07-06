@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions, FindingRecord,
 } from '@/lib/api'
@@ -9,10 +9,27 @@ import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settin
 import { CronField } from '@/components/CronField'
 import { TimezoneField } from '@/components/TimezoneField'
 import { parseScanArgs, assembleScanArgs, compileFlags, scanArgsReducer } from '@/lib/scanArgs'
+import { useRovingTabs } from '@/lib/hooks'
 
 const SEV_OPTIONS: AlertSeverity[] = ['info', 'low', 'warning', 'medium', 'high', 'critical']
 const CRED_OPTIONS: CredentialType[] = ['none', 'https_token', 'ssh_key']
 
+// Normalises a pasted PEM key into the canonical RFC 7468 layout that OpenSSH
+// and most TLS libraries require: header line, optional Proc-Type/DEK-Info
+// lines (for encrypted keys), a blank separator, 64-char-wrapped base64 body,
+// then footer line.
+//
+// The pre-split keyword newline insertion (the `between.replace(…)` call
+// below) is load-bearing: pasted keys sometimes arrive with PEM headers
+// fused directly to the preceding value with no whitespace
+// (e.g. "4,ENCRYPTEDDEK-Info:AES-128-CBC,..."), which would cause the header
+// keyword to be missed by the per-line matcher and treated as body data,
+// corrupting the key. Inserting '\n' before each keyword before splitting
+// guarantees they are on their own line.
+//
+// DEK-Info is matched precisely (ALGO,HEXIV) so that any base64 body chars
+// that trail immediately after the IV without whitespace are captured in
+// group 2 and routed to bodyParts rather than lost.
 function normalizePem(value: string): string {
   const headerMatch = value.match(/^(-----BEGIN [^-]+-----)/)
   const footerMatch = value.match(/(-----END [^-]+-----)/)
@@ -29,6 +46,7 @@ function normalizePem(value: string): string {
     const procType = t.match(/^Proc-Type:\s*(\S+)(.*)/)
     // DEK-Info value is ALGO,HEXIV — match the IV precisely so body chars fused to it are separated
     const dekInfo  = t.match(/^DEK-Info:\s*([A-Z0-9-]+,[0-9A-Fa-f]+)(.*)/)
+
     if (procType) {
       pemHeaders.push(`Proc-Type: ${procType[1]}`)
       if (procType[2]) bodyParts.push(procType[2].replace(/\s+/g, ''))
@@ -73,8 +91,8 @@ function CredentialForm({
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+    <div className="cred-form-grid-wrap">
+      <div className="cred-form-grid">
         <Input label="Name" value={form.name} onChange={e => set('name', e.target.value)} />
         <Select label="Type" value={form.credential_type} onChange={e => set('credential_type', e.target.value)}>
           {CRED_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
@@ -98,7 +116,7 @@ function CredentialForm({
           />
         )}
       </div>
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div className="cred-form-actions">
         <Button variant="primary" onClick={submit}>{initial ? 'Save' : 'Add'}</Button>
         <Button variant="secondary" onClick={onCancel}>Cancel</Button>
       </div>
@@ -122,44 +140,36 @@ function CredentialsPanel({
   }
 
   return (
-    <Card style={{ marginBottom: 24 }}>
-      <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <KeyRound size={14} style={{ color: 'var(--text-muted)' }} />
-        <span style={{ fontWeight: 600, fontSize: 13 }}>Credentials</span>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 4 }}>shared across repo scans</span>
+    <Card className="card-mb-24">
+      <div className="cred-panel-header">
+        <KeyRound size={14} className="text-muted" />
+        <span className="cred-panel-title">Credentials</span>
+        <span className="cred-panel-subtext">shared across repo scans</span>
       </div>
 
       {credentials.length === 0 ? (
-        <div style={{ padding: '12px 16px' }}>
+        <div className="cred-empty-wrap">
           <Empty message="No credentials yet. Add one to use with repo scans." />
         </div>
       ) : (
         credentials.map(cred => (
           <div key={cred.id}>
-            <div style={{
-              padding: '10px 16px', borderBottom: '1px solid var(--border)',
-              display: 'flex', alignItems: 'center', gap: 10,
-            }}>
-              <span style={{ fontWeight: 500, fontSize: 13, flex: 1 }}>{cred.name}</span>
-              <span style={{
-                fontSize: 11, padding: '2px 7px', borderRadius: 4,
-                background: 'var(--bg-raised)', color: 'var(--text-muted)',
-              }}>
-                {CRED_TYPE_LABEL[cred.credential_type]}
-              </span>
+            <div className="cred-row">
+              <span className="cred-name">{cred.name}</span>
+              <span className="cred-type-badge">{CRED_TYPE_LABEL[cred.credential_type]}</span>
               {isAdmin && (
-                <Button variant="ghost" onClick={() => onDelete(cred)} style={{ padding: '4px 8px', color: '#f85149' }} title={`Delete ${cred.name}`} aria-label={`Delete ${cred.name}`}>
+                <Button variant="ghost" onClick={() => onDelete(cred)} className="delete-btn-color px-2 py-1" title={`Delete ${cred.name}`} aria-label={`Delete ${cred.name}`}>
                   <Trash2 size={12} />
                 </Button>
               )}
               {isOperator && (
-                <Button variant="ghost" onClick={() => setEditingId(editingId === cred.id ? null : cred.id)} style={{ padding: '4px 8px' }} title={editingId === cred.id ? 'Collapse credential' : 'Edit credential'} aria-label={editingId === cred.id ? 'Collapse credential' : 'Edit credential'}>
+                <Button variant="ghost" onClick={() => setEditingId(editingId === cred.id ? null : cred.id)} className="px-2 py-1" title={editingId === cred.id ? 'Collapse credential' : 'Edit credential'} aria-label={editingId === cred.id ? 'Collapse credential' : 'Edit credential'}>
                   {editingId === cred.id ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </Button>
               )}
             </div>
             {editingId === cred.id && (
-              <div style={{ padding: 16, borderBottom: '1px solid var(--border)', background: 'var(--bg-raised)' }}>
+              <div className="cred-edit-section">
                 <CredentialForm
                   initial={cred}
                   onSave={data => { onEdit(cred.id, data); setEditingId(null) }}
@@ -176,81 +186,81 @@ function CredentialsPanel({
 
 // ── Scan results ───────────────────────────────────────────────────────────────
 
-
 function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: number }) {
   const [results, setResults] = useState<RepoScanResult[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
-  const load = (indicator: 'initial' | 'refresh') => {
+  const load = useCallback((indicator: 'initial' | 'refresh') => {
     if (indicator === 'initial') setLoading(true)
     else setRefreshing(true)
     api.repoScans.results(scan.id).then(setResults).finally(() => {
       setLoading(false)
       setRefreshing(false)
     })
-  }
+  }, [scan.id])
+  useEffect(() => { load('initial') }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
+  useEffect(() => { if (refreshKey) load('refresh') }, [load, refreshKey]) // eslint-disable-line react-hooks/set-state-in-effect
 
-  useEffect(() => { load('initial') }, [scan.id])
-  useEffect(() => { if (refreshKey) load('refresh') }, [refreshKey])
-
-  if (loading) return <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>Loading…</div>
+  if (loading) return <div className="loading-text-sm">Loading…</div>
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '4px 16px 0' }}>
-        <Button variant="ghost" onClick={() => load('refresh')} title="Refresh results" aria-label="Refresh results" style={{ padding: '4px 8px' }}>
-          <RefreshCw size={14} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
+      <div className="result-refresh-row">
+        <Button variant="ghost" onClick={() => load('refresh')} title="Refresh results" aria-label="Refresh results" className="px-2 py-1">
+          <RefreshCw size={14} className={refreshing ? 'animate-spin' : undefined} />
         </Button>
       </div>
       {results.length === 0 ? (
-        <div style={{ padding: '8px 16px' }}><Empty message="No scan results yet" /></div>
+        <div className="result-empty-wrap"><Empty message="No scan results yet" /></div>
       ) : results.map(r => {
         const hasFindings = r.findings && r.findings.length > 0
         const isExpanded = expandedId === r.id
         return (
-          <div key={r.id} style={{ borderBottom: '1px solid var(--border)' }}>
+          <div key={r.id} className="result-row">
             <div
-              style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, cursor: hasFindings ? 'pointer' : 'default' }}
+              className={`result-row-content ${hasFindings ? 'result-row-clickable' : 'result-row-static'}`}
               onClick={() => hasFindings && setExpandedId(isExpanded ? null : r.id)}
+              onKeyDown={e => { if (hasFindings && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
+              role={hasFindings ? 'button' : undefined}
+              tabIndex={hasFindings ? 0 : undefined}
+              aria-expanded={hasFindings ? isExpanded : undefined}
             >
               <RepoScanStatusBadge status={r.status} />
-              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              <span className="result-trigger-label">
                 {r.triggered_by === 'scheduled' ? '⏱ scheduled' : '▶ manual'}
               </span>
               {r.finding_count != null && (
-                <span style={{ fontSize: 11, color: r.finding_count > 0 ? 'var(--warn)' : 'var(--text-secondary)', fontWeight: r.finding_count > 0 ? 600 : undefined }}>
+                <span className={`result-finding-count ${r.finding_count > 0 ? 'has-findings' : 'no-findings'}`}>
                   {r.finding_count} finding{r.finding_count !== 1 ? 's' : ''}
                 </span>
               )}
               {r.pa_version && (
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>pa@{r.pa_version}</span>
+                <span className="result-pa-version">pa@{r.pa_version}</span>
               )}
-              <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+              <span className="result-timestamp">
                 {r.started_at ? timeAgo(r.started_at) : ''}
               </span>
               {hasFindings && (
-                <span style={{ color: 'var(--text-muted)' }}>
+                <span className="result-chevron">
                   {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </span>
               )}
             </div>
             {r.sources && r.sources.length > 0 && (
-              <div style={{ padding: '4px 16px 8px', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Sources</span>
+              <div className="result-sources-row">
+                <span className="result-sources-label">Sources</span>
                 {r.sources.map(src => (
-                  <span key={src} style={{ fontSize: 11, padding: '2px 7px', borderRadius: 4, background: 'var(--bg-input)', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{src}</span>
+                  <span key={src} className="result-source-tag">{src}</span>
                 ))}
               </div>
             )}
             {r.error_message && (
-              <pre style={{ fontSize: 11, color: '#f85149', margin: '0 16px 12px', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)' }}>
-                {r.error_message}
-              </pre>
+              <pre className="result-error-pre">{r.error_message}</pre>
             )}
             {isExpanded && hasFindings && (
-              <div style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-raised)' }}>
+              <div className="result-findings-expanded">
                 <FindingsTable findings={r.findings!} />
               </div>
             )}
@@ -304,7 +314,6 @@ function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, k
       if (seq !== reqSeq.current) return
       setFindings(data)
       setLoading(false)
-      // Refresh the selected finding if still open
       setSelected(prev => prev ? data.find(f => f.id === prev.id) ?? null : null)
     }).catch((e: Error) => {
       if (seq !== reqSeq.current) return
@@ -315,8 +324,10 @@ function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, k
   }, [scanId, show])
 
   React.useEffect(() => {
-    reload()
-    return () => { reqSeq.current++ }
+    reload() // eslint-disable-line react-hooks/set-state-in-effect
+    // reqSeq is an abort counter: incrementing it in cleanup is intentional — it invalidates
+    // any in-flight response from the previous render so stale data is never committed.
+    return () => { reqSeq.current++ } // eslint-disable-line react-hooks/exhaustive-deps
   }, [reload])
 
   if (loading && !findings) return <div className="p-3 text-[13px] text-muted-foreground">Loading findings…</div>
@@ -393,14 +404,20 @@ function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, k
 }
 
 // ── Structured scan args field ────────────────────────────────────────────────
-
-// ── ScanArgsField component ───────────────────────────────────────────────────
 //
-// UNCONTROLLED after mount: defaultScanFlags seeds state once, then the
-// component owns bools/strs internally. External resets MUST use a key prop
-// that changes when the source record changes (e.g. key={scan.id}).
-// Do NOT remove the key without replacing it with a controlled sync mechanism.
-
+// UNCONTROLLED after mount: defaultScanFlags seeds state once via the lazy
+// useReducer initializer, then the component owns bools/strs internally.
+// To reset from outside, change the key prop (e.g. key={scan.id}) — that
+// remounts the component and re-runs the initializer. Do NOT add a sync
+// effect that writes into bools/strs; it would fight user edits.
+//
+// onChange is stored in a ref so the emission effect doesn't need it as a
+// dependency — passing an inline lambda would otherwise re-run the effect on
+// every parent render.
+//
+// lastEmittedRef suppresses a spurious onChange call on mount (the initial
+// assembled value matches the seed) and no-op emissions when the user
+// toggles flags back to their original state.
 
 function ScanArgsField({
   options,
@@ -412,10 +429,8 @@ function ScanArgsField({
   defaultScanFlags: string
   onChange: (assembled: string) => void
 }) {
-  // compiledFlags is derived from options.flags which is stable after mount.
   const compiledFlags = useMemo(() => compileFlags(options.flags), [options.flags])
 
-  // useReducer lazy initializer: parse runs exactly once per mount.
   const [{ bools, strs }, dispatch] = useReducer(
     scanArgsReducer,
     { defaultScanFlags, compiledFlags },
@@ -427,19 +442,11 @@ function ScanArgsField({
     [options.flags],
   )
 
-  // Store onChange in a ref so the effect below doesn't need it as a dependency.
-  // This avoids render loops when callers pass inline lambdas.
   const onChangeRef = useRef(onChange)
-  onChangeRef.current = onChange
+  onChangeRef.current = onChange // eslint-disable-line react-hooks/refs
 
-  // Track the last emitted string so we only call onChange when the value changes,
-  // avoiding redundant parent state updates (including the no-op on initial mount).
-  // Seeded with the initial assembled value so mount doesn't fire a redundant update.
   const lastEmittedRef = useRef(assembleScanArgs(bools, strs, options.flags))
 
-  // Call onChange after every state change with the latest assembled value.
-  // useReducer guarantees bools/strs are from the most recent committed state.
-  // options.flags is stable after mount (component is uncontrolled, key={scan.id} resets it).
   useEffect(() => {
     const assembled = assembleScanArgs(bools, strs, options.flags)
     if (assembled === lastEmittedRef.current) return
@@ -469,17 +476,14 @@ function ScanArgsField({
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }}>Scan options</span>
+    <div className="scan-args-wrap">
+      <span className="scan-options-label">Scan options</span>
       {options.flags.map((flag: ScanFlag) => {
         const excluded = isExcluded(flag.name)
         if (flag.type === 'bool') {
           return (
-            <div key={flag.name} style={{ opacity: excluded ? 0.4 : 1 }}>
-              <label style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                fontSize: 13, cursor: excluded ? 'not-allowed' : 'pointer',
-              }}>
+            <div key={flag.name} className={`scan-flag-wrap${excluded ? ' excluded' : ''}`}>
+              <label className="scan-flag-bool-label">
                 <input
                   type="checkbox"
                   checked={!!bools[flag.name]}
@@ -488,12 +492,12 @@ function ScanArgsField({
                 />
                 <span>{flag.cli_flag}</span>
               </label>
-              {flag.help && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, marginLeft: 22 }}>{flag.help}</div>}
+              {flag.help && <div className="scan-flag-help-indented">{flag.help}</div>}
             </div>
           )
         }
         return (
-          <div key={flag.name} style={{ opacity: excluded ? 0.4 : 1 }}>
+          <div key={flag.name} className={`scan-flag-wrap${excluded ? ' excluded' : ''}`}>
             <Input
               label={flag.cli_flag}
               value={strs[flag.name] ?? ''}
@@ -501,7 +505,7 @@ function ScanArgsField({
               onChange={e => setStr(flag.name, e.target.value)}
               placeholder={flag.help}
             />
-            {flag.help && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{flag.help}</div>}
+            {flag.help && <div className="scan-flag-help">{flag.help}</div>}
           </div>
         )
       })}
@@ -543,7 +547,6 @@ function ScanCard({
     const poll = () => {
       api.repoScans.results(scan.id).then(results => {
         const top = results[0] ?? null
-        // If the latest result predates our trigger, it's stale — keep showing running
         const resultTime = top?.started_at ? new Date(top.started_at + 'Z').getTime() : 0
         if (triggeredAtRef.current && resultTime < triggeredAtRef.current - 5000) {
           pollingRef.current = setTimeout(poll, 2000)
@@ -575,16 +578,14 @@ function ScanCard({
   const isRunning = latestStatus === 'running' || latestStatus === 'pending'
 
   return (
-    <Card style={{ marginBottom: 12 }}>
-      <div style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{
-          width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-          background: dotColor,
-          boxShadow: `0 0 6px ${dotColor}`,
-          animation: isRunning ? 'pulse 1s ease-in-out infinite' : 'none',
-        }} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+    <Card className="card-mb-12">
+      <div className="scan-card-header">
+        <div
+          className={`scan-status-dot${isRunning ? ' running' : ''}`}
+          style={{ background: dotColor, boxShadow: `0 0 6px ${dotColor}` }}
+        />
+        <div className="scan-card-info">
+          <div className="scan-card-name-row">
             {scan.name}
             {scan.breach && (
               <button
@@ -598,64 +599,56 @@ function ScanCard({
               </button>
             )}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div className="scan-card-meta">
             {scan.url} · {scan.branch}
-            {credName && <> · <KeyRound size={10} style={{ verticalAlign: 'middle' }} /> {credName}</>}
-            {scan.cron_schedule && <> · <code style={{ fontFamily: 'var(--font-mono)' }}>{scan.cron_schedule}</code></>}
+            {credName && <> · <KeyRound size={10} className="icon-inline" /> {credName}</>}
+            {scan.cron_schedule && <> · <code className="font-mono">{scan.cron_schedule}</code></>}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div className="scan-card-actions">
           {scan.last_scan_at && (
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>last: {timeAgo(scan.last_scan_at)}</span>
+            <span className="scan-card-last-scan">last: {timeAgo(scan.last_scan_at)}</span>
           )}
           {isOperator && (
-            <Button variant="ghost" disabled={!scan.is_enabled} onClick={() => onTrigger(scan).then(() => { latestStatusRef.current = 'running'; setLatestStatus('running'); startPolling() })} style={{ padding: '4px 8px', opacity: scan.is_enabled ? 1 : 0.35 }} title={`Trigger ${scan.name}`} aria-label={`Trigger ${scan.name}`}>
+            <Button variant="ghost" disabled={!scan.is_enabled} onClick={() => onTrigger(scan).then(() => { latestStatusRef.current = 'running'; setLatestStatus('running'); startPolling() })} className={`px-2 py-1${scan.is_enabled ? '' : ' opacity-35'}`} title={`Trigger ${scan.name}`} aria-label={`Trigger ${scan.name}`}>
               <Play size={12} />
             </Button>
           )}
           {isOperator && (
-            <Button variant="ghost" onClick={() => setEditing(x => !x)} style={{ padding: '4px 8px', color: editing ? 'var(--text-secondary)' : undefined }} title={`${editing ? 'Close' : 'Open'} settings for ${scan.name}`} aria-label={`${editing ? 'Close' : 'Open'} settings for ${scan.name}`}>
+            <Button variant="ghost" onClick={() => setEditing(x => !x)} className={`px-2 py-1${editing ? ' text-secondary' : ''}`} title={`${editing ? 'Close' : 'Open'} settings for ${scan.name}`} aria-label={`${editing ? 'Close' : 'Open'} settings for ${scan.name}`}>
               <Settings2 size={12} />
             </Button>
           )}
           {isAdmin && (
-            <Button variant="ghost" onClick={() => onDelete(scan)} style={{ padding: '4px 8px', color: '#f85149' }} title={`Delete ${scan.name}`} aria-label={`Delete ${scan.name}`}>
+            <Button variant="ghost" onClick={() => onDelete(scan)} className="px-2 py-1 delete-btn-color" title={`Delete ${scan.name}`} aria-label={`Delete ${scan.name}`}>
               <Trash2 size={12} />
             </Button>
           )}
-          <Button variant="ghost" onClick={() => setExpanded(x => !x)} style={{ padding: '4px 8px' }} title={expanded ? 'Collapse results' : 'Expand results'} aria-label={expanded ? 'Collapse results' : 'Expand results'}>
+          <Button variant="ghost" onClick={() => setExpanded(x => !x)} className="px-2 py-1" title={expanded ? 'Collapse results' : 'Expand results'} aria-label={expanded ? 'Collapse results' : 'Expand results'}>
             {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </Button>
         </div>
       </div>
 
       {editing && isOperator && (
-        <div style={{ borderTop: '1px solid var(--border)' }}>
+        <div className="form-section-border">
           <EditForm scan={scan} credentials={credentials} templates={templates} defaultTz={defaultTz} scanOptions={scanOptions} scanOptionsVersion={scanOptionsVersion} onSave={patch => { onUpdate(scan.id, patch); setEditing(false) }} />
         </div>
       )}
 
       {expanded && (
-        <div style={{ borderTop: '1px solid var(--border)' }}>
-          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', padding: '0 16px' }}>
+        <div className="form-section-border">
+          <div className="scan-card-inner-tab-bar">
             {(['results', 'findings'] as const).map(t => (
               <button
                 key={t}
                 type="button"
                 onClick={() => setExpandedTab(t)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer',
-                  padding: '8px 12px', fontSize: 12, fontWeight: 500,
-                  color: expandedTab === t ? 'var(--text-primary)' : 'var(--text-muted)',
-                  borderBottom: `2px solid ${expandedTab === t ? 'hsl(var(--brand))' : 'transparent'}`,
-                  marginBottom: -1,
-                }}
+                className={expandedTab === t ? 'tab-btn-inner active' : 'tab-btn-inner'}
               >
                 {t === 'results' ? 'Results' : 'Findings'}
                 {t === 'findings' && scan.breach_count > 0 && (
-                  <span style={{ marginLeft: 4, fontSize: 11, fontWeight: 600, padding: '1px 5px', borderRadius: 8, background: '#fee2e2', color: '#b91c1c' }}>
-                    {scan.breach_count}
-                  </span>
+                  <span className="inner-tab-breach-badge">{scan.breach_count}</span>
                 )}
               </button>
             ))}
@@ -742,12 +735,12 @@ function EditForm({
   }
 
   return (
-    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+    <div className="edit-form-wrap">
+      <div className="edit-form-grid">
         <Input label="Name" value={form.name} onChange={e => set('name', e.target.value)} />
         <Input label="URL" value={form.url} onChange={e => set('url', e.target.value)} />
         <Input label="Branch" value={form.branch} onChange={e => set('branch', e.target.value)} />
-        <div style={{ gridColumn: 'span 2' }}>
+        <div className="edit-form-span2">
           <CronField value={form.cron_schedule} onChange={v => set('cron_schedule', v)} timezone={form.cron_timezone || defaultTz} />
         </div>
         <TimezoneField value={form.cron_timezone} onChange={v => set('cron_timezone', v)} placeholder={`default: ${defaultTz ?? 'UTC'}`} />
@@ -770,8 +763,7 @@ function EditForm({
           onChange={e => { if (e.target.value === '') { set('sla_medium_days', null); return } const n = Number(e.target.value); set('sla_medium_days', Number.isFinite(n) && Number.isInteger(n) && n >= 1 ? n : null) }}
         />
         {scanOptions ? (
-          <div style={{ gridColumn: 'span 2' }}>
-            {/* key remounts on scan change or if scanOptions is ever refreshed */}
+          <div className="edit-form-span2">
             <ScanArgsField
               key={`${scan.id}-${scanOptionsVersion}`}
               options={scanOptions}
@@ -780,7 +772,7 @@ function EditForm({
             />
           </div>
         ) : (
-          <div style={{ gridColumn: 'span 2', fontSize: 12, color: 'var(--text-muted)' }}>
+          <div className="edit-form-span2 scan-unavailable-text">
             Scan options unavailable — save without changes or reload to edit scan flags.
           </div>
         )}
@@ -797,8 +789,8 @@ function EditForm({
         </Select>
         <Input label="Notify recipients (comma-separated)" value={form.notify_recipients} onChange={e => set('notify_recipients', e.target.value)} />
       </div>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+      <div className="edit-form-footer">
+        <label className="edit-form-enabled-label">
           <input type="checkbox" checked={form.is_enabled} onChange={e => set('is_enabled', e.target.checked)} />
           Enabled
         </label>
@@ -857,7 +849,7 @@ function AddModal({
 
   return (
     <Modal title="Add repo scan" onClose={onClose}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="add-modal-form">
         <Input label="Name" value={form.name} onChange={e => set('name', e.target.value)} />
         <Input label="URL" placeholder="https://github.com/org/repo" value={form.url} onChange={e => set('url', e.target.value)} />
         <Input label="Branch" value={form.branch} onChange={e => set('branch', e.target.value)} />
@@ -873,7 +865,7 @@ function AddModal({
             onChange={v => set('scan_flags', v)}
           />
         ) : (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          <div className="scan-unavailable-text">
             Scan options unavailable — save without changes or reload to edit scan flags.
           </div>
         )}
@@ -889,11 +881,11 @@ function AddModal({
           {SEV_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
         </Select>
         <Input label="Notify recipients (comma-separated)" value={form.notify_recipients} onChange={e => set('notify_recipients', e.target.value)} />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+        <label className="add-modal-enabled-label">
           <input type="checkbox" checked={form.is_enabled} onChange={e => set('is_enabled', e.target.checked)} />
           Enable immediately
         </label>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+        <div className="add-modal-actions">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={submit}>Create</Button>
         </div>
@@ -914,6 +906,8 @@ export default function RepoScans() {
   const [showAddCredential, setShowAddCredential] = useState(false)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('scans')
+  const TAB_IDS: readonly Tab[] = ['scans', 'credentials']
+  const { tabRef, onKeyDown: onTabKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
   const { show, Toast } = useToast()
   const { user } = useAuth()
   const isOperator = user?.role === 'admin' || user?.role === 'operator'
@@ -934,7 +928,7 @@ export default function RepoScans() {
     return () => { mounted = false }
   }, [])
 
-  const load = () =>
+  const load = useCallback(() =>
     Promise.all([api.repoScans.list(), api.repoCredentials.list(), api.configs.list(), api.systemSettings.list()])
       .then(([s, c, t, settings]) => {
         setScans(s); setCredentials(c); setTemplates(t)
@@ -942,8 +936,8 @@ export default function RepoScans() {
       })
       .catch(e => show(e.message, 'err'))
       .finally(() => setLoading(false))
-
-  useEffect(() => { load() }, [])
+  , [show])
+  useEffect(() => { load() }, [load])
 
   const handleAddCredential = async (data: Parameters<typeof api.repoCredentials.create>[0]) => {
     try { await api.repoCredentials.create(data); show('Credential added'); setShowAddCredential(false); load() }
@@ -1000,33 +994,32 @@ export default function RepoScans() {
       />
 
       {/* Tab bar */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', padding: '0 28px', flexShrink: 0 }}>
-        {tabs.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              padding: '10px 16px', fontSize: 13, fontWeight: 500,
-              color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
-              borderBottom: `2px solid ${tab === t.id ? 'hsl(var(--brand))' : 'transparent'}`,
-              marginBottom: -1, display: 'flex', alignItems: 'center', gap: 6,
-              transition: 'color var(--duration-fast)',
-            }}
-          >
-            {t.label}
-            {!loading && (
-              <span style={{
-                fontSize: 11, fontWeight: 600, padding: '1px 6px', borderRadius: 10,
-                background: tab === t.id ? 'hsl(var(--brand)/0.15)' : 'var(--bg-raised)',
-                color: tab === t.id ? 'hsl(var(--brand))' : 'var(--text-muted)',
-              }}>
-                {t.count}
-              </span>
-            )}
-          </button>
-        ))}
+      <div className="tab-bar" role="tablist">
+        {tabs.map(t => {
+          const isActive = tab === t.id
+          return (
+            <button
+              key={t.id}
+              ref={tabRef(t.id)}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`repo-scans-panel-${t.id}`}
+              id={`repo-scans-tab-${t.id}`}
+              tabIndex={isActive ? 0 : -1}
+              onClick={() => setTab(t.id)}
+              onKeyDown={onTabKeyDown}
+              className={isActive ? 'tab-btn active' : 'tab-btn'}
+            >
+              {t.label}
+              {!loading && (
+                <span className={isActive ? 'tab-count active' : 'tab-count'}>
+                  {t.count}
+                </span>
+              )}
+            </button>
+          )
+        })}
       </div>
 
       {Toast}
@@ -1042,43 +1035,52 @@ export default function RepoScans() {
         </Modal>
       )}
 
-      <div style={{ padding: '24px 28px', overflow: 'auto' }}>
+      <section
+        id="repo-scans-panel-scans"
+        role="tabpanel"
+        aria-labelledby="repo-scans-tab-scans"
+        hidden={tab !== 'scans'}
+        className="repo-scans-content"
+      >
         {loading ? (
-          <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
-        ) : tab === 'scans' ? (
-          scans.length === 0 ? (
-            <Empty message="No repo scans configured. Add one to get started." />
-          ) : (
-            scans.map(scan => (
-              <ScanCard
-                key={scan.id}
-                scan={scan}
-                credentials={credentials}
-                templates={templates}
-                defaultTz={defaultTz}
-                scanOptions={scanOptions}
-                scanOptionsVersion={scanOptionsVersion}
-                isOperator={isOperator}
-                isAdmin={isAdmin}
-                onUpdate={handleUpdate}
-                onDelete={handleDelete}
-                onTrigger={handleTrigger}
-                show={show}
-              />
-            ))
-          )
+          <div className="loading-text">Loading…</div>
+        ) : scans.length === 0 ? (
+          <Empty message="No repo scans configured. Add one to get started." />
         ) : (
-          <>
-            <CredentialsPanel
+          scans.map(scan => (
+            <ScanCard
+              key={scan.id}
+              scan={scan}
               credentials={credentials}
+              templates={templates}
+              defaultTz={defaultTz}
+              scanOptions={scanOptions}
+              scanOptionsVersion={scanOptionsVersion}
               isOperator={isOperator}
               isAdmin={isAdmin}
-              onEdit={handleEditCredential}
-              onDelete={handleDeleteCredential}
+              onUpdate={handleUpdate}
+              onDelete={handleDelete}
+              onTrigger={handleTrigger}
+              show={show}
             />
-          </>
+          ))
         )}
-      </div>
+      </section>
+      <section
+        id="repo-scans-panel-credentials"
+        role="tabpanel"
+        aria-labelledby="repo-scans-tab-credentials"
+        hidden={tab !== 'credentials'}
+        className="repo-scans-content"
+      >
+        <CredentialsPanel
+          credentials={credentials}
+          isOperator={isOperator}
+          isAdmin={isAdmin}
+          onEdit={handleEditCredential}
+          onDelete={handleDeleteCredential}
+        />
+      </section>
     </Shell>
   )
 }

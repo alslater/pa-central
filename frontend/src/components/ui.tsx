@@ -218,7 +218,7 @@ function useDialogAccessibility(onClose: () => void) {
 
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   const onCloseRef = useRef(onClose)
-  onCloseRef.current = onClose
+  onCloseRef.current = onClose // eslint-disable-line react-hooks/refs
   const stableClose = useCallback(() => onCloseRef.current(), [])
   const panelRef = useDialogAccessibility(stableClose)
   const titleId = useId()
@@ -226,7 +226,9 @@ export function Modal({ title, children, onClose }: { title: string; children: R
     <div
       className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-[var(--z-overlay)] p-5"
       onClick={stableClose}
+      role="presentation"
     >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events -- role="dialog" legitimately captures clicks to prevent backdrop dismissal */}
       <div
         ref={panelRef}
         role="dialog"
@@ -260,7 +262,7 @@ export function Empty({ message }: { message: string }) {
 
 export function Drawer({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   const onCloseRef = useRef(onClose)
-  onCloseRef.current = onClose
+  onCloseRef.current = onClose // eslint-disable-line react-hooks/refs
   const stableClose = useCallback(() => onCloseRef.current(), [])
   const panelRef = useDialogAccessibility(stableClose)
   const titleId = useId()
@@ -268,7 +270,9 @@ export function Drawer({ title, children, onClose }: { title: string; children: 
     <div
       className="fixed inset-0 bg-background/60 backdrop-blur-sm z-[var(--z-overlay)]"
       onClick={stableClose}
+      role="presentation"
     >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events -- role="dialog" legitimately captures clicks to prevent backdrop dismissal */}
       <div
         ref={panelRef}
         role="dialog"

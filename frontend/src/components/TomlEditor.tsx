@@ -124,7 +124,7 @@ export function TomlEditor({ value, onChange, minHeight = 300, showError = true 
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const onChangeRef = useRef(onChange)
-  onChangeRef.current = onChange
+  onChangeRef.current = onChange // eslint-disable-line react-hooks/refs
 
   const [themeId, setThemeId] = useState<string>(
     () => localStorage.getItem(THEME_KEY) ?? 'material-dark'
@@ -179,35 +179,15 @@ export function TomlEditor({ value, onChange, minHeight = 300, showError = true 
   const isDark = EDITOR_THEMES[themeId]?.dark ?? true
 
   return (
-    <div style={{
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius)',
-      background: isDark ? '#1e1e1e' : '#fff',
-      minHeight,
-      overflow: 'hidden',
-      display: 'flex',
-      flexDirection: 'column',
-    }}>
+    <div className="toml-editor-wrap" style={{ background: isDark ? '#1e1e1e' : '#fff', minHeight }}>
       {/* Toolbar */}
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '3px 10px 3px 14px',
-        borderBottom: '1px solid var(--border)',
-        background: 'hsl(var(--muted)/0.4)',
-        gap: 8,
-      }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          TOML
-        </span>
+      <div className="toml-editor-toolbar">
+        <span className="toml-editor-label">TOML</span>
         <select
           value={themeId}
           onChange={e => setThemeId(e.target.value)}
           title="Editor colour scheme"
-          style={{
-            fontSize: 11, background: 'var(--bg-input)', color: 'var(--text-secondary)',
-            border: '1px solid var(--border)', borderRadius: 3,
-            padding: '2px 4px', cursor: 'pointer', fontFamily: 'var(--font-ui)',
-          }}
+          className="toml-editor-theme-select"
         >
           {Object.entries(EDITOR_THEMES).map(([id, { label }]) => (
             <option key={id} value={id}>{label}</option>
@@ -215,16 +195,10 @@ export function TomlEditor({ value, onChange, minHeight = 300, showError = true 
         </select>
       </div>
 
-      <div ref={containerRef} style={{ flex: 1, overflow: 'auto', minHeight: minHeight - 28 }} />
+      <div ref={containerRef} className="toml-editor-content" style={{ minHeight: Math.max(0, minHeight - 28) }} />
 
       {showError && error && (
-        <div style={{
-          borderTop: '1px solid hsl(var(--status-fail)/0.3)',
-          background: 'hsl(var(--status-fail)/0.08)',
-          color: 'hsl(var(--status-fail-text))',
-          fontSize: 11, fontFamily: 'var(--font-mono)',
-          padding: '5px 14px', lineHeight: 1.5,
-        }}>
+        <div className="toml-editor-error">
           {error}
         </div>
       )}

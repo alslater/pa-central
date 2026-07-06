@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, Host } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
@@ -14,11 +14,11 @@ export default function Hosts() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     api.hosts.list().then(setHosts).catch((e: any) => show(e.message, 'err')).finally(() => setLoading(false))
-  }
-  useEffect(() => { load() }, [])
+  }, [show])
+  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
 
   const del = async (id: number, name: string) => {
     if (!confirm(`Delete host "${name}"?`)) return

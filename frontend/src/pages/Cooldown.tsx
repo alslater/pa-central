@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, CooldownEntry, Ecosystem, Host } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, Select, useToast, Empty, timeAgo, timeUntil } from '@/components/ui'
@@ -15,14 +15,14 @@ export default function Cooldown() {
   const isOperator = user?.role === 'admin' || user?.role === 'operator'
   const hostMap = useMemo(() => new Map(hosts.map(h => [h.id, h])), [hosts])
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     api.cooldown.list().then(setEntries).catch((e: any) => show(e.message, 'err')).finally(() => setLoading(false))
-  }
+  }, [show])
   useEffect(() => {
-    load()
+    load() // eslint-disable-line react-hooks/set-state-in-effect
     api.hosts.list().then(setHosts).catch((e: any) => show(e.message, 'err'))
-  }, [])
+  }, [load, show])
 
   const del = async (id: number) => {
     try {

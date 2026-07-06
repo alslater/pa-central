@@ -13,15 +13,15 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'hsl(var(--status-fail-text))' }}>Something went wrong</div>
-          <pre style={{ fontSize: 12, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', background: 'var(--bg-raised)', padding: 12, borderRadius: 6 }}>
+        <div className="error-boundary-wrap">
+          <div className="error-boundary-title">Something went wrong</div>
+          <pre className="error-boundary-pre">
             {this.state.error.message}
           </pre>
           <button
             type="button"
             onClick={() => this.setState({ error: null })}
-            style={{ alignSelf: 'flex-start', fontSize: 13, padding: '6px 14px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-input)', color: 'var(--text-primary)', cursor: 'pointer' }}
+            className="error-boundary-btn"
           >
             Try again
           </button>

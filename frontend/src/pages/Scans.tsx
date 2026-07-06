@@ -1,8 +1,9 @@
 // Scans page
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { api, Scan, Host, RepoScanResultWithName } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, ScanBadge, RepoScanStatusBadge, FindingsTable, Empty, timeAgo } from '@/components/ui'
+import { useRovingTabs } from '@/lib/hooks'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 
 type Tab = 'host' | 'repo'
@@ -15,6 +16,8 @@ export function Scans() {
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [expandedRepoId, setExpandedRepoId] = useState<number | null>(null)
   const [tab, setTab] = useState<Tab>('host')
+  const TAB_IDS: readonly Tab[] = ['host', 'repo']
+  const { tabRef, onKeyDown: onTabKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
 
   useEffect(() => {
     Promise.all([
@@ -40,28 +43,24 @@ export function Scans() {
       <PageHeader title="Scans" subtitle="Project scan results from across the fleet" />
 
       {/* Tab bar */}
-      <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', padding: '0 28px', flexShrink: 0 }}>
+      <div className="tab-bar" role="tablist">
         {tabs.map(t => (
           <button
             key={t.id}
+            ref={tabRef(t.id)}
             type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            aria-controls={`scans-panel-${t.id}`}
+            id={`scans-tab-${t.id}`}
+            tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              padding: '10px 16px', fontSize: 13, fontWeight: 500,
-              color: tab === t.id ? 'var(--text-primary)' : 'var(--text-muted)',
-              borderBottom: `2px solid ${tab === t.id ? 'hsl(var(--brand))' : 'transparent'}`,
-              marginBottom: -1, display: 'flex', alignItems: 'center', gap: 6,
-              transition: 'color var(--duration-fast)',
-            }}
+            onKeyDown={onTabKeyDown}
+            className={tab === t.id ? 'tab-btn active' : 'tab-btn'}
           >
             {t.label}
             {!loading && (
-              <span style={{
-                fontSize: 11, fontWeight: 600, padding: '1px 6px', borderRadius: 10,
-                background: tab === t.id ? 'hsl(var(--brand)/0.15)' : 'var(--bg-raised)',
-                color: tab === t.id ? 'hsl(var(--brand))' : 'var(--text-muted)',
-              }}>
+              <span className={tab === t.id ? 'tab-count active' : 'tab-count'}>
                 {t.count}
               </span>
             )}
@@ -69,17 +68,22 @@ export function Scans() {
         ))}
       </div>
 
-      <div style={{ padding: '24px 28px', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 32 }}>
-        {loading ? <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div> : (
+      <div className="page-content-flex">
+        {loading ? <div className="loading-text">Loading…</div> : (
           <>
-            {tab === 'host' && <section>
+            <section
+              id="scans-panel-host"
+              role="tabpanel"
+              aria-labelledby="scans-tab-host"
+              hidden={tab !== 'host'}
+            >
               {scans.length === 0 ? <Empty message="No host scan results yet." /> : (
                 <Card>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <table className="data-table">
                     <thead>
-                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                      <tr className="data-thead-tr">
                         {['Status', 'Project', 'Type', 'Findings', 'Host', 'Scanned', ''].map(h => (
-                          <th key={h} style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+                          <th key={h} className="data-th">{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -88,55 +92,63 @@ export function Scans() {
                         const hasFindings = s.findings && s.findings.length > 0
                         const isExpanded = expandedId === s.id
                         return (
-                          <>
+                          <React.Fragment key={s.id}>
                             <tr
-                              key={s.id}
-                              style={{ borderBottom: isExpanded ? undefined : '1px solid var(--border-subtle)', cursor: hasFindings ? 'pointer' : 'default' }}
-                              onClick={() => hasFindings && setExpandedId(isExpanded ? null : s.id)}
+                              className={`${isExpanded ? '' : 'data-tr'} ${hasFindings ? 'data-tr-clickable' : 'data-tr-static'}`}
+                              onClick={hasFindings ? () => setExpandedId(isExpanded ? null : s.id) : undefined}
+                              onKeyDown={hasFindings ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedId(isExpanded ? null : s.id) } }) : undefined}
+                              role={hasFindings ? 'button' : undefined}
+                              tabIndex={hasFindings ? 0 : undefined}
+                              aria-expanded={hasFindings ? isExpanded : undefined}
                             >
-                              <td style={{ padding: '10px 16px' }}><ScanBadge status={s.status} /></td>
-                              <td style={{ padding: '10px 16px' }}>
-                                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.project_path}</div>
+                              <td className="data-td"><ScanBadge status={s.status} /></td>
+                              <td className="data-td">
+                                <div className="project-path-cell">{s.project_path}</div>
                                 {s.sources && s.sources.length > 0 && (
-                                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                                  <div className="sources-row">
                                     {s.sources.map(src => (
-                                      <span key={src} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'var(--bg-input)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{src}</span>
+                                      <span key={src} className="source-tag">{src}</span>
                                     ))}
                                   </div>
                                 )}
                               </td>
-                              <td style={{ padding: '10px 16px', fontSize: 12, color: 'var(--text-secondary)' }}>{s.scan_type}</td>
-                              <td style={{ padding: '10px 16px', fontSize: 12, color: s.finding_count > 0 ? 'var(--warn)' : 'var(--ok)', fontWeight: 600 }}>{s.finding_count}</td>
-                              <td style={{ padding: '10px 16px', fontSize: 12, color: 'var(--text-secondary)' }}>{hosts[s.host_id]?.name ?? `#${s.host_id}`}</td>
-                              <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)' }}>{timeAgo(s.scanned_at)}</td>
-                              <td style={{ padding: '10px 16px', color: 'var(--text-muted)' }}>
+                              <td className="data-td-type">{s.scan_type}</td>
+                              <td className={`data-td-count ${s.finding_count > 0 ? 'has-findings' : 'no-findings'}`}>{s.finding_count}</td>
+                              <td className="data-td-type">{hosts[s.host_id]?.name ?? `#${s.host_id}`}</td>
+                              <td className="data-td-muted-11">{timeAgo(s.scanned_at)}</td>
+                              <td className="data-td-chevron">
                                 {hasFindings && (isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
                               </td>
                             </tr>
                             {isExpanded && hasFindings && (
-                              <tr key={`${s.id}-findings`} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                                <td colSpan={7} style={{ background: 'var(--bg-raised)', padding: 0 }}>
+                              <tr key={`${s.id}-findings`} className="data-tr">
+                                <td colSpan={7} className="findings-expanded-td">
                                   <FindingsTable findings={s.findings!} />
                                 </td>
                               </tr>
                             )}
-                          </>
+                          </React.Fragment>
                         )
                       })}
                     </tbody>
                   </table>
                 </Card>
               )}
-            </section>}
+            </section>
 
-            {tab === 'repo' && <section>
+            <section
+              id="scans-panel-repo"
+              role="tabpanel"
+              aria-labelledby="scans-tab-repo"
+              hidden={tab !== 'repo'}
+            >
               {repoResults.length === 0 ? <Empty message="No repo scan results yet." /> : (
                 <Card>
-                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <table className="data-table">
                     <thead>
-                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                      <tr className="data-thead-tr">
                         {['Status', 'Scan', 'Trigger', 'Findings', 'Breach', 'Scanned', ''].map(h => (
-                          <th key={h} style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+                          <th key={h} className="data-th">{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -145,27 +157,30 @@ export function Scans() {
                         const hasFindings = r.findings && r.findings.length > 0
                         const isExpanded = expandedRepoId === r.id
                         return (
-                          <>
+                          <React.Fragment key={r.id}>
                             <tr
-                              key={r.id}
-                              style={{ borderBottom: isExpanded ? undefined : '1px solid var(--border-subtle)', cursor: hasFindings ? 'pointer' : 'default' }}
-                              onClick={() => hasFindings && setExpandedRepoId(isExpanded ? null : r.id)}
+                              className={`${isExpanded ? '' : 'data-tr'} ${hasFindings ? 'data-tr-clickable' : 'data-tr-static'}`}
+                              onClick={hasFindings ? () => setExpandedRepoId(isExpanded ? null : r.id) : undefined}
+                              onKeyDown={hasFindings ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedRepoId(isExpanded ? null : r.id) } }) : undefined}
+                              role={hasFindings ? 'button' : undefined}
+                              tabIndex={hasFindings ? 0 : undefined}
+                              aria-expanded={hasFindings ? isExpanded : undefined}
                             >
-                              <td style={{ padding: '10px 16px' }}><RepoScanStatusBadge status={r.status} /></td>
-                              <td style={{ padding: '10px 16px' }}>
-                                <div style={{ fontSize: 13, fontWeight: 600 }}>{r.scan_name}</div>
-                                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{r.scan_url}</div>
+                              <td className="data-td"><RepoScanStatusBadge status={r.status} /></td>
+                              <td className="data-td">
+                                <div className="scan-name-cell">{r.scan_name}</div>
+                                <div className="scan-url-cell">{r.scan_url}</div>
                                 {r.sources && r.sources.length > 0 && (
-                                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                                  <div className="sources-row">
                                     {r.sources.map(src => (
-                                      <span key={src} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'var(--bg-input)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{src}</span>
+                                      <span key={src} className="source-tag">{src}</span>
                                     ))}
                                   </div>
                                 )}
                               </td>
-                              <td style={{ padding: '10px 16px', fontSize: 12, color: 'var(--text-secondary)' }}>{r.triggered_by}</td>
-                              <td style={{ padding: '10px 16px', fontSize: 12, color: (r.finding_count ?? 0) > 0 ? 'var(--warn)' : 'var(--ok)', fontWeight: 600 }}>{r.finding_count ?? 0}</td>
-                              <td style={{ padding: '10px 16px' }}>
+                              <td className="data-td-type">{r.triggered_by}</td>
+                              <td className={`data-td-count ${(r.finding_count ?? 0) > 0 ? 'has-findings' : 'no-findings'}`}>{r.finding_count ?? 0}</td>
+                              <td className="data-td">
                                 {r.scan_breach_count > 0 ? (
                                   <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[12px] font-semibold bg-status-fail/12 text-status-fail-text">
                                     {r.scan_breach_count}
@@ -174,26 +189,26 @@ export function Scans() {
                                   <span className="text-muted-foreground">—</span>
                                 )}
                               </td>
-                              <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)' }}>{r.started_at ? timeAgo(r.started_at) : '—'}</td>
-                              <td style={{ padding: '10px 16px', color: 'var(--text-muted)' }}>
+                              <td className="data-td-muted-11">{r.started_at ? timeAgo(r.started_at) : '—'}</td>
+                              <td className="data-td-chevron">
                                 {hasFindings && (isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
                               </td>
                             </tr>
                             {isExpanded && hasFindings && (
-                              <tr key={`${r.id}-findings`} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                                <td colSpan={7} style={{ background: 'var(--bg-raised)', padding: 0 }}>
+                              <tr className="data-tr">
+                                <td colSpan={7} className="findings-expanded-td">
                                   <FindingsTable findings={r.findings!} />
                                 </td>
                               </tr>
                             )}
-                          </>
+                          </React.Fragment>
                         )
                       })}
                     </tbody>
                   </table>
                 </Card>
               )}
-            </section>}
+            </section>
           </>
         )}
       </div>

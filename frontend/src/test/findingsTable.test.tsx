@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FindingsTable } from '@/components/ui'
 
@@ -75,18 +75,19 @@ describe('FindingsTable', () => {
     const findings = [{ severity: 'high', package: 'vuln-pkg', summary: 'Bad thing', details: 'Detailed description here' }]
     render(<FindingsTable findings={findings} />)
     expect(screen.queryByText('Detailed description here')).not.toBeInTheDocument()
-    await user.click(screen.getByText('vuln-pkg'))
+    await user.click(screen.getByRole('button', { name: /vuln-pkg — view details/i }))
     expect(screen.getByText('Detailed description here')).toBeInTheDocument()
   })
 
   it('collapses an expanded row when clicked again', async () => {
     const user = userEvent.setup()
-    const findings = [{ severity: 'high', package: 'vuln-pkg', summary: '', details: 'Details' }]
+    const findings = [{ severity: 'high', package: 'vuln-pkg', summary: '', details: 'Unique detail content' }]
     render(<FindingsTable findings={findings} />)
-    await user.click(screen.getByText('vuln-pkg'))
-    expect(screen.getByText('Details')).toBeInTheDocument()
-    await user.click(screen.getByText('vuln-pkg'))
-    expect(screen.queryByText('Details')).not.toBeInTheDocument()
+    const row = screen.getByRole('button', { name: /vuln-pkg — view details/i })
+    await user.click(row)
+    expect(screen.getByText('Unique detail content')).toBeInTheDocument()
+    await user.click(row)
+    expect(screen.queryByText('Unique detail content')).not.toBeInTheDocument()
   })
 
   it('shows fixed versions when present', async () => {
