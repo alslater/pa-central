@@ -1,0 +1,1201 @@
+/* app.css — semantic utility classes replacing legacy CSS var inline styles */
+
+/* ── Auth loading screen ─────────────────────────────────────────────────── */
+.auth-loading {
+  min-height: 100vh;
+  background: hsl(var(--background));
+}
+
+/* ── Page layout ─────────────────────────────────────────────────────────── */
+.page-content {
+  padding: 24px 28px;
+  overflow: auto;
+}
+
+.page-content-flex {
+  padding: 24px 28px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.page-content-flex-1 {
+  padding: 24px 28px;
+  overflow: auto;
+  flex: 1;
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────────────────── */
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0 28px;
+  flex-shrink: 0;
+}
+
+.tab-bar-surface {
+  display: flex;
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0 28px;
+  background: hsl(var(--card));
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: -1px;
+  transition: color var(--duration-fast);
+  color: hsl(var(--muted-foreground));
+  border-bottom: 2px solid transparent;
+}
+
+.tab-btn.active {
+  color: hsl(var(--foreground));
+  border-bottom-color: hsl(var(--brand));
+}
+
+/* Tab button variant that uses brand for active (HostDetail uses --accent = brand) */
+.tab-btn-accent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: -1px;
+  font-family: var(--font-sans);
+}
+
+.tab-btn-accent.active {
+  color: hsl(var(--brand));
+  border-bottom-color: hsl(var(--brand));
+}
+
+/* Inner tab (smaller, used inside ScanCard expanded section) */
+.tab-btn-inner {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tab-btn-inner.active {
+  color: hsl(var(--foreground));
+  border-bottom-color: hsl(var(--brand));
+}
+
+.tab-count {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
+.tab-count.active {
+  background: hsl(var(--brand) / 0.15);
+  color: hsl(var(--brand));
+}
+
+/* ── Table ───────────────────────────────────────────────────────────────── */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-thead-tr {
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.data-th {
+  text-align: left;
+  padding: 10px 16px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Smaller header padding variant used in Dashboard */
+.data-th-sm {
+  text-align: left;
+  padding: 8px 16px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.data-td {
+  padding: 10px 16px;
+}
+
+.data-tr {
+  border-bottom: 1px solid hsl(var(--border) / 0.5);
+}
+
+.data-tr-border {
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+/* ── Loading / status text ───────────────────────────────────────────────── */
+.loading-text {
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+}
+
+.loading-text-sm {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  padding: 16px;
+}
+
+.error-text {
+  color: hsl(var(--status-fail));
+  font-size: 13px;
+}
+
+/* ── Text colour helpers ─────────────────────────────────────────────────── */
+/* text-primary  — full foreground, for headings and active labels           */
+/* text-secondary — slightly dimmed, for supporting labels and metadata      */
+/* text-muted    — strongly dimmed, for timestamps, placeholders, icons      */
+.text-primary {
+  color: hsl(var(--foreground));
+}
+
+.text-secondary {
+  color: hsl(var(--foreground) / 0.65);
+}
+
+.text-muted {
+  color: hsl(var(--muted-foreground));
+}
+
+/* ── Code / monospace ────────────────────────────────────────────────────── */
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* ── Stat card (Dashboard) ───────────────────────────────────────────────── */
+.stat-card {
+  padding: 20px 24px;
+}
+
+.stat-card-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.stat-card-value {
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: hsl(var(--foreground));
+}
+
+.stat-card-value.pass  { color: hsl(var(--status-pass)); }
+.stat-card-value.fail  { color: hsl(var(--status-fail)); }
+.stat-card-value.warn  { color: hsl(var(--status-review)); }
+.stat-card-value.crit  { color: hsl(var(--status-fail)); }
+
+.stat-card-sub {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+/* ── Stats grid ──────────────────────────────────────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+/* ── Alert table cell variants ───────────────────────────────────────────── */
+.data-td-mono-12 {
+  padding: 10px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.data-td-muted-12 {
+  padding: 10px 16px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.data-td-mono-muted-11 {
+  padding: 10px 16px;
+  font-family: var(--font-mono);
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+}
+
+.data-td-muted-11 {
+  padding: 10px 16px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+}
+
+/* ── Dashboard card header ───────────────────────────────────────────────── */
+.card-header-row {
+  padding: 16px 20px;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-header-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.card-empty-msg {
+  padding: 32px 20px;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ── Source tag chip ─────────────────────────────────────────────────────── */
+.source-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: hsl(var(--input));
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-mono);
+}
+
+/* ── Findings expanded row ───────────────────────────────────────────────── */
+.findings-expanded-td {
+  background: hsl(var(--muted));
+  padding: 0;
+}
+
+/* ── Host meta bar ───────────────────────────────────────────────────────── */
+.status-dot-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* acknowledged row dimming — toggled via class */
+.data-tr.acknowledged {
+  opacity: 0.45;
+}
+
+.host-meta-bar {
+  display: flex;
+  gap: 24px;
+  padding: 12px 28px;
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.host-tag {
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  padding: 1px 7px;
+  border-radius: 3px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* ── Config list sidebar ─────────────────────────────────────────────────── */
+.config-list-btn {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  cursor: pointer;
+  text-align: left;
+  color: hsl(var(--foreground));
+}
+
+.config-list-btn.active {
+  background: hsl(var(--brand) / 0.08);
+  border-color: hsl(var(--brand) / 0.3);
+}
+
+/* ── Default badge ───────────────────────────────────────────────────────── */
+.badge-default {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: hsl(var(--brand) / 0.15);
+  color: hsl(var(--brand));
+  border: 1px solid hsl(var(--brand) / 0.3);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ── Lint / error message ────────────────────────────────────────────────── */
+.lint-error-text {
+  font-size: 12px;
+  color: hsl(var(--status-fail));
+}
+
+.lint-warning-text {
+  font-size: 12px;
+  color: hsl(var(--status-review));
+}
+
+/* ── TOML editor container ───────────────────────────────────────────────── */
+.toml-editor-wrap {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.toml-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 10px 3px 14px;
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.4);
+  gap: 8px;
+}
+
+.toml-editor-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: hsl(var(--muted-foreground));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.toml-editor-theme-select {
+  font-size: 11px;
+  background: hsl(var(--input));
+  color: hsl(var(--muted-foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: 3px;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.toml-editor-content {
+  flex: 1;
+  overflow: auto;
+}
+
+.toml-editor-error {
+  border-top: 1px solid hsl(var(--status-fail) / 0.3);
+  background: hsl(var(--status-fail) / 0.08);
+  color: hsl(var(--status-fail-text));
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 5px 14px;
+  line-height: 1.5;
+}
+
+/* ── Credentials panel ───────────────────────────────────────────────────── */
+.card-mb-24 { margin-bottom: 24px; }
+.card-mb-12 { margin-bottom: 12px; }
+
+.cred-panel-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cred-empty-wrap {
+  padding: 12px 16px;
+}
+
+.cred-name {
+  font-weight: 500;
+  font-size: 13px;
+  flex: 1;
+}
+
+.result-empty-wrap {
+  padding: 8px 16px;
+}
+
+/* excluded scan flag wrapper — opacity toggled via class */
+.scan-flag-wrap.excluded { opacity: 0.4; }
+.scan-flag-wrap.excluded label { cursor: not-allowed; }
+
+.icon-inline {
+  vertical-align: middle;
+}
+
+.scan-flag-help-indented {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  margin-top: 2px;
+  margin-left: 22px;
+}
+
+.cred-panel-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cred-panel-subtext {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  margin-left: 4px;
+}
+
+.cred-row {
+  padding: 10px 16px;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cred-type-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
+.cred-edit-section {
+  padding: 16px;
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+}
+
+.delete-btn-color {
+  color: hsl(var(--status-fail));
+}
+
+/* ── ScanCard ────────────────────────────────────────────────────────────── */
+.scan-card-header {
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.scan-card-meta {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scan-card-inner-tab-bar {
+  display: flex;
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0 16px;
+}
+
+
+/* ── Results panel ───────────────────────────────────────────────────────── */
+.result-row {
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.result-row-content {
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.result-sources-row {
+  padding: 4px 16px 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.result-sources-label {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.result-source-tag {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: hsl(var(--input));
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-mono);
+}
+
+.result-error-pre {
+  font-size: 11px;
+  color: hsl(var(--status-fail));
+  margin: 0 16px 12px;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+}
+
+.result-findings-expanded {
+  border-top: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+}
+
+/* ── Scan options / ScanArgsField ────────────────────────────────────────── */
+.scan-options-label {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  font-weight: 500;
+}
+
+.scan-flag-help {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  margin-top: 2px;
+}
+
+.scan-flag-bool-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.scan-unavailable-text {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* ── HostScans card ──────────────────────────────────────────────────────── */
+.host-scan-card-row {
+  padding: 12px 16px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.host-scan-findings-panel {
+  border-top: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+/* ── HostConfig ──────────────────────────────────────────────────────────── */
+.host-config-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.host-config-desc {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.inline-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: hsl(var(--muted));
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.host-config-assigned-bar {
+  padding: 12px 16px;
+  border-bottom: 1px solid hsl(var(--border));
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.host-config-toml-pre {
+  margin: 0;
+  padding: 14px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  line-height: 1.7;
+  overflow: auto;
+  max-height: 400px;
+}
+
+/* ── Configs detail toolbar ──────────────────────────────────────────────── */
+.config-detail-toolbar {
+  padding: 10px 18px;
+  border-bottom: 1px solid hsl(var(--border));
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.config-desc-input {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--font-sans);
+  width: 100%;
+}
+
+.config-toml-label {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  font-weight: 500;
+}
+
+.lint-messages-padding {
+  padding: 8px 18px;
+}
+
+/* ── Clickable / non-clickable table rows ────────────────────────────────── */
+.data-tr-clickable  { cursor: pointer; }
+.data-tr-static     { cursor: default; }
+
+/* scan name inside the repo-scans table */
+.scan-name-cell {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.scan-url-cell {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* project path mono */
+.project-path-cell {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* ── Scans / HostDetail shared table variants ────────────────────────────── */
+.data-td-12 {
+  padding: 10px 16px;
+  font-size: 12px;
+}
+
+.data-td-mono-path {
+  padding: 10px 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.data-td-type {
+  padding: 10px 16px;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.data-td-chevron {
+  padding: 10px 16px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* finding count cell — color is dynamic, font-size/padding are static */
+.data-td-count {
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.data-td-count.has-findings { color: hsl(var(--status-review)); }
+.data-td-count.no-findings  { color: hsl(var(--status-pass)); }
+
+/* ── Source tags row (host scans inline) ─────────────────────────────────── */
+.sources-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+/* ── HostDetail alert row: acknowledged dimming is dynamic, keep as class + style ── */
+/* opacity is data-driven so stays inline, but we add the surrounding layout classes  */
+.host-alert-pkg-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.host-alert-pkg-ver {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.host-alert-kind {
+  padding: 10px 16px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.host-alert-advisory {
+  padding: 10px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.host-alert-path {
+  padding: 10px 16px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-alert-when {
+  padding: 10px 16px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+/* ── HostScans ────────────────────────────────────────────────────────────── */
+.host-scans-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.host-scan-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.host-scan-type {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* finding count span — color is dynamic */
+.host-scan-count {
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 60px;
+  text-align: right;
+}
+
+.host-scan-count.has-findings { color: hsl(var(--status-review)); }
+.host-scan-count.no-findings  { color: hsl(var(--status-pass)); }
+
+.host-scan-when {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  min-width: 80px;
+  text-align: right;
+}
+
+/* ── HostConfig ──────────────────────────────────────────────────────────── */
+.loading-text-padded {
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  padding: 28px;
+}
+
+.card-padded-20 {
+  padding: 20px;
+}
+
+.select-flex {
+  flex: 1;
+}
+
+.host-config-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 700px;
+}
+
+.host-config-header-section {
+  margin-bottom: 14px;
+}
+
+.host-config-controls {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.host-config-assigned-name {
+  color: hsl(var(--foreground));
+}
+
+/* ── Configs page ─────────────────────────────────────────────────────────── */
+.configs-layout {
+  padding: 24px 28px;
+  overflow: auto;
+  display: flex;
+  gap: 16px;
+}
+
+.configs-list-col {
+  width: 260px;
+  flex-shrink: 0;
+}
+
+.configs-list-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-list-btn-name {
+  font-weight: 500;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.config-list-btn-desc {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  margin-top: 2px;
+}
+
+.config-list-btn-meta {
+  font-size: 10px;
+  color: hsl(var(--muted-foreground));
+  margin-top: 4px;
+}
+
+.config-detail-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.config-toolbar-name-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.config-toolbar-name {
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.config-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.badge-unsaved {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: hsl(var(--status-review) / 0.15);
+  color: hsl(var(--status-review-text));
+  border: 1px solid hsl(var(--status-review) / 0.3);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.config-editor-section {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Modal form layouts ───────────────────────────────────────────────────── */
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-form-sm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* ── RepoScans page ───────────────────────────────────────────────────────── */
+.repo-scans-content {
+  padding: 24px 28px;
+  overflow: auto;
+}
+
+.cred-form-grid-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cred-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.cred-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ScanCard header action buttons row */
+.scan-card-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.scan-card-last-scan {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.scan-card-name-row {
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scan-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Result panel */
+.result-refresh-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 16px 0;
+}
+
+.result-trigger-label {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.result-finding-count {
+  font-size: 11px;
+}
+
+.result-finding-count.has-findings {
+  color: hsl(var(--status-review));
+  font-weight: 600;
+}
+
+.result-finding-count.no-findings {
+  color: hsl(var(--muted-foreground));
+}
+
+.result-pa-version {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.result-timestamp {
+  margin-left: auto;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+
+.result-chevron {
+  color: hsl(var(--muted-foreground));
+}
+
+/* ScanArgsField */
+.scan-args-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scan-flag-bool-wrap {
+  /* opacity is data-driven, applied inline */
+}
+
+/* EditForm */
+.edit-form-wrap {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.edit-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.edit-form-span2 {
+  grid-column: span 2;
+}
+
+.edit-form-footer {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.edit-form-enabled-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* AddModal */
+.add-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.add-modal-enabled-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.add-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ── lint list (Configs) ─────────────────────────────────────────────────── */
+.lint-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lint-list.mt-1 { margin-top: 4px; }
+
+/* ── ScanCard: status dot (background + boxShadow are fully dynamic) ─────── */
+.scan-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.scan-status-dot.running {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+/* ── ScanCard: inner tab bar breach badge ────────────────────────────────── */
+.inner-tab-breach-badge {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: hsl(var(--status-fail) / 0.12);
+  color: hsl(var(--status-fail-text));
+}
+
+/* ── ResultsPanel ────────────────────────────────────────────────────────── */
+.result-row-clickable { cursor: pointer; }
+.result-row-static    { cursor: default; }
+
+/* ── EditForm / AddModal ─────────────────────────────────────────────────── */
+.form-section-border {
+  border-top: 1px solid hsl(var(--border));
+}
+
+/* ── ErrorBoundary ───────────────────────────────────────────────────────── */
+.error-boundary-wrap {
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.error-boundary-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: hsl(var(--status-fail-text));
+}
+
+.error-boundary-pre {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  background: hsl(var(--muted));
+  padding: 12px;
+  border-radius: 6px;
+}
+
+.error-boundary-btn {
+  align-self: flex-start;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--input));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+}

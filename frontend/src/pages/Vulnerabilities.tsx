@@ -79,8 +79,19 @@ export default function Vulnerabilities() {
       })
   }, [show])
 
-  useEffect(() => { load(); return () => { reqSeq.current++ } }, [load])
-  useEffect(() => { loadSettings(); return () => { settingsSeq.current++ } }, [loadSettings])
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- load() calls setLoading synchronously; intentional data-fetch pattern
+    load()
+    // reqSeq is an abort counter: incrementing in cleanup invalidates in-flight responses so stale data is never committed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reading reqSeq.current in cleanup is intentional; "stale ref" warning doesn't apply to a counter ref (not a DOM node)
+    return () => { reqSeq.current++ }
+  }, [load])
+  useEffect(() => {
+    loadSettings()
+    // settingsSeq is an abort counter — same pattern as reqSeq above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reading settingsSeq.current in cleanup is intentional; "stale ref" warning doesn't apply to a counter ref (not a DOM node)
+    return () => { settingsSeq.current++ }
+  }, [loadSettings])
 
   const sorted = useMemo(() => [...findings].sort((a, b) => {
     if (sortKey === 'severity') return (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9)
@@ -91,8 +102,10 @@ export default function Vulnerabilities() {
 
   const totalPages = Math.ceil(sorted.length / PAGE_SIZE)
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern
     if (totalPages > 0) setPage(p => Math.min(p, totalPages - 1))
   }, [totalPages])
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- resets selection state when filters change; intentional derived-state reset
   useEffect(() => { setAcceptingId(null) }, [severityFilter, breachFilter, sortKey])
   const paged = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 

@@ -18,6 +18,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const token = localStorage.getItem('token')
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- early-return when no token; synchronous setState is intentional here
     if (!token) { setLoading(false); return }
     api.auth.me().then(setUser).catch(() => localStorage.removeItem('token')).finally(() => setLoading(false))
   }, [])

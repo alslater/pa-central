@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, ApiKey } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, useToast, Empty, timeAgo } from '@/components/ui'
@@ -11,11 +11,11 @@ export default function ApiKeys() {
   const [newKey, setNewKey] = useState<string | null>(null)
   const { show, Toast } = useToast()
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     api.apiKeys.list().then(setKeys).catch((e: any) => show(e.message, 'err')).finally(() => setLoading(false))
-  }
-  useEffect(() => { load() }, [])
+  }, [show])
+  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
 
   const revoke = async (id: number, name: string) => {
     if (!confirm(`Revoke key "${name}"?`)) return

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, User, UserRole } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, Select, useToast, Empty, timeAgo } from '@/components/ui'
@@ -20,11 +20,11 @@ export default function Users() {
   const { user: me } = useAuth()
   const isAdmin = me?.role === 'admin'
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     api.users.list().then(setUsers).catch((e: any) => show(e.message, 'err')).finally(() => setLoading(false))
-  }
-  useEffect(() => { load() }, [])
+  }, [show])
+  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
 
   return (
     <Shell>

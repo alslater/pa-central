@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, Alert, AlertSeverity } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, SeverityBadge, Button, Select, useToast, Empty, timeAgo } from '@/components/ui'
@@ -14,16 +14,15 @@ export default function Alerts() {
   const { user } = useAuth()
   const isOperator = user?.role === 'admin' || user?.role === 'operator'
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     api.alerts.list({
       severity: severityFilter || undefined,
       acknowledged: ackedFilter === '' ? undefined : ackedFilter === 'true',
       limit: 200,
     }).then(setAlerts).catch((e: any) => show(e.message, 'err')).finally(() => setLoading(false))
-  }
-
-  useEffect(() => { load() }, [severityFilter, ackedFilter])
+  }, [severityFilter, ackedFilter, show])
+  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
 
   const ack = async (id: number, val: boolean) => {
     try {

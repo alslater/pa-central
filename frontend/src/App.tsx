@@ -18,7 +18,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 function Guard({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth()
-  if (loading) return <div style={{ minHeight: '100vh', background: 'var(--bg-base)' }} />
+  if (loading) return <div className="auth-loading" />
   if (!user) return <Navigate to="/login" replace />
   return <>{children}</>
 }

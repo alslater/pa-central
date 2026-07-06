@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Select, useToast } from '@/components/ui'
@@ -34,13 +34,14 @@ export default function SystemSettings() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
-  useEffect(() => {
+  const load = useCallback(() => {
     api.systemSettings.list().then(rows => {
       const m: Record<string, string> = {}
       for (const r of rows) m[r.key] = r.value ?? ''
       setSettings(m)
     }).catch(e => show(e.message, 'err'))
-  }, [])
+  }, [show])
+  useEffect(() => { load() }, [load])
 
   const set = (key: string, val: string) => {
     setSettings(prev => ({ ...prev, [key]: val }))

@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api, Host, Alert, Scan, ConfigTemplate } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, useToast, Empty, FindingsTable, timeAgo } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
+import { useRovingTabs } from '@/lib/hooks'
 import { ArrowLeft, Bell, ScanSearch, Settings2 } from 'lucide-react'
 
 type Tab = 'alerts' | 'scans' | 'config'
@@ -14,6 +15,12 @@ export default function HostDetail() {
   const navigate = useNavigate()
   const [host, setHost] = useState<Host | null>(null)
   const [tab, setTab] = useState<Tab>('alerts')
+  const TAB_IDS: readonly Tab[] = ['alerts', 'scans', 'config']
+  // Track which panels have been visited so they mount (and fetch) lazily on
+  // first activation, then remain in the DOM for correct aria-controls linkage.
+  const [visited, setVisited] = useState<Set<Tab>>(new Set(['alerts']))
+  const selectTab = useCallback((t: Tab) => { setTab(t); setVisited(v => { if (v.has(t)) return v; const n = new Set(v); n.add(t); return n }) }, [])
+  const { tabRef, onKeyDown: onTabKeyDown } = useRovingTabs(TAB_IDS, tab, selectTab)
   const [loading, setLoading] = useState(true)
   const { show, Toast } = useToast()
   const { user } = useAuth()
@@ -21,9 +28,9 @@ export default function HostDetail() {
 
   useEffect(() => {
     api.hosts.get(hostId).then(setHost).catch(() => navigate('/hosts')).finally(() => setLoading(false))
-  }, [hostId])
+  }, [hostId, navigate])
 
-  if (loading) return <Shell><div style={{ padding: 28, color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div></Shell>
+  if (loading) return <Shell><div className="loading-text-padded">Loading…</div></Shell>
   if (!host) return null
 
   return (
@@ -39,65 +46,66 @@ export default function HostDetail() {
       />
 
       {/* Host meta bar */}
-      <div style={{
-        display: 'flex', gap: 24, padding: '12px 28px',
-        borderBottom: '1px solid var(--border)',
-        background: 'var(--bg-surface)',
-        fontSize: 12, flexWrap: 'wrap',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div className="host-meta-bar">
+        <div className="status-dot-wrap">
           <StatusDot status={host.daemon_status} />
         </div>
         {host.pa_version && (
-          <span style={{ color: 'var(--text-secondary)' }}>
-            pa <span style={{ fontFamily: 'var(--font-mono)' }}>{host.pa_version}</span>
+          <span className="text-secondary">
+            pa <span className="font-mono">{host.pa_version}</span>
           </span>
         )}
         {host.daemon_uptime_seconds != null && (
-          <span style={{ color: 'var(--text-secondary)' }}>
+          <span className="text-secondary">
             up {Math.floor(host.daemon_uptime_seconds / 3600)}h
           </span>
         )}
         {host.last_seen_at && (
-          <span style={{ color: 'var(--text-muted)' }}>last seen {timeAgo(host.last_seen_at)}</span>
+          <span className="text-muted">last seen {timeAgo(host.last_seen_at)}</span>
         )}
         {(host.tags || []).map(t => (
-          <span key={t} style={{
-            background: 'var(--bg-raised)', border: '1px solid var(--border)',
-            padding: '1px 7px', borderRadius: 3, color: 'var(--text-secondary)',
-          }}>{t}</span>
+          <span key={t} className="host-tag">{t}</span>
         ))}
       </div>
 
       {/* Tabs */}
-      <div style={{
-        display: 'flex', gap: 0,
-        borderBottom: '1px solid var(--border)',
-        padding: '0 28px',
-        background: 'var(--bg-surface)',
-      }}>
+      <div className="tab-bar-surface" role="tablist">
         {([
           ['alerts', 'Alerts', Bell],
           ['scans', 'Scans', ScanSearch],
           ['config', 'Config', Settings2],
-        ] as [Tab, string, any][]).map(([t, label, Icon]) => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '10px 16px', background: 'none', border: 'none',
-            borderBottom: `2px solid ${tab === t ? 'var(--accent)' : 'transparent'}`,
-            color: tab === t ? 'var(--accent)' : 'var(--text-secondary)',
-            cursor: 'pointer', fontSize: 13, fontWeight: 500,
-            marginBottom: -1, fontFamily: 'var(--font-ui)',
-          }}>
-            <Icon size={13} />{label}
-          </button>
-        ))}
+        ] as [Tab, string, any][]).map(([t, label, Icon]) => {
+          const isActive = tab === t
+          return (
+            <button
+              key={t}
+              ref={tabRef(t)}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`host-panel-${t}`}
+              id={`host-tab-${t}`}
+              tabIndex={isActive ? 0 : -1}
+              onClick={() => selectTab(t)}
+              onKeyDown={onTabKeyDown}
+              className={isActive ? 'tab-btn-accent active' : 'tab-btn-accent'}
+            >
+              <Icon size={13} />{label}
+            </button>
+          )
+        })}
       </div>
 
-      <div style={{ padding: '24px 28px', overflow: 'auto', flex: 1 }}>
-        {tab === 'alerts' && <HostAlerts hostId={hostId} isOperator={isOperator} show={show} />}
-        {tab === 'scans' && <HostScans hostId={hostId} />}
-        {tab === 'config' && <HostConfig hostId={hostId} isOperator={isOperator} show={show} />}
+      <div className="page-content-flex-1">
+        <section id="host-panel-alerts" role="tabpanel" aria-labelledby="host-tab-alerts" hidden={tab !== 'alerts'}>
+          {visited.has('alerts') && <HostAlerts hostId={hostId} isOperator={isOperator} show={show} />}
+        </section>
+        <section id="host-panel-scans" role="tabpanel" aria-labelledby="host-tab-scans" hidden={tab !== 'scans'}>
+          {visited.has('scans') && <HostScans hostId={hostId} />}
+        </section>
+        <section id="host-panel-config" role="tabpanel" aria-labelledby="host-tab-config" hidden={tab !== 'config'}>
+          {visited.has('config') && <HostConfig hostId={hostId} isOperator={isOperator} show={show} />}
+        </section>
       </div>
       {Toast}
     </Shell>
@@ -110,8 +118,11 @@ function HostAlerts({ hostId, isOperator, show }: { hostId: number; isOperator: 
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [loading, setLoading] = useState(true)
 
-  const load = () => api.alerts.list({ host_id: hostId, limit: 200 }).then(setAlerts).finally(() => setLoading(false))
-  useEffect(() => { load() }, [hostId])
+  const load = useCallback(() => {
+    setLoading(true)
+    api.alerts.list({ host_id: hostId, limit: 200 }).then(setAlerts).finally(() => setLoading(false))
+  }, [hostId])
+  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
 
   const ack = async (id: number, val: boolean) => {
     await api.alerts.acknowledge(id, val)
@@ -119,34 +130,34 @@ function HostAlerts({ hostId, isOperator, show }: { hostId: number; isOperator: 
     load()
   }
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
+  if (loading) return <div className="loading-text">Loading…</div>
   if (!alerts.length) return <Empty message="No alerts from this host." />
 
   return (
     <Card>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <table className="data-table">
         <thead>
-          <tr style={{ borderBottom: '1px solid var(--border)' }}>
+          <tr className="data-thead-tr">
             {['Severity', 'Package', 'Kind', 'Advisory', 'Project', 'When', ''].map(h => (
-              <th key={h} style={{ textAlign: 'left', padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+              <th key={h} className="data-th">{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {alerts.map(a => (
-            <tr key={a.id} style={{ borderBottom: '1px solid var(--border-subtle)', opacity: a.acknowledged ? 0.45 : 1 }}>
-              <td style={{ padding: '10px 16px' }}><SeverityBadge severity={a.severity} /></td>
-              <td style={{ padding: '10px 16px' }}>
-                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500 }}>{a.package_name}</div>
-                {a.package_version && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>@{a.package_version}</div>}
+            <tr key={a.id} className={`data-tr${a.acknowledged ? ' acknowledged' : ''}`}>
+              <td className="data-td"><SeverityBadge severity={a.severity} /></td>
+              <td className="data-td">
+                <div className="host-alert-pkg-name">{a.package_name}</div>
+                {a.package_version && <div className="host-alert-pkg-ver">@{a.package_version}</div>}
               </td>
-              <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--text-secondary)' }}>{a.kind}</td>
-              <td style={{ padding: '10px 16px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>{a.advisory_id || '—'}</td>
-              <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project_path || '—'}</td>
-              <td style={{ padding: '10px 16px', fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{timeAgo(a.received_at)}</td>
-              <td style={{ padding: '10px 16px' }}>
+              <td className="host-alert-kind">{a.kind}</td>
+              <td className="host-alert-advisory">{a.advisory_id || '—'}</td>
+              <td className="host-alert-path">{a.project_path || '—'}</td>
+              <td className="host-alert-when">{timeAgo(a.received_at)}</td>
+              <td className="data-td">
                 {isOperator && (
-                  <Button variant="ghost" onClick={() => ack(a.id, !a.acknowledged)} style={{ fontSize: 11, padding: '4px 10px' }}>
+                  <Button variant="ghost" onClick={() => ack(a.id, !a.acknowledged)} className="text-[11px] px-[10px] py-[4px]">
                     {a.acknowledged ? 'Undo' : 'Ack'}
                   </Button>
                 )}
@@ -168,36 +179,40 @@ function HostScans({ hostId }: { hostId: number }) {
 
   useEffect(() => { api.scans.list({ host_id: hostId }).then(setScans).finally(() => setLoading(false)) }, [hostId])
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
+  if (loading) return <div className="loading-text">Loading…</div>
   if (!scans.length) return <Empty message="No scans from this host." />
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div className="host-scans-list">
       {scans.map(s => (
         <Card key={s.id}>
           <div
-            style={{ padding: '12px 16px', display: 'flex', gap: 16, alignItems: 'center', cursor: s.findings?.length ? 'pointer' : 'default' }}
-            onClick={() => setExpanded(expanded === s.id ? null : s.id)}
+            className={`host-scan-card-row ${s.findings?.length ? 'data-tr-clickable' : 'data-tr-static'}`}
+            onClick={s.findings?.length ? () => setExpanded(expanded === s.id ? null : s.id) : undefined}
+            onKeyDown={s.findings?.length ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(expanded === s.id ? null : s.id) } }) : undefined}
+            role={s.findings?.length ? 'button' : undefined}
+            tabIndex={s.findings?.length ? 0 : undefined}
+            aria-expanded={s.findings?.length ? expanded === s.id : undefined}
           >
             <ScanBadge status={s.status} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.project_path}</div>
+            <div className="host-scan-info">
+              <div className="project-path-cell">{s.project_path}</div>
               {s.sources && s.sources.length > 0 && (
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                <div className="sources-row">
                   {s.sources.map(src => (
-                    <span key={src} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'var(--bg-input)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{src}</span>
+                    <span key={src} className="source-tag">{src}</span>
                   ))}
                 </div>
               )}
             </div>
-            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{s.scan_type}</span>
-            <span style={{ fontSize: 12, fontWeight: 600, color: s.finding_count > 0 ? 'var(--warn)' : 'var(--ok)', minWidth: 60, textAlign: 'right' }}>
+            <span className="host-scan-type">{s.scan_type}</span>
+            <span className={`host-scan-count ${s.finding_count > 0 ? 'has-findings' : 'no-findings'}`}>
               {s.finding_count} finding{s.finding_count !== 1 ? 's' : ''}
             </span>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 80, textAlign: 'right' }}>{timeAgo(s.scanned_at)}</span>
+            <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>
           </div>
           {expanded === s.id && s.findings && s.findings.length > 0 && (
-            <div style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-raised)', borderRadius: '0 0 var(--radius-lg) var(--radius-lg)' }}>
+            <div className="host-scan-findings-panel">
               <FindingsTable findings={s.findings} />
             </div>
           )}
@@ -237,23 +252,23 @@ function HostConfig({ hostId, isOperator, show }: { hostId: number; isOperator: 
     setSaving(false)
   }
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
+  if (loading) return <div className="loading-text">Loading…</div>
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 700 }}>
-      <Card style={{ padding: 20 }}>
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Assigned config template</div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            The agent polls <code style={{ fontFamily: 'var(--font-mono)', fontSize: 11, background: 'var(--bg-raised)', padding: '1px 5px', borderRadius: 3 }}>GET /api/ingest/config</code> to download this as its config.toml.
+    <div className="host-config-layout">
+      <Card className="card-padded-20">
+        <div className="host-config-header-section">
+          <div className="host-config-section-title">Assigned config template</div>
+          <div className="host-config-desc">
+            The agent polls <code className="inline-code">GET /api/ingest/config</code> to download this as its config.toml.
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        <div className="host-config-controls">
           <Select
             label="Template"
             value={selected}
             onChange={e => setSelected(e.target.value)}
-            style={{ flex: 1 }}
+            className="select-flex"
             disabled={!isOperator}
           >
             <option value="">No config assigned</option>
@@ -269,16 +284,11 @@ function HostConfig({ hostId, isOperator, show }: { hostId: number; isOperator: 
 
       {assigned && (
         <Card>
-          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
-            Currently assigned: <strong style={{ color: 'var(--text-primary)' }}>{assigned.name}</strong>
+          <div className="host-config-assigned-bar">
+            Currently assigned: <strong className="host-config-assigned-name">{assigned.name}</strong>
             {assigned.description && ` — ${assigned.description}`}
           </div>
-          <pre style={{
-            margin: 0, padding: '14px 16px',
-            fontFamily: 'var(--font-mono)', fontSize: 11,
-            color: 'var(--text-secondary)', lineHeight: 1.7,
-            overflow: 'auto', maxHeight: 400,
-          }}>
+          <pre className="host-config-toml-pre">
             {assigned.toml_content}
           </pre>
         </Card>
@@ -286,4 +296,3 @@ function HostConfig({ hostId, isOperator, show }: { hostId: number; isOperator: 
     </div>
   )
 }
-

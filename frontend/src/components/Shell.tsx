@@ -58,7 +58,7 @@ function useLiveAlerts() {
               const data = JSON.parse(line.slice(5).trim())
               if (data.type === 'connected') continue
               setCount(n => n + 1)
-            } catch {}
+            } catch { /* ignore malformed SSE data */ }
           }
         }
       } catch {
@@ -211,6 +211,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <nav className="flex-1 p-2 overflow-y-auto">
           {NAV.filter(n => !n.adminOnly || user?.role === 'admin').map(({ to, label, icon: Icon }) => (
             <NavLink key={to} to={to} end={to === '/'}
+              onClick={to === '/alerts' ? clear : undefined}
               className={({ isActive }) =>
                 `flex items-center gap-2.5 px-2.5 py-[7px] rounded-[var(--radius-sm)] text-[13px] font-medium mb-px transition-[background,color] duration-[120ms] ${
                   isActive
@@ -219,8 +220,8 @@ export function Shell({ children }: { children: ReactNode }) {
                 }`
               }>
               <Icon size={14} />
-              <span onClick={label === 'Alerts' ? clear : undefined}>{label}</span>
-              {label === 'Alerts' && count > 0 && (
+              <span>{label}</span>
+              {to === '/alerts' && count > 0 && (
                 <span className="bg-status-fail text-on-accent rounded-[10px] text-[10px] font-bold px-1.5 py-px leading-snug">
                   {count}
                 </span>
