@@ -166,6 +166,16 @@ export interface FindingRecord {
   scan_name: string | null
 }
 
+export type FindingSortKey = 'severity' | 'days_open' | 'repo'
+export type SortDir = 'asc' | 'desc'
+
+export interface PaginatedFindings {
+  items: FindingRecord[]
+  total: number
+  page: number
+  page_size: number
+}
+
 export interface FindingSettings {
   sla_high_days: number
   sla_medium_days: number
@@ -335,23 +345,29 @@ export const api = {
   },
 
   findings: {
-    listAll: (params?: {
+    list: (params?: {
       severity?: AlertSeverity[]
       breach?: boolean
       accepted?: boolean
       repo_scan_id?: number
-      limit?: number
-    }): Promise<FindingRecord[]> => {
+      page?: number
+      page_size?: number
+      sort?: FindingSortKey
+      sort_dir?: SortDir
+    }): Promise<PaginatedFindings> => {
       const q = new URLSearchParams()
       if (params?.severity) params.severity.forEach(s => q.append('severity', s))
       if (params?.breach !== undefined) q.set('breach', String(params.breach))
       if (params?.accepted !== undefined) q.set('accepted', String(params.accepted))
       if (params?.repo_scan_id !== undefined) q.set('repo_scan_id', String(params.repo_scan_id))
-      if (params?.limit !== undefined) q.set('limit', String(params.limit))
+      if (params?.page !== undefined) q.set('page', String(params.page))
+      if (params?.page_size !== undefined) q.set('page_size', String(params.page_size))
+      if (params?.sort) q.set('sort', params.sort)
+      if (params?.sort_dir) q.set('sort_dir', params.sort_dir)
       const qs = q.toString()
-      return request<FindingRecord[]>(`/findings${qs ? `?${qs}` : ''}`)
+      return request<PaginatedFindings>(`/findings${qs ? `?${qs}` : ''}`)
     },
-    listForRepo: (repoScanId: number): Promise<FindingRecord[]> =>
+    listAllForRepo: (repoScanId: number): Promise<FindingRecord[]> =>
       request<FindingRecord[]>(`/repo-scans/${repoScanId}/findings`),
     accept: (id: number, body: { reason: string; accepted_until?: string }): Promise<FindingRecord> =>
       request<FindingRecord>(`/findings/${id}/accept`, { method: 'POST', body: JSON.stringify(body) }),

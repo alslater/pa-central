@@ -2,17 +2,61 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.sql.elements import ClauseElement
+from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AlertSeverity, FindingRecord, RepoScan, RepoScanResult, RepoScanStatus, SystemSetting, utcnow
 from app.schemas import FindingRecordOut
 
-def accepted_sql_expr(today: date) -> ClauseElement:
+def in_breach_sql_expr(now: datetime) -> ColumnElement[bool]:
+    """SQL expression: finding is currently in breach.
+
+    Uses sla_breach_cutoff_at (first_found_at + timedelta(days=sla_days + 1),
+    snapshotted at ingest). NULL means no SLA — those findings are never in
+    breach, matching Python in_breach() returning False when sla_days is None.
+
+    The +1 day offset in the stored cutoff ensures `sla_breach_cutoff_at <= now`
+    is exactly equivalent to Python's `(now - first_found_at).days > sla_days`,
+    which truncates fractional days. At exactly sla_days+1 days elapsed,
+    cutoff == now, so the inclusive `<=` fires correctly. `<` would miss this
+    boundary moment and diverge from Python.
+
+    now is normalised to naive UTC before binding because sla_breach_cutoff_at is
+    stored as a naive UTC datetime (UtcDateTime strips tzinfo on write). Passing an
+    aware datetime directly would bypass UtcDateTime.process_bind_param and cause
+    an aware/naive mismatch in SQLite.
+    """
+    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+    return and_(
+        FindingRecord.closed_at.is_(None),
+        FindingRecord.sla_breach_cutoff_at.isnot(None),
+        FindingRecord.sla_breach_cutoff_at <= now_naive,
+        not_accepted_sql_expr(now.date()),
+    )
+
+
+def not_in_breach_sql_expr(now: datetime) -> ColumnElement[bool]:
+    """SQL expression: finding is NOT currently in breach.
+
+    Covers: no SLA (sla_breach_cutoff_at IS NULL), within SLA, or accepted.
+    Does not filter closed findings — callers are expected to restrict to
+    open findings (closed_at IS NULL) before applying this expression.
+
+    now is normalised to naive UTC — see in_breach_sql_expr for rationale.
+    """
+    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+    return or_(
+        FindingRecord.sla_breach_cutoff_at.is_(None),
+        FindingRecord.sla_breach_cutoff_at > now_naive,
+        accepted_sql_expr(now.date()),
+    )
+
+
+def accepted_sql_expr(today: date) -> ColumnElement[bool]:
     """SQL expression: finding is currently accepted (accepted_at set and not expired).
 
     Accepts an explicit UTC date so the SQL filter matches the Python is_accepted()
@@ -27,7 +71,7 @@ def accepted_sql_expr(today: date) -> ClauseElement:
     )
 
 
-def not_accepted_sql_expr(today: date) -> ClauseElement:
+def not_accepted_sql_expr(today: date) -> ColumnElement[bool]:
     """SQL expression: finding is NOT currently accepted (complement of accepted_sql_expr)."""
     return or_(
         FindingRecord.accepted_at.is_(None),
@@ -99,14 +143,40 @@ def is_accepted(record: FindingRecord, now: datetime | None = None) -> bool:
     return True
 
 
-def in_breach(record: FindingRecord, sla_days: int | None, now: datetime) -> bool:
-    if sla_days is None:
+def in_breach(record: FindingRecord, now: datetime) -> bool:
+    """Return True if the finding is currently in breach of its SLA.
+
+    Derived from sla_breach_cutoff_at so the result is consistent with the
+    SQL breach filter (in_breach_sql_expr), which also requires the column to
+    be non-NULL. A NULL cutoff (no SLA, or pre-migration row) is treated as
+    not in breach — matching the SQL filter's behaviour of excluding such rows
+    from breach=true results.
+    """
+    if record.sla_breach_cutoff_at is None:
         return False
     if record.closed_at is not None:
         return False
     if is_accepted(record, now):
         return False
-    return (now - record.first_found_at).days > sla_days
+    cutoff = record.sla_breach_cutoff_at
+    # UtcDateTime returns an aware UTC datetime on read from DB; ensure now is also UTC.
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    return cutoff <= now.astimezone(timezone.utc)
+
+
+def _compute_breach_cutoff(
+    severity: AlertSeverity, sla_high: int, sla_medium: int, first_found_at: datetime
+) -> datetime | None:
+    """Return first_found_at + timedelta(days=sla_days + 1), or None if no SLA.
+
+    The +1 aligns the SQL comparison `sla_breach_cutoff_at <= now` with Python's
+    `(now - first_found_at).days > sla_days`, which truncates fractional days.
+    At exactly sla_days+1 elapsed, cutoff == now: the inclusive <= fires and
+    .days == sla_days+1 > sla_days, so both paths agree.
+    """
+    sla = compute_sla_days(severity, sla_high, sla_medium)
+    return (first_found_at + timedelta(days=sla + 1)) if sla is not None else None
 
 
 def get_effective_sla(
@@ -149,13 +219,18 @@ def build_finding_out(
         is_accepted=is_accepted(record, now),
         days_open=(now - record.first_found_at).days,
         sla_days=sla_days,
-        in_breach=in_breach(record, sla_days, now),
+        in_breach=in_breach(record, now),
         scan_name=scan_name,
     )
 
 
 async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> None:
-    """Diff incoming findings against open records; open new, close gone."""
+    """Diff incoming findings against open records; open new, close gone.
+
+    sla_breach_cutoff_at is set on new findings using the effective SLA at ingest
+    time (per-scan override if set, else global default). This snapshot enables
+    SQL-level breach filtering without per-row SLA joins at query time.
+    """
     incoming: dict[tuple[str, str, str], dict] = {}
     for f in (result.findings or []):
         advisory_id = (f.get("advisory_id") or "").strip()
@@ -166,6 +241,11 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
         key = (advisory_id, package, ecosystem)
         if key not in incoming:
             incoming[key] = f
+
+    # Fetch effective SLA for this scan once; used when snapshotting sla_breach_cutoff_at on new findings.
+    global_high, global_medium, _ = await get_global_sla(db)
+    scan = await db.get(RepoScan, result.repo_scan_id)
+    eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium) if scan else (global_high, global_medium)
 
     # Detect config change: compare this result's hash against the most recent
     # prior successful result. NULL hashes are treated as "unknown" — no reset
@@ -287,6 +367,7 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
             is_malicious=is_malicious,
             first_found_at=now,
             reopen_count=reopen_count,
+            sla_breach_cutoff_at=_compute_breach_cutoff(severity, eff_high, eff_medium, now),
         )
         # Use a savepoint so a concurrent-ingest conflict on the partial unique
         # index doesn't abort the whole transaction — just skip the duplicate.

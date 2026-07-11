@@ -1,11 +1,10 @@
 """Findings API — cross-repo finding lifecycle management."""
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -13,11 +12,11 @@ from app.models import (
     AlertSeverity, FindingRecord, RepoScan, SettingValueType, SystemSetting,
     User, utcnow,
 )
-from app.schemas import FindingAcceptBody, FindingRecordOut, FindingSettingsOut, FindingSettingsPut
+from app.schemas import FindingAcceptBody, FindingRecordOut, FindingSettingsOut, FindingSettingsPut, PaginatedFindingsOut
 from app.api.deps import require_admin
 from app.services.finding_lifecycle import (
     accepted_sql_expr, build_finding_out, get_effective_sla, get_global_sla,
-    not_accepted_sql_expr,
+    in_breach_sql_expr, not_accepted_sql_expr, not_in_breach_sql_expr,
 )
 
 router = APIRouter(tags=["findings"])
@@ -27,7 +26,45 @@ AdminDep = Annotated[User, Depends(require_admin)]
 
 
 
-@router.get("/findings", response_model=list[FindingRecordOut])
+# Severity ordering for SQL sort (lower value = higher severity).
+_SEVERITY_RANK = case(
+    (FindingRecord.severity == AlertSeverity.critical, 0),
+    (FindingRecord.severity == AlertSeverity.high, 1),
+    (FindingRecord.severity == AlertSeverity.medium, 2),
+    (FindingRecord.severity == AlertSeverity.warning, 3),
+    (FindingRecord.severity == AlertSeverity.low, 4),
+    (FindingRecord.severity == AlertSeverity.info, 5),
+    else_=6,
+)
+
+
+def _apply_sort(
+    stmt,
+    sort: Literal["severity", "days_open", "repo"],
+    sort_dir: Literal["asc", "desc"],
+):
+    """Return stmt with ORDER BY clause for the requested sort key.
+
+    The secondary tiebreaker is always FindingRecord.id ASC regardless of
+    sort_dir. This gives a stable absolute page order — every row has a unique
+    position — without making the tiebreaker direction dependent on the primary
+    sort, which would yield different (but equally arbitrary) orderings for ties.
+    """
+    asc = sort_dir == "asc"
+    if sort == "severity":
+        col = _SEVERITY_RANK
+    elif sort == "days_open":
+        # days_open = now - first_found_at; ascending means fewer days open first,
+        # so ascending days_open ↔ descending first_found_at.
+        col = FindingRecord.first_found_at
+        asc = not asc
+    else:
+        assert sort == "repo"
+        col = RepoScan.name
+    return stmt.order_by(col.asc() if asc else col.desc(), FindingRecord.id.asc())
+
+
+@router.get("/findings", response_model=PaginatedFindingsOut)
 async def list_findings(
     db: DbDep,
     _: AdminDep,
@@ -35,120 +72,54 @@ async def list_findings(
     breach: bool | None = None,
     accepted: bool | None = None,
     repo_scan_id: int | None = None,
-    limit: int = Query(200, ge=1, le=500),
-) -> list[FindingRecordOut]:
+    page: int = Query(0, ge=0),
+    page_size: int = Query(50, ge=1, le=200),
+    sort: Literal["severity", "days_open", "repo"] = Query("severity"),
+    sort_dir: Literal["asc", "desc"] = Query("asc"),
+) -> PaginatedFindingsOut:
     if breach is True and accepted is True:
         raise HTTPException(422, "breach=true and accepted=true are mutually exclusive: accepted findings are never in breach")
-    global_high, global_medium, _ = await get_global_sla(db)
+    global_high, global_medium, _retention = await get_global_sla(db)
     now = utcnow()
 
-    stmt = (
+    base_stmt = (
         select(FindingRecord, RepoScan.name.label("scan_name"), RepoScan.sla_high_days, RepoScan.sla_medium_days)
         .join(RepoScan, RepoScan.id == FindingRecord.repo_scan_id)
         .where(FindingRecord.closed_at.is_(None))
     )
     if severity:
-        stmt = stmt.where(FindingRecord.severity.in_(severity))
+        base_stmt = base_stmt.where(FindingRecord.severity.in_(severity))
     if repo_scan_id is not None:
-        stmt = stmt.where(FindingRecord.repo_scan_id == repo_scan_id)
-    # accepted is portable SQL; push it into the query.
+        base_stmt = base_stmt.where(FindingRecord.repo_scan_id == repo_scan_id)
     if accepted is True:
-        stmt = stmt.where(accepted_sql_expr(now.date()))
+        base_stmt = base_stmt.where(accepted_sql_expr(now.date()))
     elif accepted is False:
-        stmt = stmt.where(not_accepted_sql_expr(now.date()))
-    # breach depends on per-scan SLA overrides and date arithmetic that differs
-    # across databases, so it is evaluated in Python after fetching candidates.
-    # For breach/accepted filtering we apply a SQL cap of limit * 10 — large
-    # enough to absorb per-scan SLA variance while preventing unbounded scans.
-    # The Python break() still exits as soon as `limit` results are collected.
-    if breach is None:
-        stmt = stmt.limit(limit)
-    elif breach is True:
-        # Accepted findings are never in breach; exclude them in SQL so they
-        # don't consume slots in the limit*10 cap (unless the caller already
-        # applied an accepted filter, which the 422 guard above ensures only
-        # happens when accepted=False — the same direction, so safe to skip).
-        if accepted is None:
-            stmt = stmt.where(not_accepted_sql_expr(now.date()))
-        # Only severities with an SLA can ever be in breach.
-        _high_sevs = {AlertSeverity.critical, AlertSeverity.high}
-        _med_sevs = {AlertSeverity.medium}
-        _sla_severities = [AlertSeverity.critical, AlertSeverity.high, AlertSeverity.medium]
-        if not severity:
-            stmt = stmt.where(FindingRecord.severity.in_(_sla_severities))
-            _active_high = True
-            _active_medium = True
-        else:
-            _active_high = bool(set(severity) & _high_sevs)
-            _active_medium = bool(set(severity) & _med_sevs)
-            if not _active_high and not _active_medium:
-                return []
+        base_stmt = base_stmt.where(not_accepted_sql_expr(now.date()))
 
-        # Apply a safe age cutoff using only SLA tiers relevant to the requested
-        # severities. Including a strict high-tier SLA (e.g. 14d) when only
-        # medium is requested would widen the candidate set unnecessarily.
-        if repo_scan_id is not None:
-            sla_row = (await db.execute(
-                select(RepoScan.sla_high_days, RepoScan.sla_medium_days)
-                .where(RepoScan.id == repo_scan_id)
-            )).one_or_none()
-            if sla_row is not None:
-                scan_high = sla_row[0] if sla_row[0] is not None else global_high
-                scan_medium = sla_row[1] if sla_row[1] is not None else global_medium
-                candidates = ([scan_high] if _active_high else []) + ([scan_medium] if _active_medium else [])
-                if candidates:
-                    stmt = stmt.where(FindingRecord.first_found_at <= now - timedelta(days=min(candidates) + 1))
-        else:
-            # Aggregate only over scans that have open findings matching the
-            # current filters (severity, repo_scan_id). This prevents a single
-            # scan with a very strict SLA override from widening the candidate
-            # set for an unrelated breach query.
-            # Scope to the severities actually active for this query so that
-            # scans with only low/info/warning findings (no SLA) don't pull their
-            # SLA overrides into the aggregate cutoff.
-            _base_sevs = [s for s in (severity or _sla_severities)
-                          if (_active_high and s in _high_sevs) or (_active_medium and s in _med_sevs)]
-            base_subq = (
-                select(FindingRecord.repo_scan_id).distinct()
-                .where(FindingRecord.closed_at.is_(None))
-                .where(not_accepted_sql_expr(now.date()))
-                .where(FindingRecord.severity.in_(_base_sevs))
-            )
-            agg_cols = []
-            if _active_high:
-                agg_cols.append(func.min(func.coalesce(RepoScan.sla_high_days, global_high)))
-            if _active_medium:
-                agg_cols.append(func.min(func.coalesce(RepoScan.sla_medium_days, global_medium)))
-            if agg_cols:
-                agg_row = (await db.execute(select(*agg_cols).where(RepoScan.id.in_(base_subq)))).one()
-                candidates = [v for v in agg_row if v is not None]
-                if candidates:
-                    stmt = stmt.where(FindingRecord.first_found_at <= now - timedelta(days=min(candidates) + 1))
+    # Apply breach filter in SQL using the sla_breach_cutoff_at column.
+    # Findings with NULL sla_breach_cutoff_at (no SLA or pre-migration rows) are
+    # excluded from breach=true and included in breach=false — consistent with
+    # the Python in_breach() function, which also treats NULL cutoff as not in breach.
+    if breach is True:
+        base_stmt = base_stmt.where(in_breach_sql_expr(now))
+    elif breach is False:
+        base_stmt = base_stmt.where(not_in_breach_sql_expr(now))
 
-    # Oldest-first: most likely breaching, and makes early-break deterministic.
-    stmt = stmt.order_by(FindingRecord.first_found_at)
-    if breach is not None:
-        # breach is evaluated in Python (per-scan SLA variance), so we can't
-        # push an exact limit into SQL. Cap at limit*10 to avoid unbounded scans.
-        # Can return fewer than `limit` results when matches are sparse in the
-        # oldest limit*10 rows. Proper fix: server-side pagination
-        # (see ROADMAP.md — "Server-side pagination and sorting for GET /findings").
-        stmt = stmt.limit(limit * 10)
+    # Derive count by wrapping base_stmt as a subquery so filters and JOINs
+    # cannot drift. with_only_columns() is avoided: in SA 2.0 it drops FROM
+    # clauses by default, which would silently lose the RepoScan join if filters
+    # were added that reference RepoScan columns.
+    count_stmt = select(func.count()).select_from(base_stmt.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
 
-    results = []
-    for record, sname, scan_sla_high, scan_sla_medium in await db.execute(stmt):
+    page_stmt = _apply_sort(base_stmt, sort, sort_dir).offset(page * page_size).limit(page_size)
+    items = []
+    for record, sname, scan_sla_high, scan_sla_medium in await db.execute(page_stmt):
         eff_high = scan_sla_high if scan_sla_high is not None else global_high
         eff_medium = scan_sla_medium if scan_sla_medium is not None else global_medium
-        out = build_finding_out(record, eff_high, eff_medium, now, scan_name=sname)
-        if breach is True and not out.in_breach:
-            continue
-        if breach is False and out.in_breach:
-            continue
-        results.append(out)
-        if len(results) == limit:
-            break
+        items.append(build_finding_out(record, eff_high, eff_medium, now, scan_name=sname))
 
-    return results
+    return PaginatedFindingsOut(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.post("/findings/{finding_id}/accept", response_model=FindingRecordOut)
@@ -170,7 +141,7 @@ async def accept_finding(
     record.accepted_until = body.accepted_until
     await db.commit()
     await db.refresh(record)
-    global_high, global_medium, _ = await get_global_sla(db)
+    global_high, global_medium, _retention = await get_global_sla(db)
     scan = await db.get(RepoScan, record.repo_scan_id)
     eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium) if scan else (global_high, global_medium)
     return build_finding_out(record, eff_high, eff_medium, now, scan_name=scan.name if scan else None)
@@ -193,7 +164,7 @@ async def revoke_accept(
     record.accepted_until = None
     await db.commit()
     await db.refresh(record)
-    global_high, global_medium, _ = await get_global_sla(db)
+    global_high, global_medium, _retention = await get_global_sla(db)
     scan = await db.get(RepoScan, record.repo_scan_id)
     eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium) if scan else (global_high, global_medium)
     now = utcnow()
