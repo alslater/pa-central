@@ -401,7 +401,16 @@ class FindingRecord(Base):
     accepted_reason: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     accepted_until: Mapped[Optional[date]] = mapped_column(Date(), nullable=True)
 
+    # Snapshotted at finding-open time as first_found_at + timedelta(days=sla_days + 1).
+    # The +1 aligns `sla_breach_cutoff_at <= now` with Python's integer-day truncation:
+    # `(now - first_found_at).days > sla_days`. NULL for findings without an SLA or
+    # created before this column was added.
+    sla_breach_cutoff_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime(), nullable=True)
+
     __table_args__ = (
         Index("ix_finding_records_identity", "repo_scan_id", "advisory_id", "package", "ecosystem"),
-        Index("ix_finding_records_closed_at", "closed_at"),
+        # Composite index covering the closed_at IS NULL + sla_breach_cutoff_at < :now
+        # filter used by all breach queries. Also serves single-column closed_at lookups
+        # (leftmost prefix), so the old ix_finding_records_closed_at is not needed.
+        Index("ix_finding_records_closed_breach", "closed_at", "sla_breach_cutoff_at"),
     )

@@ -89,7 +89,7 @@ async def admin_user(db) -> User:
     user = User(
         email="admin@example.com",
         display_name="Admin",
-        hashed_password=hash_password("adminpass"),
+        hashed_password=hash_password("adminpass"),  # noqa: S106
         role=UserRole.admin,
         is_active=True,
     )

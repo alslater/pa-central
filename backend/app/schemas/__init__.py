@@ -520,6 +520,13 @@ class FindingRecordOut(OrmBase):
     scan_name: str | None = None
 
 
+class PaginatedFindingsOut(BaseModel):
+    items: list[FindingRecordOut]
+    total: int
+    page: int
+    page_size: int
+
+
 class FindingAcceptBody(BaseModel):
     reason: str = Field(..., max_length=1000)
     accepted_until: date | None = None

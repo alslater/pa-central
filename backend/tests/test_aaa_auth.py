@@ -7,7 +7,7 @@ from tests.conftest import auth
 class TestLogin:
     async def test_login_json_debug_skips_totp(self, client, admin_user):
         # conftest sets DEBUG=true, so login issues a token directly
-        r = await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "adminpass"})
+        r = await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "adminpass"})  # noqa: S106
         assert r.status_code == 200
         assert "access_token" in r.json()
 
@@ -16,7 +16,7 @@ class TestLogin:
         original = app_settings.debug
         app_settings.debug = False
         try:
-            r = await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "adminpass"})
+            r = await client.post("/api/auth/login", json={"email": "admin@example.com", "password": "adminpass"})  # noqa: S106
             assert r.status_code == 200
             data = r.json()
             assert data["totp_required"] is True
@@ -45,7 +45,7 @@ class TestLogin:
     async def test_oauth_token_endpoint(self, client, admin_user):
         r = await client.post(
             "/api/auth/token",
-            data={"username": "admin@example.com", "password": "adminpass"},
+            data={"username": "admin@example.com", "password": "adminpass"},  # noqa: S106
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         assert r.status_code == 200

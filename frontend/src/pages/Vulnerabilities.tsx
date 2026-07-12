@@ -1,20 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { api, FindingRecord, FindingSettings, AlertSeverity } from '@/lib/api'
+import React, { useCallback, useEffect, useState } from 'react'
+import { api, FindingRecord, FindingSettings, AlertSeverity, FindingSortKey, SortDir } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Button, Card, Drawer, Empty, FindingAcceptForm, FindingRecordDetail, FindingRevokeButton, Input, Select, SeverityBadge, useToast } from '@/components/ui'
 import { useLocalStorage } from '@/lib/hooks'
 import { Settings2 } from 'lucide-react'
 
 const SEVERITIES: AlertSeverity[] = ['critical', 'high', 'medium', 'warning', 'low', 'info']
+const PAGE_SIZE = 50
 
 type BreachFilter = 'all' | 'breaching' | 'accepted'
-type SortKey = 'severity' | 'days_open' | 'repo'
-
-const SEVERITY_ORDER = {
-  critical: 0, high: 1, medium: 2, warning: 3, low: 4, info: 5,
-} as const satisfies Record<AlertSeverity, number>
-
-const PAGE_SIZE = 50
 
 function FindingDetailPanel({ finding: f }: { finding: FindingRecord }) {
   return <FindingRecordDetail f={f} />
@@ -22,11 +16,13 @@ function FindingDetailPanel({ finding: f }: { finding: FindingRecord }) {
 
 export default function Vulnerabilities() {
   const [findings, setFindings] = useState<FindingRecord[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [severityFilter, setSeverityFilter] = useLocalStorage<AlertSeverity[]>('vuln-severity-filter', [])
   const [breachFilter, setBreachFilter] = useLocalStorage<BreachFilter>('vuln-breach-filter', 'all')
-  const [sortKey, setSortKey] = useState<SortKey>('severity')
+  const [sortKey, setSortKey] = useState<FindingSortKey>('severity')
+  const sortDir: SortDir = sortKey === 'days_open' ? 'desc' : 'asc'
   const [page, setPage] = useState(0)
   const [settings, setSettings] = useState<FindingSettings | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
@@ -39,21 +35,37 @@ export default function Vulnerabilities() {
 
   const reqSeq = React.useRef(0)
   const settingsSeq = React.useRef(0)
+  // pageRef mirrors page state so load() can always read the current page
+  // without closing over it as a dep. This prevents load from rebuilding
+  // (and the load effect from firing a stale request) on every page change.
+  const pageRef = React.useRef(page)
+  pageRef.current = page
 
   const load = useCallback(async (background = false) => {
     const seq = ++reqSeq.current
     if (background) setRefreshing(true)
     else setLoading(true)
     try {
-      const data = await api.findings.listAll({
-        limit: 500,
+      const data = await api.findings.list({
         severity: severityFilter.length ? severityFilter : undefined,
         breach: breachFilter === 'breaching' ? true : undefined,
         accepted: breachFilter === 'accepted' ? true : undefined,
+        page: pageRef.current,
+        page_size: PAGE_SIZE,
+        sort: sortKey,
+        sort_dir: sortDir,
       })
       if (seq !== reqSeq.current) return
-      setFindings(data)
-      setSelectedFinding(prev => prev ? (data.find(f => f.id === prev.id) ?? null) : null)
+      setFindings(data.items)
+      setTotal(data.total)
+      setSelectedFinding(prev => {
+        if (!prev) return null
+        // Update the selected finding if it's on the current page (picks up
+        // any field changes from the refresh). If it's on a different page,
+        // preserve the previous value — it still exists, just isn't visible here.
+        const refreshed = data.items.find(f => f.id === prev.id)
+        return refreshed ?? prev
+      })
     } catch (e: any) {
       if (seq !== reqSeq.current) return
       show(e.message ?? 'Failed to load findings', 'err')
@@ -63,7 +75,7 @@ export default function Vulnerabilities() {
         setRefreshing(false)
       }
     }
-  }, [severityFilter, breachFilter, show])
+  }, [severityFilter, breachFilter, sortKey, sortDir, show])
 
   const loadSettings = useCallback(() => {
     const seq = ++settingsSeq.current
@@ -79,13 +91,33 @@ export default function Vulnerabilities() {
       })
   }, [show])
 
+  // Pagination effect: fires when load rebuilds (filter/sort change) or page changes.
+  // When load rebuilds and page > 0: reset page to 0 and skip the fetch — the
+  // page change re-triggers this effect and the fetch happens then (page 0, one request).
+  // When load rebuilds and page is already 0, or when only page changes (navigation):
+  // fetch immediately using pageRef.current.
+  const prevLoadRef = React.useRef(load)
+  const filterReset = prevLoadRef.current !== load
+  prevLoadRef.current = load
   useEffect(() => {
+    if (filterReset) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: reset page and accepting state when filters/sort change
+      setAcceptingId(null)
+      if (page !== 0) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: setPage(0) re-triggers this effect which does the fetch
+        setPage(0)
+        return
+      }
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect -- load() calls setLoading synchronously; intentional data-fetch pattern
     load()
     // reqSeq is an abort counter: incrementing in cleanup invalidates in-flight responses so stale data is never committed.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reading reqSeq.current in cleanup is intentional; "stale ref" warning doesn't apply to a counter ref (not a DOM node)
     return () => { reqSeq.current++ }
-  }, [load])
+    // page is included so pagination (prev/next) triggers a fetch; filterReset is
+    // derived from load identity so it's implicitly covered by the load dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterReset is a render-phase variable derived from load; listing load covers it
+  }, [load, page])
   useEffect(() => {
     loadSettings()
     // settingsSeq is an abort counter — same pattern as reqSeq above.
@@ -93,21 +125,13 @@ export default function Vulnerabilities() {
     return () => { settingsSeq.current++ }
   }, [loadSettings])
 
-  const sorted = useMemo(() => [...findings].sort((a, b) => {
-    if (sortKey === 'severity') return (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9)
-    if (sortKey === 'days_open') return b.days_open - a.days_open
-    if (sortKey === 'repo') return (a.scan_name ?? '').localeCompare(b.scan_name ?? '')
-    return 0
-  }), [findings, sortKey])
+  const totalPages = Math.ceil(total / PAGE_SIZE)
+  // Clamp page after a background refresh shrinks total (e.g. accept/revoke).
+  // Also resets to 0 when the result set empties entirely (totalPages === 0).
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern
+  useEffect(() => { setPage(p => totalPages > 0 ? Math.min(p, totalPages - 1) : 0) }, [totalPages])
 
-  const totalPages = Math.ceil(sorted.length / PAGE_SIZE)
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern
-    if (totalPages > 0) setPage(p => Math.min(p, totalPages - 1))
-  }, [totalPages])
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- resets selection state when filters change; intentional derived-state reset
-  useEffect(() => { setAcceptingId(null) }, [severityFilter, breachFilter, sortKey])
-  const paged = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const paged = findings
 
   const settingsFormValid = (Object.values(settingsForm) as (number | '')[]).every(
     v => v !== '' && Number.isInteger(v) && v >= 1
@@ -192,7 +216,7 @@ export default function Vulnerabilities() {
                 key={s}
                 type="button"
                 aria-pressed={severityFilter.includes(s) ? true : false}
-                onClick={() => { setSeverityFilter(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]); setPage(0) }}
+                onClick={() => setSeverityFilter(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])}
                 className={`px-2 py-0.5 rounded text-style-tag border transition-colors ${
                   severityFilter.includes(s)
                     ? 'bg-foreground text-background border-foreground'
@@ -205,7 +229,7 @@ export default function Vulnerabilities() {
           </div>
           <Select
             value={breachFilter}
-            onChange={e => { setBreachFilter(e.target.value as BreachFilter); setPage(0) }}
+            onChange={e => setBreachFilter(e.target.value as BreachFilter)}
             className="w-44"
           >
             <option value="all">All findings</option>
@@ -214,7 +238,7 @@ export default function Vulnerabilities() {
           </Select>
           <Select
             value={sortKey}
-            onChange={e => setSortKey(e.target.value as SortKey)}
+            onChange={e => setSortKey(e.target.value as FindingSortKey)}
             className="w-44"
           >
             <option value="severity">Sort: Severity</option>
@@ -222,13 +246,13 @@ export default function Vulnerabilities() {
             <option value="repo">Sort: Repo</option>
           </Select>
           <span className="text-[13px] text-muted-foreground ml-auto">
-            {sorted.length} findings{refreshing && <span className="ml-1 opacity-50">·</span>}
+            {total} findings{refreshing && <span className="ml-1 opacity-50">·</span>}
           </span>
         </div>
 
         {loading ? (
           <div className="text-muted-foreground text-[13px]">Loading…</div>
-        ) : sorted.length === 0 ? (
+        ) : total === 0 ? (
           <Empty message="No open findings match your filters." />
         ) : (
           <>

@@ -237,7 +237,7 @@ Change `DATABASE_URL` in `.env` or the Docker environment:
 DATABASE_URL=sqlite+aiosqlite:///./data/pa_central.db
 
 # PostgreSQL (recommended for production)
-DATABASE_URL=postgresql+asyncpg://user:password@localhost/pa_fleet
+DATABASE_URL=postgresql+asyncpg://user:password@localhost/pa_central
 ```
 
 For PostgreSQL: `asyncpg` is already included in the Docker image (via `uv sync --no-dev --frozen`).

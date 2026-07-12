@@ -310,7 +310,7 @@ function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, k
     const seq = ++reqSeq.current
     setLoadError(false)
     if (!background) { setLoading(true); setFindings(null) }
-    api.findings.listForRepo(scanId).then(data => {
+    api.findings.listAllForRepo(scanId).then(data => {
       if (seq !== reqSeq.current) return
       setFindings(data)
       setLoading(false)
