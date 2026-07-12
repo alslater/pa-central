@@ -86,11 +86,6 @@ DEFAULT_SLA_HIGH = 14
 DEFAULT_SLA_MEDIUM = 90
 DEFAULT_FINDING_RETENTION = 365
 
-# Aliases from upstream scanners that don't map 1:1 to AlertSeverity values.
-_SEVERITY_ALIASES: dict[str, str] = {
-    "moderate": "medium",
-}
-
 
 def compute_scan_config_hash(
     scan_flags: str | None,
@@ -329,7 +324,7 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
 
         raw_severity = finding.get("severity")
         if isinstance(raw_severity, str) and raw_severity.strip():
-            normalised = _SEVERITY_ALIASES.get(raw_severity.lower(), raw_severity.lower())
+            normalised = raw_severity.lower()
         else:
             normalised = "info"
         try:

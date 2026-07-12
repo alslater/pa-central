@@ -245,14 +245,6 @@ class TestFindingLifecycleIngest:
         rows = (await db.execute(select(FindingRecord))).scalars().all()
         assert rows == []
 
-    async def test_moderate_severity_alias_maps_to_medium(self, client, db, repo_scan, pending_result):
-        """'moderate' from upstream scanners must be stored as 'medium', not coerced to 'info'."""
-        headers = system_key_header()
-        await _ingest(client, pending_result.id, [_finding(severity="moderate")], headers)
-        rows = (await db.execute(select(FindingRecord).where(FindingRecord.closed_at.is_(None)))).scalars().all()
-        assert len(rows) == 1
-        assert rows[0].severity.value == "medium"
-
     async def test_unknown_severity_falls_back_to_info(self, client, db, repo_scan, pending_result):
         headers = system_key_header()
         await _ingest(client, pending_result.id, [_finding(severity="bogus")], headers)
