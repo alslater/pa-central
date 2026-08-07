@@ -1,4 +1,5 @@
-import { ReactNode, useState, useEffect, useRef, useCallback, useMemo, useId, forwardRef } from 'react'
+import { useState, useEffect, useEffectEvent, useRef, useCallback, useMemo, useId, forwardRef } from 'react'
+import type { CSSProperties, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
 import { api, AlertSeverity, DaemonStatus, FindingRecord, ScanStatus } from '@/lib/api'
 
 // ── URL sanitization ──────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ export function ScanBadge({ status }: { status: ScanStatus }) {
 
 // ── Card ──────────────────────────────────────────────────────────────────────
 
-export function Card({ children, className, style }: { children: ReactNode; className?: string; style?: React.CSSProperties }) {
+export function Card({ children, className, style }: { children: ReactNode; className?: string; style?: CSSProperties }) {
   return (
     <div className={`bg-card border border-border rounded-[var(--radius-lg)] shadow-sm ${className ?? ''}`} style={style}>
       {children}
@@ -90,7 +91,7 @@ export function Button({
 }: {
   children: ReactNode; onClick?: () => void
   variant?: BtnVariant; disabled?: boolean
-  type?: 'button' | 'submit'; className?: string; style?: React.CSSProperties; title?: string
+  type?: 'button' | 'submit'; className?: string; style?: CSSProperties; title?: string
 }) {
   return (
     <button
@@ -110,7 +111,7 @@ export function Button({
 
 const inputClass = 'bg-muted border border-border rounded-[var(--radius-sm)] text-foreground px-3 h-9 text-[13px] outline-none w-full'
 
-export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement> & { label?: string }>(
+export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & { label?: string }>(
   function Input({ label, className, ...props }, ref) {
     return (
       <label className="flex flex-col gap-1.5">
@@ -121,7 +122,7 @@ export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTML
   }
 )
 
-export function Textarea({ label, className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { label?: string }) {
+export function Textarea({ label, className, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement> & { label?: string }) {
   return (
     <label className="flex flex-col gap-1.5">
       {label && <span className="text-xs text-muted-foreground font-medium">{label}</span>}
@@ -130,7 +131,7 @@ export function Textarea({ label, className, ...props }: React.TextareaHTMLAttri
   )
 }
 
-export function Select({ label, children, className, ...props }: React.SelectHTMLAttributes<HTMLSelectElement> & { label?: string }) {
+export function Select({ label, children, className, ...props }: SelectHTMLAttributes<HTMLSelectElement> & { label?: string }) {
   return (
     <label className="flex flex-col gap-1.5">
       {label && <span className="text-xs text-muted-foreground font-medium">{label}</span>}
@@ -151,6 +152,10 @@ const FOCUSABLE = [
 
 function useDialogAccessibility(onClose: () => void) {
   const panelRef = useRef<HTMLDivElement>(null)
+  // The Escape handler always calls the latest onClose without onClose being a
+  // dep, so callers can pass an inline callback and the listener is installed
+  // once per mount rather than re-bound on every parent render.
+  const close = useEffectEvent(() => onClose())
 
   // Restore focus to the element that was active when the dialog opened.
   useEffect(() => {
@@ -185,7 +190,7 @@ function useDialogAccessibility(onClose: () => void) {
       if (e.key === 'Escape') {
         if (!focusIsHere()) return
         e.stopImmediatePropagation()
-        onClose()
+        close()
         return
       }
       if (!focusIsHere() || e.key !== 'Tab') return
@@ -209,7 +214,7 @@ function useDialogAccessibility(onClose: () => void) {
 
     document.addEventListener('keydown', trap, { capture: true })
     return () => document.removeEventListener('keydown', trap, { capture: true })
-  }, [onClose])
+  }, [])
 
   return panelRef
 }
@@ -217,19 +222,14 @@ function useDialogAccessibility(onClose: () => void) {
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  // onClose is mirrored so stableClose keeps a constant identity for
-  // useDialogAccessibility. The write is in an effect, not during render:
-  // a discarded or replayed render must not mutate the ref.
-  // React 19: replace with useEffectEvent.
-  const onCloseRef = useRef(onClose)
-  useEffect(() => { onCloseRef.current = onClose }, [onClose])
-  const stableClose = useCallback(() => onCloseRef.current(), [])
-  const panelRef = useDialogAccessibility(stableClose)
+  // useDialogAccessibility wraps onClose in a useEffectEvent internally, so it
+  // can be passed directly — no ref mirror needed to keep its identity stable.
+  const panelRef = useDialogAccessibility(onClose)
   const titleId = useId()
   return (
     <div
       className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-[var(--z-overlay)] p-5"
-      onClick={stableClose}
+      onClick={onClose}
       role="presentation"
     >
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events -- role="dialog" legitimately captures clicks to prevent backdrop dismissal */}
@@ -244,7 +244,7 @@ export function Modal({ title, children, onClose }: { title: string; children: R
       >
         <div className="flex justify-between items-center mb-5">
           <h2 id={titleId} className="text-[15px] font-semibold">{title}</h2>
-          <button type="button" onClick={stableClose} aria-label="Close" className="bg-transparent border-none text-muted-foreground cursor-pointer text-lg leading-none">×</button>
+          <button type="button" onClick={onClose} aria-label="Close" className="bg-transparent border-none text-muted-foreground cursor-pointer text-lg leading-none">×</button>
         </div>
         {children}
       </div>
@@ -265,17 +265,13 @@ export function Empty({ message }: { message: string }) {
 // ── Drawer ────────────────────────────────────────────────────────────────────
 
 export function Drawer({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  // See Modal above: ref mirror written in an effect, not during render.
-  // React 19: replace with useEffectEvent.
-  const onCloseRef = useRef(onClose)
-  useEffect(() => { onCloseRef.current = onClose }, [onClose])
-  const stableClose = useCallback(() => onCloseRef.current(), [])
-  const panelRef = useDialogAccessibility(stableClose)
+  // See Modal above: useDialogAccessibility handles identity stability itself.
+  const panelRef = useDialogAccessibility(onClose)
   const titleId = useId()
   return (
     <div
       className="fixed inset-0 bg-background/60 backdrop-blur-sm z-[var(--z-overlay)]"
-      onClick={stableClose}
+      onClick={onClose}
       role="presentation"
     >
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events -- role="dialog" legitimately captures clicks to prevent backdrop dismissal */}
@@ -290,7 +286,7 @@ export function Drawer({ title, children, onClose }: { title: string; children: 
       >
         <div className="flex justify-between items-center px-5 py-4 border-b border-border shrink-0">
           <h2 id={titleId} className="text-[15px] font-semibold">{title}</h2>
-          <button type="button" onClick={stableClose} aria-label="Close" className="bg-transparent border-none text-muted-foreground cursor-pointer text-xl leading-none hover:text-foreground">×</button>
+          <button type="button" onClick={onClose} aria-label="Close" className="bg-transparent border-none text-muted-foreground cursor-pointer text-xl leading-none hover:text-foreground">×</button>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {children}

@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useState, useRef } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router'
 import {
   LayoutDashboard, Server, Bell, ScanSearch, Settings2,
   ShieldCheck, Key, Users, LogOut, Shield, GitBranch, Sliders,

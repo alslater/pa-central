@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
 import {
   api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions, FindingRecord,
 } from '@/lib/api'
@@ -442,13 +442,9 @@ function ScanArgsField({
     [options.flags],
   )
 
-  // onChange is mirrored so the emit effect below doesn't re-run when the
-  // parent passes a new callback identity. Written in an effect, not during
-  // render: a discarded or replayed render must not mutate the ref. Declared
-  // before the emit effect, so it commits first and the emit reads the current
-  // callback. React 19: replace with useEffectEvent.
-  const onChangeRef = useRef(onChange)
-  useEffect(() => { onChangeRef.current = onChange }, [onChange])
+  // Always calls the latest onChange without it being a dep, so the emit effect
+  // doesn't re-run when the parent passes a new callback identity.
+  const emit = useEffectEvent((assembled: string) => onChange(assembled))
 
   const lastEmittedRef = useRef(assembleScanArgs(bools, strs, options.flags))
 
@@ -456,7 +452,7 @@ function ScanArgsField({
     const assembled = assembleScanArgs(bools, strs, options.flags)
     if (assembled === lastEmittedRef.current) return
     lastEmittedRef.current = assembled
-    onChangeRef.current(assembled)
+    emit(assembled)
   }, [bools, strs, options.flags])
 
   const isExcluded = (flagName: string) => {

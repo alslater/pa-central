@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { api, Host } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, StatusDot, Button, useToast, Empty, timeAgo } from '@/components/ui'

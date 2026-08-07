@@ -3,7 +3,8 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { StrictMode } from 'react'
+import { MemoryRouter } from 'react-router'
 import { vi, beforeEach, afterEach, describe, it, expect } from 'vitest'
 import type { User } from '@/lib/api'
 
@@ -281,18 +282,66 @@ describe('Users page — edit panel syncs to changed user prop', () => {
     await user.click(await screen.findByText('Bob'))
     expect(await screen.findByRole('combobox', { name: /role/i })).toHaveValue('viewer')
 
-    // Bob is promoted elsewhere; the refresh returns the new object. A reload
-    // flips `loading`, which swaps the table out for a spinner and unmounts the
-    // panel; it remounts once data arrives, re-initialising drafts from the new
-    // prop. So the panel cannot hold drafts from before the refresh — hence no
-    // prop-sync effect is needed. If the loading swap is ever removed, the panel
-    // would stay mounted with stale drafts and these assertions catch it.
+    // Bob is promoted elsewhere; the refresh returns the new object. On React
+    // 19 the setLoading(true) in load() is batched with the updates from the
+    // resolved fetch, so the "Loading…" branch never commits and this panel is
+    // never unmounted — it must therefore re-sync its drafts from the changed
+    // prop. (On React 18 the swap committed and the remount did this for free.)
     vi.mocked(api.users.list).mockResolvedValue([ADMIN, { ...TARGET, role: 'admin' }])
     await createUserToTriggerReload(user)
 
     await screen.findByText('Bob')
     expect(await screen.findByRole('combobox', { name: /role/i })).toHaveValue('admin')
     expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  it('keeps in-progress edits when the refresh returns unchanged data', async () => {
+    const user = setup()
+    vi.mocked(api.auth.register).mockResolvedValue(undefined as never)
+    renderPage()
+    await user.click(await screen.findByText('Bob'))
+    await user.selectOptions(await screen.findByRole('combobox', { name: /role/i }), 'operator')
+
+    // Identity is unchanged, so the sync must not fire. A reset-on-every-render
+    // implementation would pass the test above but silently discard this edit.
+    await createUserToTriggerReload(user)
+
+    await screen.findByText('Bob')
+    expect(await screen.findByRole('combobox', { name: /role/i })).toHaveValue('operator')
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeEnabled()
+  })
+
+  it('converges without warnings when the panel re-renders under StrictMode', async () => {
+    // The render-phase sync re-runs the component until `identity` converges.
+    // `identity` is derived purely from props so it always does. A value that
+    // did not converge makes React *throw* "Too many re-renders" out of
+    // render() — so reaching the end of this test is itself the convergence
+    // assertion. The console capture is a secondary net for the softer
+    // warnings React logs rather than throws.
+    //
+    // All args are serialised, not just args[0]: React formats these messages
+    // with %s placeholders, so the matched text can live in a later argument.
+    const errors: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(args.map(a => (a instanceof Error ? a.message : String(a))).join(' '))
+    })
+    try {
+      const user = setup()
+      vi.mocked(api.auth.register).mockResolvedValue(undefined as never)
+      render(<StrictMode><MemoryRouter><Users /></MemoryRouter></StrictMode>)
+      await user.click(await screen.findByText('Bob'))
+      await user.selectOptions(await screen.findByRole('combobox', { name: /role/i }), 'operator')
+      vi.mocked(api.users.list).mockResolvedValue([ADMIN, { ...TARGET, role: 'admin' }])
+      await createUserToTriggerReload(user)
+      await screen.findByText('Bob')
+      // Panel re-synced to the new server state rather than looping.
+      expect(await screen.findByRole('combobox', { name: /role/i })).toHaveValue('admin')
+    } finally {
+      // Restored here rather than relying on the shared afterEach, so an
+      // assertion failure above cannot leak the spy into later tests.
+      spy.mockRestore()
+    }
+    expect(errors.filter(m => /maximum update depth|too many re-renders|cannot update a component/i.test(m))).toEqual([])
   })
 })
 
