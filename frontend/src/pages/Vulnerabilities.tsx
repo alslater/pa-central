@@ -40,20 +40,22 @@ export default function Vulnerabilities() {
 
   const reqSeq = React.useRef(0)
   const settingsSeq = React.useRef(0)
-  // pageRef mirrors page state so load() can always read the current page
-  // without closing over it as a dep. This prevents load from rebuilding
-  // (and the load effect from firing a stale request) on every page change.
-  // The write happens in an effect, not during render: render can be discarded
-  // or replayed under StrictMode/concurrent rendering, so mutating a ref there
-  // is unsafe. The pagination effect below depends on `page` and runs after
-  // this one, so it always reads the updated value.
-  //
-  // React 19: replace this ref + sync effect with useEffectEvent, which reads
-  // the latest `page` without being a dep. Not available on 18.3.1.
+  // Mirrors `page` for callbacks that fire long after their render — the
+  // accept/revoke `onDone` handlers run only once an awaited request resolves,
+  // by which time the user may have paged away. Reading the ref refreshes
+  // whatever page is showing now, rather than refetching the captured page and
+  // overwriting the table with rows the pager no longer claims to display.
+  // Written in an effect, not during render (a discarded render must not mutate
+  // it); declared before the pagination effect so it commits first.
+  // Not useEffectEvent: that can only be *called* from effects, and these are
+  // event handlers.
   const pageRef = React.useRef(page)
   useEffect(() => { pageRef.current = page }, [page])
 
-  const load = useCallback(async (background = false) => {
+  // `page` is passed in rather than closed over, so `load` doesn't rebuild on
+  // every page change. Its identity therefore changes only when the filters or
+  // sort change, which the pagination effect below relies on.
+  const load = useCallback(async (pageArg: number, background = false) => {
     const seq = ++reqSeq.current
     if (background) setRefreshing(true)
     else setLoading(true)
@@ -62,7 +64,7 @@ export default function Vulnerabilities() {
         severity: severityFilter.length ? severityFilter : undefined,
         breach: breachFilter === 'breaching' ? true : undefined,
         accepted: breachFilter === 'accepted' ? true : undefined,
-        page: pageRef.current,
+        page: pageArg,
         page_size: PAGE_SIZE,
         sort: sortKey,
         sort_dir: sortDir,
@@ -107,7 +109,7 @@ export default function Vulnerabilities() {
   // When load rebuilds and page > 0: reset page to 0 and skip the fetch — the
   // page change re-triggers this effect and the fetch happens then (page 0, one request).
   // When load rebuilds and page is already 0, or when only page changes (navigation):
-  // fetch immediately using pageRef.current.
+  // fetch immediately using the current page.
   // The load-identity comparison lives inside the effect: deriving it during
   // render and advancing the ref there would consume the "load changed" signal
   // on a render that may never commit, silently losing the page reset.
@@ -123,7 +125,7 @@ export default function Vulnerabilities() {
         return
       }
     }
-    load()
+    load(page)
     // reqSeq is an abort counter: incrementing in cleanup invalidates in-flight responses so stale data is never committed.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reading reqSeq.current in cleanup is intentional; "stale ref" warning doesn't apply to a counter ref (not a DOM node)
     return () => { reqSeq.current++ }
@@ -323,7 +325,7 @@ export default function Vulnerabilities() {
                           </td>
                           <td className="px-4 py-2.5" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
                             {f.is_accepted ? (
-                              <FindingRevokeButton finding={f} onDone={() => load(true)} show={show} size="sm" />
+                              <FindingRevokeButton finding={f} onDone={() => load(pageRef.current, true)} show={show} size="sm" />
                             ) : (
                               <Button
                                 variant="ghost"
@@ -340,7 +342,7 @@ export default function Vulnerabilities() {
                             <td colSpan={COLUMN_COUNT} className="px-4 py-3 bg-muted/40">
                               <FindingAcceptForm
                                 finding={f}
-                                onDone={() => { setAcceptingId(null); load(true) }}
+                                onDone={() => { setAcceptingId(null); load(pageRef.current, true) }}
                                 onCancel={() => setAcceptingId(null)}
                                 show={show}
                                 size="sm"

@@ -8,7 +8,7 @@
  *   viewer   — no write actions
  */
 import { render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { vi, beforeEach, describe, it, expect } from 'vitest'
 import type { User } from '@/lib/api'
 

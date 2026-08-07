@@ -151,6 +151,24 @@ function UserEditPanel({
   const [saving, setSaving] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
 
+  // Re-sync drafts when the target user's server state changes underneath an
+  // open panel. React 19 batches load()'s setLoading(true) with the updates
+  // from the resolved fetch, so the "Loading…" branch never commits and this
+  // panel is no longer unmounted by a refresh — it keeps whatever drafts it
+  // had. Without this, `dirty` compares stale drafts against the new prop, so
+  // an untouched panel looks dirty and Save would push a value nobody chose.
+  // (On React 18 the loading swap did commit, which is why this wasn't needed.)
+  // Adjusted during render rather than in an effect: React's documented
+  // pattern, and it avoids rendering one frame of stale values.
+  const identity = `${user.id}:${user.role}:${user.is_active}:${user.totp_enabled}`
+  const [syncedIdentity, setSyncedIdentity] = useState(identity)
+  if (syncedIdentity !== identity) {
+    setSyncedIdentity(identity)
+    setDraftRole(user.role)
+    setDraftActive(user.is_active)
+    setConfirmReset(false)
+  }
+
   const save = async () => {
     setSaving(true)
     try {

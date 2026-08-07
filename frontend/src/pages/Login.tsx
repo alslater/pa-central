@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, FormEvent } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { Shield, Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { Button, Input } from '@/components/ui'

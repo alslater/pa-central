@@ -12,7 +12,7 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { vi, beforeEach, afterEach, describe, it, expect } from 'vitest'
 import type { FindingRecord } from '@/lib/api'
 
@@ -22,7 +22,7 @@ vi.mock('@/hooks/useAuth', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    findings: { list: vi.fn(), accept: vi.fn() },
+    findings: { list: vi.fn(), accept: vi.fn(), revokeAccept: vi.fn() },
     findingSettings: { get: vi.fn(), update: vi.fn() },
   },
 }))
@@ -164,6 +164,45 @@ describe('Vulnerabilities — pagination fetch contract', () => {
     const lastCall = calls[calls.length - 1][0]
     expect(lastCall?.page).toBe(0)
     expect(lastCall?.severity).toEqual(['critical'])
+  })
+
+  it('a revoke that resolves after a page change refreshes the current page', async () => {
+    // onDone fires only after an awaited network call, so the user can page
+    // away in between. If onDone closed over the render-time `page`, it would
+    // refetch the old page *after* the new one and — because it takes the
+    // newest reqSeq — win the race, leaving the table showing page 1's rows
+    // while the pager reads page 2.
+    const user = setup()
+    let releaseRevoke: () => void = () => {}
+    vi.mocked(api.findings.revokeAccept).mockImplementation(
+      () => new Promise<FindingRecord>(resolve => {
+        releaseRevoke = () => resolve({ ...finding(1), is_accepted: false })
+      }),
+    )
+    // Override setup()'s list mock so the row renders a Revoke button.
+    vi.mocked(api.findings.list).mockImplementation(async (params) => ({
+      items: [{ ...finding(1), is_accepted: true }],
+      total: TOTAL,
+      page: params?.page ?? 0,
+      page_size: PAGE_SIZE,
+    }))
+
+    renderPage()
+    await screen.findByText(/page 1 of/i)
+    await waitFor(() => expect(requestedPages()).toEqual([0]))
+
+    // Start the revoke, then page forward before it settles.
+    await user.click(screen.getByRole('button', { name: /revoke/i }))
+    await user.click(screen.getByRole('button', { name: '→' }))
+    await screen.findByText(/page 2 of/i)
+    await waitFor(() => expect(requestedPages()).toEqual([0, 1]))
+
+    releaseRevoke()
+
+    // The refresh triggered by onDone must target page 1 (the current page),
+    // not page 0 (the page that was showing when the button was clicked).
+    await waitFor(() => expect(requestedPages()).toEqual([0, 1, 1]))
+    expect(screen.getByText(/page 2 of/i)).toBeInTheDocument()
   })
 
   it('changing a filter while already on page 0 fetches once', async () => {
