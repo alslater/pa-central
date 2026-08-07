@@ -5,12 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.core.config import settings as app_settings
-from app.core.encryption import encrypt_value
-from app.models import SystemSetting, SettingValueType, User, utcnow
-from app.schemas import SystemSettingOut, SystemSettingPatch
 from app.api.deps import require_admin
+from app.core.config import settings as app_settings
+from app.core.database import get_db
+from app.core.encryption import encrypt_value
+from app.models import SettingValueType, SystemSetting, User, utcnow
+from app.schemas import SystemSettingOut, SystemSettingPatch
 
 router = APIRouter(prefix="/system-settings", tags=["system-settings"])
 
@@ -47,13 +47,13 @@ def _redact(s: SystemSetting) -> SystemSettingOut:
 
 
 @router.get("", response_model=list[SystemSettingOut])
-async def get_settings(db: DbDep, _: AdminDep):
+async def get_settings(db: DbDep, _: AdminDep) -> list[SystemSettingOut]:
     result = await db.execute(select(SystemSetting).order_by(SystemSetting.key))
     return [_redact(s) for s in result.scalars().all()]
 
 
 @router.patch("", response_model=list[SystemSettingOut])
-async def patch_settings(body: SystemSettingPatch, db: DbDep, user: AdminDep):
+async def patch_settings(body: SystemSettingPatch, db: DbDep, user: AdminDep) -> list[SystemSettingOut]:
     now = utcnow()
     for key, raw_value in body.updates.items():
         vtype = KEY_TYPES.get(key, SettingValueType.string)

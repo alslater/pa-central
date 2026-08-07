@@ -61,7 +61,7 @@ export default function Dashboard() {
                   <thead>
                     <tr className="data-thead-tr">
                       {['Severity', 'Package', 'Ecosystem', 'Advisory', 'Host', 'When'].map(h => (
-                        <th key={h} className="data-th-sm">{h}</th>
+                        <th key={h} scope="col" className="data-th-sm">{h}</th>
                       ))}
                     </tr>
                   </thead>

@@ -47,9 +47,10 @@ export default function Hosts() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-border">
-                  {['Name', 'Hostname', 'Status', 'PA Version', 'Tags', 'Last seen', ''].map(h => (
-                    <th key={h} className="text-left px-4 py-2.5 text-style-caption">{h}</th>
+                  {['Name', 'Hostname', 'Status', 'PA Version', 'Tags', 'Last seen'].map(h => (
+                    <th key={h} scope="col" className="text-left px-4 py-2.5 text-style-caption">{h}</th>
                   ))}
+                  <th scope="col" className="px-4 py-2.5"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -58,7 +59,7 @@ export default function Hosts() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <Server size={13} className="text-muted-foreground" />
-                        <button onClick={() => navigate(`/hosts/${h.id}`)}
+                        <button type="button" onClick={() => navigate(`/hosts/${h.id}`)}
                           className="bg-transparent border-none cursor-pointer text-status-review font-medium p-0 text-[inherit]">
                           {h.name}
                         </button>

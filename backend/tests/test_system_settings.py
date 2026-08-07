@@ -1,5 +1,6 @@
 """Tests for GET/PATCH /api/system-settings."""
 import pytest
+
 from tests.conftest import auth
 
 
@@ -36,7 +37,7 @@ class TestSystemSettings:
         assert settings["pa_version"]["value"] == "2.0.0"
 
     async def test_secret_value_redacted_in_get(self, client, admin_token, db):
-        from app.models import SystemSetting, SettingValueType
+        from app.models import SettingValueType, SystemSetting
         s = SystemSetting(key="smtp_password", value="encrypted_blob", value_type=SettingValueType.secret)
         db.add(s)
         await db.commit()

@@ -1,5 +1,6 @@
 """Authorization tests for /api/repo-credentials endpoints."""
 import pytest
+
 from app.core.config import settings as app_settings
 from tests.conftest import auth
 

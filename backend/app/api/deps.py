@@ -3,13 +3,21 @@ import hmac
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Security, status
-from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
+from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import decode_access_token, hash_api_key
-from app.models import User, ApiKey, Host, UserRole, ConfigTemplate, ConfigAssignment, utcnow
+from app.models import (
+    ApiKey,
+    ConfigAssignment,
+    ConfigTemplate,
+    Host,
+    User,
+    UserRole,
+    utcnow,
+)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)

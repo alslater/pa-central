@@ -7,6 +7,11 @@ import { Settings2 } from 'lucide-react'
 
 const SEVERITIES: AlertSeverity[] = ['critical', 'high', 'medium', 'warning', 'low', 'info']
 const PAGE_SIZE = 50
+// Data columns only; the actions column is rendered separately with an sr-only
+// label. The expanded detail row spans the whole table, so its colSpan derives
+// from this count plus that actions column.
+const COLUMNS = ['Repo', 'Severity', 'Package', 'Ecosystem', 'Advisory ID', 'Open since', 'SLA', 'Status'] as const
+const COLUMN_COUNT = COLUMNS.length + 1
 
 type BreachFilter = 'all' | 'breaching' | 'accepted'
 
@@ -38,8 +43,15 @@ export default function Vulnerabilities() {
   // pageRef mirrors page state so load() can always read the current page
   // without closing over it as a dep. This prevents load from rebuilding
   // (and the load effect from firing a stale request) on every page change.
+  // The write happens in an effect, not during render: render can be discarded
+  // or replayed under StrictMode/concurrent rendering, so mutating a ref there
+  // is unsafe. The pagination effect below depends on `page` and runs after
+  // this one, so it always reads the updated value.
+  //
+  // React 19: replace this ref + sync effect with useEffectEvent, which reads
+  // the latest `page` without being a dep. Not available on 18.3.1.
   const pageRef = React.useRef(page)
-  pageRef.current = page
+  useEffect(() => { pageRef.current = page }, [page])
 
   const load = useCallback(async (background = false) => {
     const seq = ++reqSeq.current
@@ -96,12 +108,14 @@ export default function Vulnerabilities() {
   // page change re-triggers this effect and the fetch happens then (page 0, one request).
   // When load rebuilds and page is already 0, or when only page changes (navigation):
   // fetch immediately using pageRef.current.
+  // The load-identity comparison lives inside the effect: deriving it during
+  // render and advancing the ref there would consume the "load changed" signal
+  // on a render that may never commit, silently losing the page reset.
   const prevLoadRef = React.useRef(load)
-  const filterReset = prevLoadRef.current !== load
-  prevLoadRef.current = load
   useEffect(() => {
+    const filterReset = prevLoadRef.current !== load
+    prevLoadRef.current = load
     if (filterReset) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: reset page and accepting state when filters/sort change
       setAcceptingId(null)
       if (page !== 0) {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: setPage(0) re-triggers this effect which does the fetch
@@ -109,14 +123,11 @@ export default function Vulnerabilities() {
         return
       }
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- load() calls setLoading synchronously; intentional data-fetch pattern
     load()
     // reqSeq is an abort counter: incrementing in cleanup invalidates in-flight responses so stale data is never committed.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reading reqSeq.current in cleanup is intentional; "stale ref" warning doesn't apply to a counter ref (not a DOM node)
     return () => { reqSeq.current++ }
-    // page is included so pagination (prev/next) triggers a fetch; filterReset is
-    // derived from load identity so it's implicitly covered by the load dep.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterReset is a render-phase variable derived from load; listing load covers it
+    // page is included so pagination (prev/next) triggers a fetch.
   }, [load, page])
   useEffect(() => {
     loadSettings()
@@ -261,9 +272,10 @@ export default function Vulnerabilities() {
                 <table className="w-full border-collapse">
                   <thead>
                     <tr className="border-b border-border">
-                      {['Repo', 'Severity', 'Package', 'Ecosystem', 'Advisory ID', 'Open since', 'SLA', 'Status', ''].map(h => (
-                        <th key={h} className="text-left px-4 py-2.5 text-style-caption">{h}</th>
+                      {COLUMNS.map(h => (
+                        <th key={h} scope="col" className="text-left px-4 py-2.5 text-style-caption">{h}</th>
                       ))}
+                      <th scope="col" className="px-4 py-2.5"><span className="sr-only">Actions</span></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -325,7 +337,7 @@ export default function Vulnerabilities() {
                         </tr>
                         {acceptingId === f.id && (
                           <tr className="border-b border-border/50">
-                            <td colSpan={9} className="px-4 py-3 bg-muted/40">
+                            <td colSpan={COLUMN_COUNT} className="px-4 py-3 bg-muted/40">
                               <FindingAcceptForm
                                 finding={f}
                                 onDone={() => { setAcceptingId(null); load(true) }}

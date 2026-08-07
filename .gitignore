@@ -65,3 +65,4 @@ superpowers/
 
 .agents/
 backend/backfill_findings.py
+.serena/

@@ -83,9 +83,10 @@ export default function Alerts() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-border">
-                  {['Severity', 'Package', 'Ecosystem', 'Kind', 'Advisory', 'Project', 'Host', 'When', ''].map(h => (
-                    <th key={h} className="text-left px-4 py-2.5 text-style-caption">{h}</th>
+                  {['Severity', 'Package', 'Ecosystem', 'Kind', 'Advisory', 'Project', 'Host', 'When'].map(h => (
+                    <th key={h} scope="col" className="text-left px-4 py-2.5 text-style-caption">{h}</th>
                   ))}
+                  <th scope="col" className="px-4 py-2.5"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>

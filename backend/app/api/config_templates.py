@@ -2,13 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user, require_admin, require_operator
 from app.core.database import get_db
-from app.models import ConfigTemplate, ConfigAssignment, Host, User
+from app.models import ConfigAssignment, ConfigTemplate, Host, User
 from app.schemas import (
-    ConfigTemplateCreate, ConfigTemplateUpdate, ConfigTemplateOut,
-    ConfigAssignOut, ValidateRequest, LintResult,
+    ConfigAssignOut,
+    ConfigTemplateCreate,
+    ConfigTemplateOut,
+    ConfigTemplateUpdate,
+    LintResult,
+    ValidateRequest,
 )
-from app.api.deps import get_current_user, require_operator, require_admin
 from app.services.config_lint import lint_toml
 
 router = APIRouter(prefix="/config-templates", tags=["config"])
@@ -21,7 +25,7 @@ _MAX_VALIDATE_BYTES = 64 * 1024  # 64 KB — well above any real config template
 async def validate_template(
     body: ValidateRequest,
     _: User = Depends(get_current_user),
-):
+) -> LintResult:
     if len(body.toml_content.encode()) > _MAX_VALIDATE_BYTES:
         raise HTTPException(413, detail=f"Payload exceeds maximum allowed size ({_MAX_VALIDATE_BYTES // 1024} KB)")
     return lint_toml(body.toml_content)
@@ -31,7 +35,7 @@ async def validate_template(
 async def list_templates(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
-):
+) -> list[ConfigTemplateOut]:
     result = await db.execute(select(ConfigTemplate).order_by(ConfigTemplate.name))
     return result.scalars().all()
 
@@ -41,7 +45,7 @@ async def create_template(
     body: ConfigTemplateCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator),
-):
+) -> ConfigTemplateOut:
     tmpl = ConfigTemplate(**body.model_dump(), created_by_id=user.id)
     db.add(tmpl)
     await db.commit()
@@ -54,7 +58,7 @@ async def get_template(
     tmpl_id: int,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
-):
+) -> ConfigTemplateOut:
     tmpl = await db.get(ConfigTemplate, tmpl_id)
     if not tmpl:
         raise HTTPException(404, "Template not found")
@@ -67,7 +71,7 @@ async def update_template(
     body: ConfigTemplateUpdate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_operator),
-):
+) -> ConfigTemplateOut:
     tmpl = await db.get(ConfigTemplate, tmpl_id)
     if not tmpl:
         raise HTTPException(404, "Template not found")
@@ -102,8 +106,9 @@ async def delete_template(
     tmpl_id: int,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
-):
+) -> None:
     from sqlalchemy import func
+
     from app.models import RepoScan
     tmpl = await db.get(ConfigTemplate, tmpl_id)
     if not tmpl:
@@ -136,7 +141,7 @@ async def assign_template(
     host_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator),
-):
+) -> ConfigAssignOut:
     tmpl = await db.get(ConfigTemplate, tmpl_id)
     host = await db.get(Host, host_id)
     if not tmpl or not host:
@@ -153,7 +158,7 @@ async def config_for_host(
     host_id: int,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
-):
+) -> ConfigTemplateOut | None:
     """Returns the assigned config template for a host. Called by the frontend UI; requires a user JWT."""
     result = await db.execute(
         select(ConfigAssignment)

@@ -1,6 +1,7 @@
 """Tests for AES-256-GCM encryption utility."""
 import pytest
-from app.core.encryption import encrypt_value, decrypt_value, EncryptionError
+
+from app.core.encryption import EncryptionError, decrypt_value, encrypt_value
 
 
 def test_encrypt_decrypt_roundtrip():

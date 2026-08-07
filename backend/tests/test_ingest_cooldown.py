@@ -1,7 +1,8 @@
 """Tests for GET /api/ingest/cooldown."""
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
+
 from app.models import CooldownEntry, Ecosystem
 
 
@@ -39,6 +40,7 @@ class TestIngestCooldown:
             headers=api_key_header(raw),
         )
         from sqlalchemy import select
+
         from app.models import Host
         result = await db.execute(select(Host).where(Host.hostname == "scoped-host"))
         host = result.scalar_one()
@@ -69,6 +71,7 @@ class TestIngestCooldown:
             headers=api_key_header(raw),
         )
         from sqlalchemy import select
+
         from app.models import Host
         result = await db.execute(select(Host).where(Host.hostname == "other-host"))
         other_host = result.scalar_one()
@@ -97,7 +100,7 @@ class TestIngestCooldown:
             ecosystem=Ecosystem.pypi,
             host_id=None,
             created_by_id=key_obj.user_id,
-            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+            expires_at=datetime.now(UTC) - timedelta(days=1),
         )
         db.add(expired)
         await db.commit()
@@ -117,7 +120,7 @@ class TestIngestCooldown:
             ecosystem=Ecosystem.pypi,
             host_id=None,
             created_by_id=key_obj.user_id,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            expires_at=datetime.now(UTC) + timedelta(days=7),
         )
         db.add(active)
         await db.commit()

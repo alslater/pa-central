@@ -1,7 +1,7 @@
 """Tests for local Docker scan runner."""
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 ENV = {
     "PA_VERSION": "1.0.0",

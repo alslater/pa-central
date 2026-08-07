@@ -1,9 +1,11 @@
 """Tests for /api/repo-scans CRUD."""
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime, timezone, timedelta
+
+from app.models import AlertSeverity, FindingRecord
 from tests.conftest import auth
-from app.models import FindingRecord, AlertSeverity
 
 REPO_PAYLOAD = {
     "name": "my-repo",
@@ -260,7 +262,7 @@ class TestSubfolderValidation:
 
 
 def _open_finding(repo_scan_id, days_old=5, severity="high", accepted=False):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return FindingRecord(
         repo_scan_id=repo_scan_id,
         advisory_id="GHSA-t", package="pkg", ecosystem="pypi",
@@ -322,12 +324,12 @@ class TestRepoScanBreachField:
 
     async def test_breach_true_lapsed_acceptance(self, client, db, admin_user, admin_token):
         """A finding with lapsed accepted_until is in breach."""
-        from datetime import date, timedelta as td
+        from datetime import timedelta as td
         scan = (await client.post("/api/repo-scans",
             json={"name": "lapse-s", "url": "http://l", "branch": "main", "min_notify_severity": "high"},
             headers=auth(admin_token))).json()
-        yesterday = date.today() - td(days=1)
-        now = datetime.now(timezone.utc)
+        yesterday = datetime.now(UTC).date() - td(days=1)
+        now = datetime.now(UTC)
         finding = FindingRecord(
             repo_scan_id=scan["id"],
             advisory_id="LAPSE-1", package="lapse-pkg", ecosystem="pypi",
@@ -375,7 +377,7 @@ class TestRepoScanBreachField:
         scan = (await client.post("/api/repo-scans",
             json={"name": "multi-s", "url": "http://m", "branch": "main", "min_notify_severity": "high"},
             headers=auth(admin_token))).json()
-        old = datetime.now(timezone.utc) - timedelta(days=30)
+        old = datetime.now(UTC) - timedelta(days=30)
         for i in range(3):
             db.add(FindingRecord(
                 repo_scan_id=scan["id"],

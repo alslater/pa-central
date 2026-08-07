@@ -1,17 +1,18 @@
 """Tests for /api/scans endpoints."""
 import pytest
+
 from app.models import Scan, ScanStatus
 from tests.conftest import auth
 
 
 async def _seed_scan(db, host, **kwargs):
-    defaults = dict(
-        host_id=host.id,
-        project_path="/app/project",
-        scan_type="project",
-        status=ScanStatus.clean,
-        finding_count=0,
-    )
+    defaults = {
+        "host_id": host.id,
+        "project_path": "/app/project",
+        "scan_type": "project",
+        "status": ScanStatus.clean,
+        "finding_count": 0,
+    }
     defaults.update(kwargs)
     scan = Scan(**defaults)
     db.add(scan)

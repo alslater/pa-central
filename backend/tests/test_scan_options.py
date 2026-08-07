@@ -1,6 +1,8 @@
-import pytest
 from unittest.mock import patch
-from app.services.scan_options import get_scan_options, _cached_scan_options_json
+
+import pytest
+
+from app.services.scan_options import _cached_scan_options_json, get_scan_options
 
 
 def test_returns_scan_unpinned_bool():

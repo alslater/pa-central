@@ -1,8 +1,16 @@
 """Tests for POST /api/ingest/repo-scan-result."""
 import pytest
 from sqlalchemy import select
-from app.models import RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, AlertSeverity, FindingRecord
+
 from app.core.config import settings as app_settings
+from app.models import (
+    AlertSeverity,
+    FindingRecord,
+    RepoScan,
+    RepoScanResult,
+    RepoScanStatus,
+    ScanTrigger,
+)
 from app.services.finding_lifecycle import compute_scan_config_hash
 
 
@@ -300,11 +308,15 @@ class TestFindingLifecycleIngest:
 class TestConfigChangeReset:
     async def test_config_change_closes_open_findings_with_reason(self, db, repo_scan):
         """When scan_config_hash changes between results, open findings are closed with closed_reason='config_change'."""
-        from app.services.finding_lifecycle import update_finding_records, compute_scan_config_hash
-        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
         import datetime
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        from app.services.finding_lifecycle import (
+            compute_scan_config_hash,
+            update_finding_records,
+        )
+
+        now = datetime.datetime.now(datetime.UTC)
 
         r1 = RepoScanResult(
             repo_scan_id=repo_scan.id,
@@ -350,11 +362,15 @@ class TestConfigChangeReset:
 
     async def test_same_config_hash_does_not_reset(self, db, repo_scan):
         """When scan_config_hash is unchanged, findings carry over normally."""
-        from app.services.finding_lifecycle import update_finding_records, compute_scan_config_hash
-        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
         import datetime
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        from app.services.finding_lifecycle import (
+            compute_scan_config_hash,
+            update_finding_records,
+        )
+
+        now = datetime.datetime.now(datetime.UTC)
         h = compute_scan_config_hash(None, None, None)
 
         r1 = RepoScanResult(
@@ -392,11 +408,12 @@ class TestConfigChangeReset:
 
     async def test_null_hash_does_not_reset(self, db, repo_scan):
         """When scan_config_hash is NULL (pre-upgrade result), no reset occurs."""
-        from app.services.finding_lifecycle import update_finding_records
-        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
         import datetime
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        from app.services.finding_lifecycle import update_finding_records
+
+        now = datetime.datetime.now(datetime.UTC)
 
         r1 = RepoScanResult(
             repo_scan_id=repo_scan.id,

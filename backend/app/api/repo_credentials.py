@@ -6,12 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.core.config import settings as app_settings
+from app.api.deps import require_admin, require_operator
 from app.core.aws import SecretsManagerClient
-from app.models import RepoCredential, CredentialType, User, utcnow
-from app.schemas import RepoCredentialCreate, RepoCredentialUpdate, RepoCredentialOut
-from app.api.deps import require_operator, require_admin
+from app.core.config import settings as app_settings
+from app.core.database import get_db
+from app.models import CredentialType, RepoCredential, User, utcnow
+from app.schemas import RepoCredentialCreate, RepoCredentialOut, RepoCredentialUpdate
 
 router = APIRouter(prefix="/repo-credentials", tags=["repo-credentials"])
 
@@ -69,13 +69,13 @@ def _encode_credential(value: str, passphrase: str | None) -> str:
 
 
 @router.get("", response_model=list[RepoCredentialOut])
-async def list_credentials(db: DbDep, _: OperatorDep):
+async def list_credentials(db: DbDep, _: OperatorDep) -> list[RepoCredentialOut]:
     result = await db.execute(select(RepoCredential).order_by(RepoCredential.name))
     return result.scalars().all()
 
 
 @router.post("", status_code=201, response_model=RepoCredentialOut)
-async def create_credential(body: RepoCredentialCreate, db: DbDep, _: OperatorDep):
+async def create_credential(body: RepoCredentialCreate, db: DbDep, _: OperatorDep) -> RepoCredentialOut:
     if body.credential_type != CredentialType.none and not body.credential_value:
         raise HTTPException(400, "credential_value is required when credential_type is not 'none'")
     if body.credential_type == CredentialType.none and body.credential_value:
@@ -103,7 +103,7 @@ async def create_credential(body: RepoCredentialCreate, db: DbDep, _: OperatorDe
 
 
 @router.patch("/{cred_id}", response_model=RepoCredentialOut)
-async def update_credential(cred_id: int, body: RepoCredentialUpdate, db: DbDep, _: OperatorDep):
+async def update_credential(cred_id: int, body: RepoCredentialUpdate, db: DbDep, _: OperatorDep) -> RepoCredentialOut:
     cred = await db.get(RepoCredential, cred_id)
     if not cred:
         raise HTTPException(404, "Credential not found")
@@ -126,7 +126,7 @@ async def update_credential(cred_id: int, body: RepoCredentialUpdate, db: DbDep,
             if not cred.credential_secret_arn.startswith("local://"):
                 try:
                     await _sm().delete_secret(cred.credential_secret_arn)
-                except Exception:
+                except Exception:  # noqa: BLE001 S110
                     pass
             cred.credential_secret_arn = None
     elif credential_value:
@@ -159,7 +159,7 @@ async def delete_credential(cred_id: int, db: DbDep, _: AdminDep) -> None:
     if cred.credential_secret_arn and not cred.credential_secret_arn.startswith("local://"):
         try:
             await _sm().delete_secret(cred.credential_secret_arn)
-        except Exception:
+        except Exception:  # noqa: BLE001 S110
             pass
     await db.delete(cred)
     await db.commit()

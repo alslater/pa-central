@@ -346,13 +346,13 @@ function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, k
         <table className="w-full border-collapse text-[12px]">
           <thead>
             <tr className="text-left border-b border-border">
-              <th className="px-4 py-2 text-style-caption">Severity</th>
-              <th className="px-4 py-2 text-style-caption">Package</th>
-              <th className="px-4 py-2 text-style-caption">Ecosystem</th>
-              <th className="px-4 py-2 text-style-caption">Advisory</th>
-              <th className="px-4 py-2 text-style-caption">Open since</th>
-              <th className="px-4 py-2 text-style-caption">SLA</th>
-              <th className="px-4 py-2 text-style-caption">Status</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Severity</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Package</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Ecosystem</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Advisory</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Open since</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">SLA</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Status</th>
             </tr>
           </thead>
           <tbody>
@@ -442,8 +442,13 @@ function ScanArgsField({
     [options.flags],
   )
 
+  // onChange is mirrored so the emit effect below doesn't re-run when the
+  // parent passes a new callback identity. Written in an effect, not during
+  // render: a discarded or replayed render must not mutate the ref. Declared
+  // before the emit effect, so it commits first and the emit reads the current
+  // callback. React 19: replace with useEffectEvent.
   const onChangeRef = useRef(onChange)
-  onChangeRef.current = onChange // eslint-disable-line react-hooks/refs
+  useEffect(() => { onChangeRef.current = onChange }, [onChange])
 
   const lastEmittedRef = useRef(assembleScanArgs(bools, strs, options.flags))
 

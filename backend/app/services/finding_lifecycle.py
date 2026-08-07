@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
-from app.models import AlertSeverity, FindingRecord, RepoScan, RepoScanResult, RepoScanStatus, SystemSetting, utcnow
+from app.models import (
+    AlertSeverity,
+    FindingRecord,
+    RepoScan,
+    RepoScanResult,
+    RepoScanStatus,
+    SystemSetting,
+    utcnow,
+)
 from app.schemas import FindingRecordOut
+
 
 def in_breach_sql_expr(now: datetime) -> ColumnElement[bool]:
     """SQL expression: finding is currently in breach.
@@ -30,7 +39,7 @@ def in_breach_sql_expr(now: datetime) -> ColumnElement[bool]:
     aware datetime directly would bypass UtcDateTime.process_bind_param and cause
     an aware/naive mismatch in SQLite.
     """
-    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+    now_naive = now.astimezone(UTC).replace(tzinfo=None)
     return and_(
         FindingRecord.closed_at.is_(None),
         FindingRecord.sla_breach_cutoff_at.isnot(None),
@@ -48,7 +57,7 @@ def not_in_breach_sql_expr(now: datetime) -> ColumnElement[bool]:
 
     now is normalised to naive UTC — see in_breach_sql_expr for rationale.
     """
-    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+    now_naive = now.astimezone(UTC).replace(tzinfo=None)
     return or_(
         FindingRecord.sla_breach_cutoff_at.is_(None),
         FindingRecord.sla_breach_cutoff_at > now_naive,
@@ -156,8 +165,8 @@ def in_breach(record: FindingRecord, now: datetime) -> bool:
     cutoff = record.sla_breach_cutoff_at
     # UtcDateTime returns an aware UTC datetime on read from DB; ensure now is also UTC.
     if cutoff.tzinfo is None:
-        cutoff = cutoff.replace(tzinfo=timezone.utc)
-    return cutoff <= now.astimezone(timezone.utc)
+        cutoff = cutoff.replace(tzinfo=UTC)
+    return cutoff <= now.astimezone(UTC)
 
 
 def _compute_breach_cutoff(
@@ -257,7 +266,7 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
         )
         prev_hash = prev_hash_row.scalar_one_or_none()
         if prev_hash is not None and prev_hash != result.scan_config_hash:
-            close_time = result.completed_at or datetime.now(timezone.utc)
+            close_time = result.completed_at or datetime.now(UTC)
             await db.execute(
                 update(FindingRecord)
                 .where(FindingRecord.repo_scan_id == result.repo_scan_id)
@@ -276,7 +285,7 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
         for r in open_rows.scalars().all()
     }
 
-    now = result.completed_at or datetime.now(timezone.utc)
+    now = result.completed_at or datetime.now(UTC)
 
     # Close findings no longer present
     for key, record in open_records.items():

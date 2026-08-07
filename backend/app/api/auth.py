@@ -3,19 +3,29 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import (
-    verify_password, hash_password, create_access_token,
-    generate_totp_secret, get_totp_uri, verify_totp,
-    create_totp_session_token, decode_totp_session_token,
+    create_access_token,
+    create_totp_session_token,
+    decode_totp_session_token,
+    generate_totp_secret,
+    get_totp_uri,
+    hash_password,
+    verify_password,
+    verify_totp,
 )
 from app.models import User
 from app.schemas import (
-    LoginRequest, TokenResponse, TotpChallengeResponse,
-    TotpVerifyRequest, TotpDisableRequest, UserCreate, UserOut,
+    LoginRequest,
+    TokenResponse,
+    TotpChallengeResponse,
+    TotpDisableRequest,
+    TotpVerifyRequest,
+    UserCreate,
+    UserOut,
 )
-from app.api.deps import get_current_user, require_admin
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -32,7 +42,7 @@ def _check_credentials(user: User | None, password: str) -> User:
 async def login_form(
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
-):
+) -> TokenResponse:
     """OAuth2 password flow for Swagger UI (DEBUG mode only).
 
     In production (DEBUG=false) this endpoint is disabled — all clients must
@@ -55,7 +65,9 @@ async def login_form(
 
 
 @router.post("/login")
-async def login_json(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login_json(
+    body: LoginRequest, db: AsyncSession = Depends(get_db)
+) -> TokenResponse | TotpChallengeResponse:
     """JSON login. Returns either a bearer token or a TOTP challenge.
 
     When DEBUG=1, TOTP is skipped entirely and a token is issued immediately.
@@ -91,7 +103,7 @@ async def login_json(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/totp/verify", response_model=TokenResponse)
-async def totp_verify(body: TotpVerifyRequest, db: AsyncSession = Depends(get_db)):
+async def totp_verify(body: TotpVerifyRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
     """Complete a TOTP challenge (both setup-confirm and normal login)."""
     decoded = decode_totp_session_token(body.totp_session_token)
     if not decoded:
@@ -113,7 +125,7 @@ async def totp_disable(
     body: TotpDisableRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> None:
     """Disable TOTP for the current user. Requires a valid current TOTP code."""
     if not user.totp_enabled or not user.totp_secret:
         raise HTTPException(status_code=400, detail="TOTP is not enabled")
@@ -125,12 +137,12 @@ async def totp_disable(
 
 
 @router.get("/totp/status")
-async def totp_status(user: User = Depends(get_current_user)):
+async def totp_status(user: User = Depends(get_current_user)) -> dict[str, bool]:
     return {"totp_enabled": user.totp_enabled}
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: User = Depends(get_current_user)):
+async def me(user: User = Depends(get_current_user)) -> UserOut:
     return user
 
 
@@ -139,7 +151,7 @@ async def register(
     body: UserCreate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
-):
+) -> UserOut:
     """Admin-only: create a new user."""
     existing = await db.execute(select(User).where(User.email == body.email))
     if existing.scalar_one_or_none():

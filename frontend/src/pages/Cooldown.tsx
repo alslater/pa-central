@@ -48,9 +48,10 @@ export default function Cooldown() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-border">
-                  {['Package', 'Version', 'Ecosystem', 'Scope', 'Note', 'Expires', 'Added', ''].map(h => (
-                    <th key={h} className="text-left px-4 py-2.5 text-style-caption">{h}</th>
+                  {['Package', 'Version', 'Ecosystem', 'Scope', 'Note', 'Expires', 'Added'].map(h => (
+                    <th key={h} scope="col" className="text-left px-4 py-2.5 text-style-caption">{h}</th>
                   ))}
+                  <th scope="col" className="px-4 py-2.5"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>

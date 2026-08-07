@@ -2,15 +2,15 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_operator, require_viewer
 from app.core.database import get_db
 from app.core.security import decode_access_token
-from app.models import Alert, Host, User, AlertSeverity, UserRole, utcnow
-from app.schemas import AlertOut, AlertAcknowledge, AlertBulkAcknowledge
-from app.api.deps import require_operator, require_viewer
+from app.models import Alert, AlertSeverity, Host, User, UserRole, utcnow
+from app.schemas import AlertAcknowledge, AlertBulkAcknowledge, AlertOut
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -24,7 +24,7 @@ async def list_alerts(
     offset: int = Query(0),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_viewer),
-):
+) -> list[AlertOut]:
     q = select(Alert).order_by(Alert.received_at.desc()).limit(limit).offset(offset)
     if host_id is not None:
         q = q.where(Alert.host_id == host_id)
@@ -63,7 +63,7 @@ def broadcast_alert(alert_dict: dict) -> None:
 
 
 @router.get("/stream", include_in_schema=True)
-async def stream_alerts(request: Request):
+async def stream_alerts(request: Request) -> Response:
     from app.core.database import AsyncSessionLocal
     auth_header = request.headers.get("authorization", "")
     raw_token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
@@ -106,7 +106,7 @@ async def stream_alerts(request: Request):
                     if allowed_host_ids is not None and alert.get("host_id") not in allowed_host_ids:
                         continue
                     yield f"data: {json.dumps(alert)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": keepalive\n\n"
         finally:
             _sse_queues.discard(queue)
@@ -126,7 +126,7 @@ async def get_alert(
     alert_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_viewer),
-):
+) -> AlertOut:
     alert = await db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
@@ -142,7 +142,7 @@ async def acknowledge_alerts_bulk(
     body: AlertBulkAcknowledge,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator),
-):
+) -> None:
     if not body.alert_ids:
         return
     now = utcnow()
@@ -161,7 +161,7 @@ async def acknowledge_alert(
     body: AlertAcknowledge,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator),
-):
+) -> AlertOut:
     alert = await db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")

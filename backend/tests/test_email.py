@@ -1,9 +1,13 @@
 """Tests for email notification service."""
 import socket
+
 import pytest
 
 from app.core.email import (
-    EmailService, SmtpConfig, build_findings_email, build_failure_email,
+    EmailService,
+    SmtpConfig,
+    build_failure_email,
+    build_findings_email,
     filter_findings_by_severity,
 )
 from app.models import AlertSeverity

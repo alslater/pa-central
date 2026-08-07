@@ -3,6 +3,7 @@ import { api, ApiKey } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, useToast, Empty, timeAgo } from '@/components/ui'
 import { Plus, Trash2, Copy, AlertCircle } from 'lucide-react'
+import { useAuth } from '@/hooks/useAuth'
 
 export default function ApiKeys() {
   const [keys, setKeys] = useState<ApiKey[]>([])
@@ -10,6 +11,8 @@ export default function ApiKeys() {
   const [showAdd, setShowAdd] = useState(false)
   const [newKey, setNewKey] = useState<string | null>(null)
   const { show, Toast } = useToast()
+  const { user: me } = useAuth()
+  const isAdmin = me?.role === 'admin'
 
   const load = useCallback(() => {
     setLoading(true)
@@ -60,15 +63,17 @@ export default function ApiKeys() {
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-border">
-                  {['Name', 'Status', 'Last used', 'Created', ''].map(h => (
-                    <th key={h} className="text-left px-4 py-2.5 text-style-caption">{h}</th>
+                  {['Name', ...(isAdmin ? ['Owner'] : []), 'Status', 'Last used', 'Created'].map(h => (
+                    <th key={h} scope="col" className="text-left px-4 py-2.5 text-style-caption">{h}</th>
                   ))}
+                  <th scope="col" className="px-4 py-2.5"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
                 {keys.map(k => (
                   <tr key={k.id} className={`border-b border-border/50 ${k.is_active ? '' : 'opacity-40'}`}>
                     <td className="px-4 py-2.5 font-medium text-[13px]">{k.name}</td>
+                    {isAdmin && <td className="px-4 py-2.5 text-[12px] text-muted-foreground">{k.owner_display_name}</td>}
                     <td className="px-4 py-2.5">
                       <span className={`text-style-caption ${k.is_active ? 'text-status-pass' : 'text-muted-foreground'}`}>
                         {k.is_active ? 'Active' : 'Revoked'}

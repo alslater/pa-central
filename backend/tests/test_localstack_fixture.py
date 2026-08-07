@@ -1,6 +1,7 @@
 """Smoke test: LocalStack fixture starts and Secrets Manager is reachable."""
 import pytest
 
+
 def test_secretsmanager_reachable(secretsmanager):
     response = secretsmanager.list_secrets()
     assert "SecretList" in response

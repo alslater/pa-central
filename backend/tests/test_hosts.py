@@ -1,5 +1,6 @@
 """Tests for /api/hosts endpoints."""
 import pytest
+
 from tests.conftest import auth
 
 

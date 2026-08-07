@@ -1,45 +1,48 @@
 """Tests for the scheduler service."""
-import pytest
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, patch, MagicMock
-from app.scheduler.scheduler import (
-    is_due, next_run_after, should_trigger_scan,
-)
-from app.models import FindingRecord, AlertSeverity, RepoScan
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from app.models import AlertSeverity, FindingRecord, RepoScan
+from app.scheduler.scheduler import (
+    is_due,
+    next_run_after,
+    should_trigger_scan,
+)
 
 # ── Unit: cron evaluation ─────────────────────────────────────────────────────
 
 def test_is_due_hourly_cron():
     expr = "0 * * * *"
-    last_run = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
-    now = datetime(2026, 6, 9, 11, 0, 0, tzinfo=timezone.utc)
+    last_run = datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 6, 9, 11, 0, 0, tzinfo=UTC)
     assert is_due(expr, last_run, now) is True
 
 
 def test_is_due_hourly_cron_not_yet():
     expr = "0 * * * *"
-    last_run = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
-    now = datetime(2026, 6, 9, 10, 30, 0, tzinfo=timezone.utc)
+    last_run = datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 6, 9, 10, 30, 0, tzinfo=UTC)
     assert is_due(expr, last_run, now) is False
 
 
 def test_is_due_when_no_last_run():
-    assert is_due("0 * * * *", None, datetime.now(timezone.utc)) is True
+    assert is_due("0 * * * *", None, datetime.now(UTC)) is True
 
 
 def test_is_due_with_grace_period():
     expr = "0 * * * *"
-    last_run = datetime(2026, 6, 9, 8, 0, 0, tzinfo=timezone.utc)
-    now = datetime(2026, 6, 9, 11, 30, 0, tzinfo=timezone.utc)
+    last_run = datetime(2026, 6, 9, 8, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 6, 9, 11, 30, 0, tzinfo=UTC)
     assert is_due(expr, last_run, now) is True
 
 
 def test_next_run_after():
     expr = "0 * * * *"
-    after = datetime(2026, 6, 9, 10, 15, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 6, 9, 10, 15, 0, tzinfo=UTC)
     nxt = next_run_after(expr, after)
-    assert nxt == datetime(2026, 6, 9, 11, 0, 0, tzinfo=timezone.utc)
+    assert nxt == datetime(2026, 6, 9, 11, 0, 0, tzinfo=UTC)
 
 
 def test_should_trigger_scan_enabled():
@@ -48,7 +51,7 @@ def test_should_trigger_scan_enabled():
     scan.cron_schedule = "0 * * * *"
     scan.cron_timezone = None
     scan.last_scan_at = None
-    assert should_trigger_scan(scan, datetime.now(timezone.utc)) is True
+    assert should_trigger_scan(scan, datetime.now(UTC)) is True
 
 
 def test_should_trigger_scan_disabled():
@@ -57,7 +60,7 @@ def test_should_trigger_scan_disabled():
     scan.cron_schedule = "0 * * * *"
     scan.cron_timezone = None
     scan.last_scan_at = None
-    assert should_trigger_scan(scan, datetime.now(timezone.utc)) is False
+    assert should_trigger_scan(scan, datetime.now(UTC)) is False
 
 
 def test_should_trigger_scan_no_schedule():
@@ -66,7 +69,7 @@ def test_should_trigger_scan_no_schedule():
     scan.cron_schedule = None
     scan.cron_timezone = None
     scan.last_scan_at = None
-    assert should_trigger_scan(scan, datetime.now(timezone.utc)) is False
+    assert should_trigger_scan(scan, datetime.now(UTC)) is False
 
 
 # ── Integration: trigger loop ─────────────────────────────────────────────────
@@ -83,7 +86,7 @@ def mock_db_factory():
 
 @pytest.fixture
 def due_scan():
-    from app.models import CredentialType, AlertSeverity
+    from app.models import AlertSeverity, CredentialType
     scan = MagicMock()
     scan.id = 1
     scan.name = "test-repo"
@@ -154,7 +157,7 @@ async def test_trigger_scan_creates_result_and_locks(mock_db_factory, due_scan):
 
 @pytest.mark.asyncio
 async def test_trigger_scan_skips_if_lock_not_acquired(mock_db_factory, due_scan):
-    factory, session = mock_db_factory
+    factory, _session = mock_db_factory
     with patch("app.scheduler.scheduler._acquire_scan_lock", return_value=False), \
          patch("app.scheduler.scheduler._launch_ecs_task") as mock_ecs:
         from app.scheduler.scheduler import trigger_scan
@@ -173,7 +176,7 @@ async def test_recover_stuck_scans_marks_failed(mock_db_factory):
     stuck.id = 10
     stuck.repo_scan_id = 5
     stuck.status = RepoScanStatus.running
-    stuck.started_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+    stuck.started_at = datetime.now(UTC) - timedelta(minutes=45)
 
     session.execute = AsyncMock(return_value=MagicMock(
         scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[stuck])))
@@ -242,7 +245,7 @@ async def test_prune_findings_default_when_no_scan_retention_settings(mock_db_fa
 # ── Finding retention pruning ─────────────────────────────────────────────────
 
 def _make_finding(repo_scan_id, closed_days_ago=None):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return FindingRecord(
         repo_scan_id=repo_scan_id,
         advisory_id="GHSA-r", package="pkg", ecosystem="pypi",
@@ -266,8 +269,9 @@ class TestFindingRetentionPrune:
         db.add(old_finding)
         await db.commit()
 
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
         from app.scheduler.scheduler import prune_old_results
-        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
         factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
         await prune_old_results(factory)
 
@@ -286,8 +290,9 @@ class TestFindingRetentionPrune:
         db.add(recent_finding)
         await db.commit()
 
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
         from app.scheduler.scheduler import prune_old_results
-        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
         factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
         await prune_old_results(factory)
 
@@ -306,8 +311,9 @@ class TestFindingRetentionPrune:
         db.add(open_finding)
         await db.commit()
 
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
         from app.scheduler.scheduler import prune_old_results
-        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
         factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
         await prune_old_results(factory)
 

@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.models import Scan, Host, User, UserRole
-from app.schemas import ScanOut
 from app.api.deps import get_current_user_or_api_key
+from app.core.database import get_db
+from app.models import Host, Scan, User, UserRole
+from app.schemas import ScanOut
 
 router = APIRouter(prefix="/scans", tags=["scans"])
 
@@ -19,7 +19,7 @@ async def list_scans(
     offset: int = Query(0),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user_or_api_key),
-):
+) -> list[ScanOut]:
     scoped = user.role not in (UserRole.admin, UserRole.operator)
     owned_subq = select(Host.id).where(Host.owner_user_id == user.id).scalar_subquery()
 
@@ -53,7 +53,7 @@ async def get_scan(
     scan_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user_or_api_key),
-):
+) -> ScanOut:
     scan = await db.get(Scan, scan_id)
     if not scan:
         raise HTTPException(404, "Scan not found")

@@ -1,14 +1,14 @@
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.core.config import settings
-from app.models import Host, Alert, Scan, AlertSeverity, User, UserRole, utcnow
-from app.schemas import DashboardStats, AlertOut
 from app.api.deps import get_current_user
+from app.core.config import settings
+from app.core.database import get_db
+from app.models import Alert, AlertSeverity, Host, Scan, User, UserRole, utcnow
+from app.schemas import AlertOut, DashboardStats
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 async def get_dashboard(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> DashboardStats:
     online_cutoff = utcnow() - timedelta(minutes=settings.host_online_threshold_minutes)
 
     # Developers see only their own hosts' stats; all other roles see fleet-wide.

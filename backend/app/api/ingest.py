@@ -6,14 +6,31 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.models import Alert, Scan, ConfigAssignment, ConfigTemplate, CooldownEntry, RepoScanResult, RepoScanStatus, utcnow
-from app.schemas import HeartbeatPayload, AlertPayload, AlertOut, ScanPayload, ScanOut, CooldownOut, RepoScanResultIngest
-from app.api.deps import get_api_key, resolve_host, require_system_key
 from app.api.alerts import broadcast_alert
+from app.api.deps import get_api_key, require_system_key, resolve_host
+from app.core.database import get_db
+from app.models import (
+    Alert,
+    ConfigAssignment,
+    ConfigTemplate,
+    CooldownEntry,
+    RepoScanResult,
+    RepoScanStatus,
+    Scan,
+    utcnow,
+)
+from app.schemas import (
+    AlertOut,
+    AlertPayload,
+    CooldownOut,
+    HeartbeatPayload,
+    RepoScanResultIngest,
+    ScanOut,
+    ScanPayload,
+)
 from app.services.finding_lifecycle import update_finding_records
 
 ApiKeyDep = Annotated[tuple, Depends(get_api_key)]
@@ -27,7 +44,7 @@ async def heartbeat(
     body: HeartbeatPayload,
     auth: ApiKeyDep,
     db: DbDep,
-):
+) -> None:
     """Called periodically by the agent to report daemon status and register itself."""
     key_obj, _ = auth
     host = await resolve_host(body.hostname, key_obj, db)
@@ -46,7 +63,7 @@ async def ingest_alert(
     body: AlertPayload,
     auth: ApiKeyDep,
     db: DbDep,
-):
+) -> AlertOut:
     """Called when package-alert fires an alert on the host."""
     key_obj, _ = auth
     host = await resolve_host(body.hostname, key_obj, db)
@@ -71,7 +88,7 @@ async def ingest_alert(
     await db.refresh(alert)
     try:
         broadcast_alert(AlertOut.model_validate(alert).model_dump(mode="json"))
-    except Exception:
+    except Exception:  # noqa: BLE001 S110
         pass
     return alert
 
@@ -81,7 +98,7 @@ async def ingest_scan(
     body: ScanPayload,
     auth: ApiKeyDep,
     db: DbDep,
-):
+) -> ScanOut:
     """Called after pa scan-project completes on the host."""
     key_obj, _ = auth
     host = await resolve_host(body.hostname, key_obj, db)
@@ -108,7 +125,7 @@ async def get_assigned_config(
     hostname: Annotated[str, Query()],
     auth: ApiKeyDep,
     db: DbDep,
-):
+) -> PlainTextResponse:
     """
     Pull the TOML config assigned to this host.
     Returns 204 if no config is assigned.
@@ -160,13 +177,32 @@ async def get_cooldown_entries(
 
 async def _send_result_email(result_id: int, database_url: str) -> None:
     """Background task: load result and dispatch appropriate email notification."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
     from sqlalchemy import select
-    from app.models import RepoScanResult, RepoScanStatus, RepoScan, User, UserRole, SystemSetting, SettingValueType
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
     from app.core.config import settings as app_settings
-    from app.core.valkey import get_valkey
+    from app.core.email import (
+        EmailService,
+        SmtpConfig,
+        build_failure_email,
+        build_findings_email,
+        filter_findings_by_severity,
+    )
     from app.core.encryption import decrypt_value
-    from app.core.email import EmailService, SmtpConfig, build_findings_email, build_failure_email, filter_findings_by_severity
+    from app.core.valkey import get_valkey
+    from app.models import (
+        RepoScan,
+        RepoScanResult,
+        RepoScanStatus,
+        SettingValueType,
+        SystemSetting,
+        User,
+        UserRole,
+    )
 
     engine = create_async_engine(database_url, pool_pre_ping=True)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -187,7 +223,7 @@ async def _send_result_email(result_id: int, database_url: str) -> None:
             elif s.value_type == SettingValueType.secret:
                 try:
                     settings_map[s.key] = decrypt_value(s.value, app_settings.settings_encryption_key)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     settings_map[s.key] = ""
             else:
                 settings_map[s.key] = s.value
@@ -258,6 +294,7 @@ async def ingest_repo_scan_result(
 ) -> None:
     """Called by the ECS scan task to report its outcome."""
     from fastapi import HTTPException
+
     from app.core.config import settings as app_settings
     from app.core.valkey import get_valkey, release_lock
 

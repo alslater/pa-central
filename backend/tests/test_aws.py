@@ -1,6 +1,7 @@
 """Tests for AWS client wrapper using LocalStack."""
 import pytest
-from app.core.aws import SecretsManagerClient, EcsClient
+
+from app.core.aws import EcsClient, SecretsManagerClient
 
 LOCALSTACK = "http://localhost:4566"
 AWS_CREDS = {"aws_access_key_id": "test", "aws_secret_access_key": "test", "region_name": "us-east-1"}
@@ -35,7 +36,7 @@ async def test_update_secret(sm):
 async def test_delete_secret(sm):
     arn = await sm.create_secret("pa-central/repo-creds/test-3", "value")
     await sm.delete_secret(arn)
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         await sm.get_secret(arn)
 
 

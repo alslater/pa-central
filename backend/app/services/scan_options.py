@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import click
 from functools import lru_cache
+
+import click
 
 from app.schemas import ScanFlag, ScanOptions
 

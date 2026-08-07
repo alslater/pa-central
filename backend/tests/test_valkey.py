@@ -1,7 +1,9 @@
 """Tests for Valkey lock helpers. Requires Redis/Valkey on localhost:6379."""
 import socket
+
 import pytest
-from app.core.valkey import acquire_lock, release_lock, get_valkey
+
+from app.core.valkey import acquire_lock, get_valkey, release_lock
 
 TEST_KEY = "test:valkey:lock_test"
 VALKEY_URL = "redis://localhost:6379"

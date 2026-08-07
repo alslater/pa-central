@@ -1,7 +1,8 @@
 """Tests for /api/ingest endpoints — agent self-registration and data upload."""
 import pytest
 from sqlalchemy import select
-from app.models import Host, Alert, Scan
+
+from app.models import Alert, Host, Scan
 
 
 def api_key_header(raw: str) -> dict:
@@ -182,9 +183,9 @@ class TestIngestConfig:
         assert r.status_code == 204
 
     async def test_returns_toml_when_config_assigned(self, client, api_key, db, admin_user):
-        from app.models import ConfigTemplate, ConfigAssignment, Host
+        from app.models import ConfigAssignment, ConfigTemplate, Host
 
-        raw, key_obj = api_key
+        raw, _key_obj = api_key
 
         # First register the host via heartbeat
         await client.post("/api/ingest/heartbeat", json={
@@ -214,8 +215,9 @@ class TestIngestConfig:
 @pytest.mark.asyncio
 class TestDefaultConfigAutoAssign:
     async def test_new_host_gets_default_config(self, client, api_key, admin_user, db):
-        from app.models import ConfigTemplate, ConfigAssignment, Host
         from sqlalchemy import select
+
+        from app.models import ConfigAssignment, ConfigTemplate, Host
 
         tmpl = ConfigTemplate(
             name="auto-default",
@@ -243,8 +245,9 @@ class TestDefaultConfigAutoAssign:
         assert assignment.template_id == tmpl.id
 
     async def test_new_host_without_default_gets_no_assignment(self, client, api_key, db):
-        from app.models import ConfigAssignment, Host
         from sqlalchemy import select
+
+        from app.models import ConfigAssignment, Host
 
         r = await client.post("/api/ingest/heartbeat", json={
             "hostname": "no-default-host",
@@ -261,8 +264,9 @@ class TestDefaultConfigAutoAssign:
         assert assignment is None
 
     async def test_existing_host_reconnect_does_not_duplicate_assignment(self, client, api_key, admin_user, db):
-        from app.models import ConfigTemplate, ConfigAssignment, Host
-        from sqlalchemy import select, func
+        from sqlalchemy import func, select
+
+        from app.models import ConfigAssignment, ConfigTemplate, Host
 
         tmpl = ConfigTemplate(
             name="auto-default-2",
