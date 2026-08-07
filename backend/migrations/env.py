@@ -1,16 +1,16 @@
-from logging.config import fileConfig
 import sys
+from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import engine_from_config, pool
 from alembic import context
+from sqlalchemy import engine_from_config, pool
 
 # Make app importable
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
+import app.models  # noqa: F401 — registers all ORM models with Base.metadata
 from app.core.config import settings
 from app.core.database import Base
-import app.models  # noqa: F401 — registers all ORM models with Base.metadata
 
 config = context.config
 

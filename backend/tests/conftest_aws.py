@@ -1,9 +1,10 @@
 """AWS/LocalStack fixtures for integration tests."""
 import subprocess
 import time
-import pytest
+
 import boto3
 import httpx
+import pytest
 
 LOCALSTACK_URL = "http://localhost:4566"
 AWS_DUMMY = {
@@ -17,7 +18,7 @@ def _localstack_running() -> bool:
     try:
         r = httpx.get(f"{LOCALSTACK_URL}/_localstack/health", timeout=2)
         return r.status_code == 200
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 

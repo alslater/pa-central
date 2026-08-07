@@ -1,12 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user, require_admin
 from app.core.database import get_db
 from app.core.security import hash_password
 from app.models import User
 from app.schemas import UserOut, UserUpdate
-from app.api.deps import get_current_user, require_admin
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 async def list_users(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
-):
+) -> list[UserOut]:
     result = await db.execute(select(User).order_by(User.display_name))
     return result.scalars().all()
 
@@ -25,7 +25,7 @@ async def get_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
     current: User = Depends(get_current_user),
-):
+) -> UserOut:
     from app.models import UserRole
     if current.role != UserRole.admin and current.id != user_id:
         raise HTTPException(403, "Forbidden")
@@ -41,7 +41,7 @@ async def update_user(
     body: UserUpdate,
     db: AsyncSession = Depends(get_db),
     current: User = Depends(get_current_user),
-):
+) -> UserOut:
     from app.models import UserRole
     # Check permission before DB lookup to avoid leaking whether user_id exists
     if current.role != UserRole.admin:
@@ -56,6 +56,38 @@ async def update_user(
         data["hashed_password"] = hash_password(data.pop("password"))
     for k, v in data.items():
         setattr(user, k, v)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@router.delete("/{user_id}", status_code=204, response_class=Response)
+async def delete_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current: User = Depends(require_admin),
+) -> Response:
+    if current.id == user_id:
+        raise HTTPException(403, "Cannot delete your own account")
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    await db.delete(user)
+    await db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/{user_id}/reset-totp", response_model=UserOut)
+async def reset_totp(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> UserOut:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    user.totp_secret = None
+    user.totp_enabled = False
     await db.commit()
     await db.refresh(user)
     return user

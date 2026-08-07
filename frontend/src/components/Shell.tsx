@@ -243,12 +243,12 @@ export function Shell({ children }: { children: ReactNode }) {
               {user?.role}
             </div>
           </div>
-          <button onClick={() => setShowSecurity(true)} title="Account security" aria-label="Account security"
+          <button type="button" onClick={() => setShowSecurity(true)} title="Account security" aria-label="Account security"
             className="bg-transparent border-none cursor-pointer text-sidebar-muted p-0.5">
             <Key size={13} />
           </button>
           <ThemeToggle mode={mode} onCycle={cycleTheme} />
-          <button onClick={handleLogout} title="Sign out" aria-label="Sign out"
+          <button type="button" onClick={handleLogout} title="Sign out" aria-label="Sign out"
             className="bg-transparent border-none cursor-pointer text-sidebar-muted p-0.5">
             <LogOut size={13} />
           </button>

@@ -138,9 +138,10 @@ function HostAlerts({ hostId, isOperator, show }: { hostId: number; isOperator: 
       <table className="data-table">
         <thead>
           <tr className="data-thead-tr">
-            {['Severity', 'Package', 'Kind', 'Advisory', 'Project', 'When', ''].map(h => (
-              <th key={h} className="data-th">{h}</th>
+            {['Severity', 'Package', 'Kind', 'Advisory', 'Project', 'When'].map(h => (
+              <th key={h} scope="col" className="data-th">{h}</th>
             ))}
+            <th scope="col" className="data-th"><span className="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>

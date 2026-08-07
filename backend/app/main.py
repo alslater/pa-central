@@ -5,16 +5,31 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 
-from sqlalchemy import text
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
+from app.api import (
+    alerts,
+    api_keys,
+    auth,
+    config_templates,
+    cooldown,
+    dashboard,
+    findings,
+    hosts,
+    ingest,
+    repo_credentials,
+    repo_scans,
+    scan_options,
+    scans,
+    system_settings,
+    users,
+)
 from app.core.config import settings
 from app.core.database import init_db
-from app.api import auth, hosts, api_keys, ingest, alerts, scans, config_templates, cooldown, dashboard, users, system_settings, repo_scans, repo_credentials, scan_options, findings
 
 
 async def _run_migrations() -> None:
@@ -66,7 +81,7 @@ async def _run_migrations() -> None:
 
 
 def _alembic_upgrade(backend_dir: str) -> None:
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: PLW1510
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=backend_dir,
         capture_output=True,
@@ -88,6 +103,7 @@ async def bootstrap_admin() -> None:
     if not settings.bootstrap_admin_password:
         return
     from sqlalchemy import select
+
     from app.core.database import AsyncSessionLocal
     from app.core.security import hash_password
     from app.models import User, UserRole

@@ -1,15 +1,15 @@
 """Unit tests for scan_task.py — all AWS/subprocess calls are mocked."""
 import json
-import sys
 import os
+import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 # Add parent dir so we can import scan_task
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import scan_task
-
 
 BASE_ENV = {
     "PA_VERSION": "1.2.3",

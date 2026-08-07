@@ -6,6 +6,7 @@ In production endpoint_url is None (boto3 uses the real AWS endpoints).
 import asyncio
 from functools import partial
 from typing import Any
+
 import boto3
 
 

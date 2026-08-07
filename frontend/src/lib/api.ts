@@ -88,7 +88,7 @@ export interface CooldownEntry {
 }
 
 export interface ApiKey {
-  id: number; name: string
+  id: number; name: string; owner_display_name: string
   is_active: boolean; last_used_at: string | null; created_at: string
   raw_key?: string
 }
@@ -308,6 +308,10 @@ export const api = {
     list: () => request<User[]>('/users'),
     update: (id: number, data: Partial<User & { password: string }>) =>
       request<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    delete: (id: number) =>
+      request<void>(`/users/${id}`, { method: 'DELETE' }),
+    resetTotp: (id: number) =>
+      request<User>(`/users/${id}/reset-totp`, { method: 'POST' }),
   },
 
   systemSettings: {

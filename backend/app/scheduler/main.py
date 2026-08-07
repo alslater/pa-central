@@ -34,7 +34,11 @@ async def main() -> None:
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     db_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    from app.scheduler.scheduler import run_one_tick, recover_stuck_scans, prune_old_results
+    from app.scheduler.scheduler import (
+        prune_old_results,
+        recover_stuck_scans,
+        run_one_tick,
+    )
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -46,8 +50,8 @@ async def main() -> None:
             await recover_stuck_scans(db_factory)
             await prune_old_results(db_factory)
             await run_one_tick(db_factory)
-        except Exception as exc:
-            logger.error("tick error: %s", exc, exc_info=True)
+        except Exception:
+            logger.exception("tick error")
 
         for _ in range(POLL_INTERVAL * 10):
             if _shutdown:

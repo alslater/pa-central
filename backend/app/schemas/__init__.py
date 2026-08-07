@@ -1,13 +1,23 @@
 """Pydantic v2 schemas for API request/response."""
 from __future__ import annotations
 
-from datetime import datetime, date, timezone
-from typing import Any, Literal  # noqa — used by field_validator
+from datetime import UTC, date, datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models import UserRole, DaemonStatus, AlertSeverity, AlertKind, ScanStatus, Ecosystem, SettingValueType, CredentialType, RepoScanStatus, ScanTrigger
-
+from app.models import (
+    AlertKind,
+    AlertSeverity,
+    CredentialType,
+    DaemonStatus,
+    Ecosystem,
+    RepoScanStatus,
+    ScanStatus,
+    ScanTrigger,
+    SettingValueType,
+    UserRole,
+)
 
 # ── Shared ────────────────────────────────────────────────────────────────────
 
@@ -89,6 +99,12 @@ class ApiKeyOut(OrmBase):
     is_active: bool
     last_used_at: datetime | None
     created_at: datetime
+    owner_display_name: str = ''
+
+    @classmethod
+    def from_orm_with_owner(cls, key: object, owner_display_name: str) -> ApiKeyOut:
+        instance = cls.model_validate(key, from_attributes=True)
+        return instance.model_copy(update={'owner_display_name': owner_display_name})
 
 
 class ApiKeyCreated(ApiKeyOut):
@@ -254,7 +270,7 @@ class ConfigTemplateOut(OrmBase):
     description: str | None
     toml_content: str
     is_default: bool
-    created_by_id: int
+    created_by_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -311,7 +327,7 @@ class CooldownOut(OrmBase):
     host_id: int | None
     note: str | None
     expires_at: datetime | None
-    created_by_id: int
+    created_by_id: int | None
     created_at: datetime
 
 
@@ -443,7 +459,7 @@ class RepoScanOut(OrmBase):
     config_template_id: int | None
     is_enabled: bool
     last_scan_at: datetime | None
-    created_by_id: int
+    created_by_id: int | None
     created_at: datetime
     updated_at: datetime
     sla_high_days: int | None
@@ -542,7 +558,7 @@ class FindingAcceptBody(BaseModel):
     @field_validator('accepted_until')
     @classmethod
     def accepted_until_must_be_future(cls, v: date | None) -> date | None:
-        if v is not None and v <= datetime.now(timezone.utc).date():
+        if v is not None and v <= datetime.now(UTC).date():
             raise ValueError('accepted_until must be a future date')
         return v
 

@@ -8,6 +8,14 @@ import { ChevronDown, ChevronUp } from 'lucide-react'
 
 type Tab = 'host' | 'repo'
 
+// Data columns only; each table renders a trailing chevron/actions column
+// separately with an sr-only label. The expanded findings row spans the full
+// width, hence the +1 in the counts below.
+const HOST_COLUMNS = ['Status', 'Project', 'Type', 'Findings', 'Host', 'Scanned'] as const
+const REPO_COLUMNS = ['Status', 'Scan', 'Trigger', 'Findings', 'Breach', 'Scanned'] as const
+const HOST_COLUMN_COUNT = HOST_COLUMNS.length + 1
+const REPO_COLUMN_COUNT = REPO_COLUMNS.length + 1
+
 export function Scans() {
   const [scans, setScans] = useState<Scan[]>([])
   const [hosts, setHosts] = useState<Record<number, Host>>({})
@@ -82,9 +90,10 @@ export function Scans() {
                   <table className="data-table">
                     <thead>
                       <tr className="data-thead-tr">
-                        {['Status', 'Project', 'Type', 'Findings', 'Host', 'Scanned', ''].map(h => (
-                          <th key={h} className="data-th">{h}</th>
+                        {HOST_COLUMNS.map(h => (
+                          <th key={h} scope="col" className="data-th">{h}</th>
                         ))}
+                        <th scope="col" className="data-th"><span className="sr-only">Actions</span></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -122,7 +131,7 @@ export function Scans() {
                             </tr>
                             {isExpanded && hasFindings && (
                               <tr key={`${s.id}-findings`} className="data-tr">
-                                <td colSpan={7} className="findings-expanded-td">
+                                <td colSpan={HOST_COLUMN_COUNT} className="findings-expanded-td">
                                   <FindingsTable findings={s.findings!} />
                                 </td>
                               </tr>
@@ -147,9 +156,10 @@ export function Scans() {
                   <table className="data-table">
                     <thead>
                       <tr className="data-thead-tr">
-                        {['Status', 'Scan', 'Trigger', 'Findings', 'Breach', 'Scanned', ''].map(h => (
-                          <th key={h} className="data-th">{h}</th>
+                        {REPO_COLUMNS.map(h => (
+                          <th key={h} scope="col" className="data-th">{h}</th>
                         ))}
+                        <th scope="col" className="data-th"><span className="sr-only">Actions</span></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -196,7 +206,7 @@ export function Scans() {
                             </tr>
                             {isExpanded && hasFindings && (
                               <tr className="data-tr">
-                                <td colSpan={7} className="findings-expanded-td">
+                                <td colSpan={REPO_COLUMN_COUNT} className="findings-expanded-td">
                                   <FindingsTable findings={r.findings!} />
                                 </td>
                               </tr>

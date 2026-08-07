@@ -1,5 +1,6 @@
 """Tests for /api/config-templates endpoints."""
 import pytest
+
 from tests.conftest import auth
 
 
@@ -120,7 +121,7 @@ class TestAssignTemplate:
 @pytest.mark.asyncio
 class TestConfigTemplateDeletionGuard:
     async def test_delete_fails_when_assigned_to_host(self, client, admin_token, host, db, admin_user):
-        from app.models import ConfigTemplate, ConfigAssignment
+        from app.models import ConfigAssignment, ConfigTemplate
         tmpl = ConfigTemplate(name="guarded-tmpl", toml_content="[osv]", created_by_id=admin_user.id)
         db.add(tmpl)
         await db.commit()
@@ -134,7 +135,7 @@ class TestConfigTemplateDeletionGuard:
         assert "host" in r.json()["detail"].lower()
 
     async def test_delete_fails_when_assigned_to_repo_scan(self, client, admin_token, db, admin_user):
-        from app.models import ConfigTemplate, RepoScan, AlertSeverity
+        from app.models import AlertSeverity, ConfigTemplate, RepoScan
         tmpl = ConfigTemplate(name="repo-tmpl", toml_content="[osv]", created_by_id=admin_user.id)
         db.add(tmpl)
         await db.commit()

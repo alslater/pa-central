@@ -7,16 +7,32 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import require_admin
 from app.core.database import get_db
 from app.models import (
-    AlertSeverity, FindingRecord, RepoScan, SettingValueType, SystemSetting,
-    User, utcnow,
+    AlertSeverity,
+    FindingRecord,
+    RepoScan,
+    SettingValueType,
+    SystemSetting,
+    User,
+    utcnow,
 )
-from app.schemas import FindingAcceptBody, FindingRecordOut, FindingSettingsOut, FindingSettingsPut, PaginatedFindingsOut
-from app.api.deps import require_admin
+from app.schemas import (
+    FindingAcceptBody,
+    FindingRecordOut,
+    FindingSettingsOut,
+    FindingSettingsPut,
+    PaginatedFindingsOut,
+)
 from app.services.finding_lifecycle import (
-    accepted_sql_expr, build_finding_out, get_effective_sla, get_global_sla,
-    in_breach_sql_expr, not_accepted_sql_expr, not_in_breach_sql_expr,
+    accepted_sql_expr,
+    build_finding_out,
+    get_effective_sla,
+    get_global_sla,
+    in_breach_sql_expr,
+    not_accepted_sql_expr,
+    not_in_breach_sql_expr,
 )
 
 router = APIRouter(tags=["findings"])

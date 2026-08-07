@@ -1,22 +1,44 @@
 """Repo scan configuration CRUD and trigger."""
-from datetime import datetime, timedelta, timezone
-from typing import Annotated
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.core.config import settings as app_settings
+from app.api.deps import require_admin, require_operator, require_viewer
 from app.core.aws import EcsClient
+from app.core.config import settings as app_settings
+from app.core.database import get_db
 from app.core.valkey import acquire_lock, get_valkey, release_lock
-from app.models import AlertSeverity, FindingRecord, RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, RepoCredential, CredentialType, User, utcnow
-from app.schemas import FindingRecordOut, RepoScanCreate, RepoScanUpdate, RepoScanOut, RepoScanResultOut, RepoScanResultWithName
-from app.api.deps import require_operator, require_admin, require_viewer
+from app.models import (
+    AlertSeverity,
+    CredentialType,
+    FindingRecord,
+    RepoCredential,
+    RepoScan,
+    RepoScanResult,
+    RepoScanStatus,
+    ScanTrigger,
+    User,
+    utcnow,
+)
+from app.schemas import (
+    FindingRecordOut,
+    RepoScanCreate,
+    RepoScanOut,
+    RepoScanResultOut,
+    RepoScanResultWithName,
+    RepoScanUpdate,
+)
 from app.services.finding_lifecycle import (
-    build_finding_out, compute_scan_config_hash, compute_sla_days,
-    get_effective_sla, get_global_sla, not_accepted_sql_expr,
+    build_finding_out,
+    compute_scan_config_hash,
+    compute_sla_days,
+    get_effective_sla,
+    get_global_sla,
+    not_accepted_sql_expr,
 )
 
 router = APIRouter(prefix="/repo-scans", tags=["repo-scans"])
@@ -76,7 +98,7 @@ def _age_in_breach(first_found_at: datetime, sla_days: int | None, now: datetime
 async def _breach_info(db: AsyncSession, scan: RepoScan, global_high: int, global_medium: int) -> tuple[bool, int]:
     """Return (has_breach, breach_count) for a single repo scan."""
     eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = await db.execute(_breach_candidates_stmt([scan.id], now, min_sla=min(eff_high, eff_medium)))
     count = sum(
         1 for _, severity, first_found_at in rows
@@ -116,7 +138,7 @@ async def list_repo_scans(db: DbDep, _: OperatorDep) -> list[RepoScanOut]:
 
     global_high, global_medium = await _get_global_sla_for_repo(db)
     scan_ids = [s.id for s in scans]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Compute the minimum effective SLA across all scans — this is the safe
     # lower-bound cutoff regardless of whether overrides are stricter or looser.
@@ -143,9 +165,8 @@ async def list_repo_scans(db: DbDep, _: OperatorDep) -> list[RepoScanOut]:
 
 @router.post("", status_code=201)
 async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -> RepoScanOut:
-    if body.credential_id is not None:
-        if not await db.get(RepoCredential, body.credential_id):
-            raise HTTPException(404, "Credential not found")
+    if body.credential_id is not None and not await db.get(RepoCredential, body.credential_id):
+        raise HTTPException(404, "Credential not found")
     scan = RepoScan(
         name=body.name, url=body.url, branch=body.branch,
         credential_id=body.credential_id,
@@ -196,7 +217,7 @@ async def list_all_results(db: DbDep, _: ViewerDep, limit: int = Query(100, ge=1
             scan_meta[scan_id] = (scan_name, scan_url, eff_high, eff_medium)
 
     # Fetch breach candidates for those scan_ids in one query, then count in Python.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     candidates_by_scan: dict[int, list[tuple[AlertSeverity, datetime]]] = {sid: [] for sid in scan_meta}
     if scan_meta:
         min_sla = min(v for _, _, h, m in scan_meta.values() for v in (h, m))
@@ -243,9 +264,8 @@ async def update_repo_scan(scan_id: int, body: RepoScanUpdate, db: DbDep, _: Ope
     if not scan:
         raise HTTPException(404, "Repo scan not found")
     updates = body.model_dump(exclude_unset=True)
-    if updates.get("credential_id") is not None:
-        if not await db.get(RepoCredential, updates["credential_id"]):
-            raise HTTPException(404, "Credential not found")
+    if updates.get("credential_id") is not None and not await db.get(RepoCredential, updates["credential_id"]):
+        raise HTTPException(404, "Credential not found")
     for k, v in updates.items():
         setattr(scan, k, v)
     _CONFIG_FIELDS = {"scan_flags", "subfolder", "config_template_id"}
@@ -290,7 +310,7 @@ async def get_repo_scan_findings(scan_id: int, db: DbDep, _: AdminDep) -> list[F
         raise HTTPException(404, "Repo scan not found")
     global_high, global_medium = await _get_global_sla_for_repo(db)
     eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = await db.execute(
         select(FindingRecord)
         .where(FindingRecord.repo_scan_id == scan_id)
@@ -319,9 +339,8 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
         raise HTTPException(400, "Repo scan is disabled")
 
     async with _get_valkey() as r:
-        if r is not None:
-            if not await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=900):
-                raise HTTPException(409, "Scan already in progress")
+        if r is not None and not await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=900):
+            raise HTTPException(409, "Scan already in progress")
 
     # Resolve credential
     credential: RepoCredential | None = None
@@ -333,7 +352,7 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
 
     pa_version = ""
     config_toml = ""
-    from app.models import SystemSetting, ConfigTemplate
+    from app.models import ConfigTemplate, SystemSetting
     pa_version_row = await db.get(SystemSetting, "pa_version")
     if pa_version_row:
         pa_version = pa_version_row.value or ""
@@ -385,7 +404,7 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
             )
         result.status = RepoScanStatus.running
         result.ecs_task_arn = task_arn
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         result.status = RepoScanStatus.failed
         result.error_message = f"{'Docker' if app_settings.local_docker_scan else 'ECS'} launch failed: {exc}"
         result.completed_at = utcnow()

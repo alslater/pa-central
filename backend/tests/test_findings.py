@@ -1,8 +1,9 @@
 """Tests for finding_records model, lifecycle service, and findings API."""
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+
 from app.models import AlertSeverity, FindingRecord
 from app.services.finding_lifecycle import compute_sla_days, in_breach, is_accepted
 from tests.conftest import auth
@@ -18,16 +19,16 @@ class TestFindingRecordModel:
 
 
 def _make_record(**kwargs) -> SimpleNamespace:
-    defaults = dict(
-        id=1, repo_scan_id=1,
-        advisory_id="GHSA-x", package="requests", ecosystem="pypi",
-        severity=AlertSeverity.high,
-        first_found_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        closed_at=None, reopen_count=0,
-        accepted_by_id=None, accepted_at=None,
-        accepted_reason=None, accepted_until=None,
-        sla_breach_cutoff_at=None,
-    )
+    defaults = {
+        "id": 1, "repo_scan_id": 1,
+        "advisory_id": "GHSA-x", "package": "requests", "ecosystem": "pypi",
+        "severity": AlertSeverity.high,
+        "first_found_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "closed_at": None, "reopen_count": 0,
+        "accepted_by_id": None, "accepted_at": None,
+        "accepted_reason": None, "accepted_until": None,
+        "sla_breach_cutoff_at": None,
+    }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
@@ -58,12 +59,12 @@ class TestIsAccepted:
         assert is_accepted(r) is False
 
     def test_accepted_no_expiry(self):
-        r = _make_record(accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc), accepted_reason="ok")
+        r = _make_record(accepted_at=datetime(2026, 1, 1, tzinfo=UTC), accepted_reason="ok")
         assert is_accepted(r) is True
 
     def test_accepted_future_expiry(self):
         r = _make_record(
-            accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            accepted_at=datetime(2026, 1, 1, tzinfo=UTC),
             accepted_reason="ok",
             accepted_until=date(2099, 12, 31),
         )
@@ -71,16 +72,16 @@ class TestIsAccepted:
 
     def test_accepted_past_expiry(self):
         r = _make_record(
-            accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            accepted_at=datetime(2026, 1, 1, tzinfo=UTC),
             accepted_reason="ok",
             accepted_until=date(2020, 1, 1),
         )
         assert is_accepted(r) is False
 
     def test_accepted_today_expiry_is_lapsed(self):
-        today = date.today()
+        today = datetime.now(UTC).date()
         r = _make_record(
-            accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            accepted_at=datetime(2026, 1, 1, tzinfo=UTC),
             accepted_reason="ok",
             accepted_until=today,
         )
@@ -89,32 +90,32 @@ class TestIsAccepted:
 
 def _cutoff(first_found_at: datetime, sla_days: int) -> datetime:
     """Compute sla_breach_cutoff_at as returned by UtcDateTime on read: aware UTC."""
-    return (first_found_at + timedelta(days=sla_days + 1)).astimezone(timezone.utc)
+    return (first_found_at + timedelta(days=sla_days + 1)).astimezone(UTC)
 
 
 class TestInBreach:
     def _now(self):
-        return datetime(2026, 6, 22, tzinfo=timezone.utc)
+        return datetime(2026, 6, 22, tzinfo=UTC)
 
     def test_null_cutoff_never_in_breach(self):
         # NULL sla_breach_cutoff_at (no SLA or pre-migration row) → not in breach
-        r = _make_record(first_found_at=datetime(2020, 1, 1, tzinfo=timezone.utc), sla_breach_cutoff_at=None)
+        r = _make_record(first_found_at=datetime(2020, 1, 1, tzinfo=UTC), sla_breach_cutoff_at=None)
         assert in_breach(r, self._now()) is False
 
     def test_closed_never_in_breach(self):
-        first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first = datetime(2026, 1, 1, tzinfo=UTC)
         r = _make_record(
             first_found_at=first,
-            closed_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            closed_at=datetime(2026, 6, 1, tzinfo=UTC),
             sla_breach_cutoff_at=_cutoff(first, 14),
         )
         assert in_breach(r, self._now()) is False
 
     def test_accepted_never_in_breach(self):
-        first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first = datetime(2026, 1, 1, tzinfo=UTC)
         r = _make_record(
             first_found_at=first,
-            accepted_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            accepted_at=datetime(2026, 1, 2, tzinfo=UTC),
             accepted_reason="risk accepted",
             sla_breach_cutoff_at=_cutoff(first, 14),
         )
@@ -141,7 +142,7 @@ class TestInBreach:
         first = self._now() - timedelta(days=30)
         r = _make_record(
             first_found_at=first,
-            accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            accepted_at=datetime(2026, 1, 1, tzinfo=UTC),
             accepted_reason="ok",
             accepted_until=date(2026, 1, 2),  # lapsed
             sla_breach_cutoff_at=_cutoff(first, 14),
@@ -161,8 +162,9 @@ class TestFindingSchemas:
             assert f in fields, f"missing field: {f}"
 
     def test_finding_accept_body_requires_reason(self):
-        from app.schemas import FindingAcceptBody
         import pydantic
+
+        from app.schemas import FindingAcceptBody
         with pytest.raises(pydantic.ValidationError):
             FindingAcceptBody()
 
@@ -176,8 +178,9 @@ async def _make_scan_and_finding(db, admin_user, days_old=20, severity="high",
                                  closed=False, accepted=False, accepted_until=None,
                                  scan_name="test", no_cutoff=False):
     """Helper: create a RepoScan + open FindingRecord, return (scan, record)."""
-    from app.models import RepoScan, FindingRecord, AlertSeverity
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
+
+    from app.models import AlertSeverity, FindingRecord, RepoScan
     scan = RepoScan(
         name=scan_name, url="https://github.com/t/r", branch="main",
         min_notify_severity="medium", created_by_id=admin_user.id,
@@ -186,8 +189,12 @@ async def _make_scan_and_finding(db, admin_user, days_old=20, severity="high",
     await db.commit()
     await db.refresh(scan)
 
-    from app.services.finding_lifecycle import _compute_breach_cutoff, DEFAULT_SLA_HIGH, DEFAULT_SLA_MEDIUM
-    now = datetime.now(timezone.utc)
+    from app.services.finding_lifecycle import (
+        DEFAULT_SLA_HIGH,
+        DEFAULT_SLA_MEDIUM,
+        _compute_breach_cutoff,
+    )
+    now = datetime.now(UTC)
     sev = AlertSeverity(severity)
     first_found = now - timedelta(days=days_old)
     record = FindingRecord(
@@ -246,8 +253,10 @@ class TestFindingsAPI:
         Finding age: 10d — safe under the global default but breaching the
         per-scan override. The aggregate cutoff must use min(7, 14)=7, not 14.
         """
-        from app.models import RepoScan, FindingRecord, AlertSeverity
-        from datetime import datetime, timezone, timedelta as td
+        from datetime import datetime
+        from datetime import timedelta as td
+
+        from app.models import AlertSeverity, FindingRecord, RepoScan
         scan = RepoScan(
             name="strict", url="https://g.com/s.git", branch="main",
             min_notify_severity="medium", created_by_id=admin_user.id,
@@ -256,7 +265,7 @@ class TestFindingsAPI:
         db.add(scan)
         await db.commit()
         await db.refresh(scan)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # sla_breach_cutoff_at uses the per-scan override (7d) so breach SQL filter can evaluate it.
         first_found = now - td(days=10)
         record = FindingRecord(
@@ -358,8 +367,8 @@ class TestFindingsAPI:
         assert r.status_code == 422
 
     async def test_lapsed_acceptance_not_shown_as_accepted(self, client, db, admin_user, admin_token):
-        from datetime import date, timedelta
-        yesterday = date.today() - timedelta(days=1)
+        from datetime import timedelta
+        yesterday = datetime.now(UTC).date() - timedelta(days=1)
         _, record = await _make_scan_and_finding(db, admin_user, accepted=True, accepted_until=yesterday)
         r = await client.get("/api/findings", headers=auth(admin_token))
         finding = next(f for f in r.json()["items"] if f["id"] == record.id)
@@ -409,8 +418,7 @@ class TestFindingsAPI:
         assert r.status_code == 422
 
     async def test_accept_with_today_accepted_until_returns_422(self, client, db, admin_user, admin_token):
-        from datetime import date
-        today = date.today().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         _, record = await _make_scan_and_finding(db, admin_user)
         r = await client.post(f"/api/findings/{record.id}/accept",
             json={"reason": "ok", "accepted_until": today},
@@ -435,8 +443,8 @@ class TestFindingsAPI:
 
     async def test_pagination_page_and_total(self, client, db, admin_user, admin_token):
         """page=0 and page=1 with page_size=1 should return different findings; total reflects all."""
-        _, rec1 = await _make_scan_and_finding(db, admin_user, days_old=5, severity="medium")
-        _, rec2 = await _make_scan_and_finding(db, admin_user, days_old=10, severity="medium")
+        _, _rec1 = await _make_scan_and_finding(db, admin_user, days_old=5, severity="medium")
+        _, _rec2 = await _make_scan_and_finding(db, admin_user, days_old=10, severity="medium")
         r = await client.get("/api/findings?page_size=1&page=0", headers=auth(admin_token))
         assert r.status_code == 200
         data = r.json()
@@ -449,8 +457,8 @@ class TestFindingsAPI:
         assert data2["items"][0]["id"] != data["items"][0]["id"]
 
     async def test_sort_severity_orders_critical_before_high(self, client, db, admin_user, admin_token):
-        _, high_rec = await _make_scan_and_finding(db, admin_user, severity="high", days_old=5)
-        _, crit_rec = await _make_scan_and_finding(db, admin_user, severity="critical", days_old=5)
+        _, _high_rec = await _make_scan_and_finding(db, admin_user, severity="high", days_old=5)
+        _, _crit_rec = await _make_scan_and_finding(db, admin_user, severity="critical", days_old=5)
         r = await client.get("/api/findings?sort=severity&sort_dir=asc", headers=auth(admin_token))
         assert r.status_code == 200
         items = r.json()["items"]
@@ -458,8 +466,8 @@ class TestFindingsAPI:
         assert sevs.index("critical") < sevs.index("high")
 
     async def test_sort_severity_desc_orders_low_before_critical(self, client, db, admin_user, admin_token):
-        _, low_rec = await _make_scan_and_finding(db, admin_user, severity="low", days_old=5)
-        _, crit_rec = await _make_scan_and_finding(db, admin_user, severity="critical", days_old=5)
+        _, _low_rec = await _make_scan_and_finding(db, admin_user, severity="low", days_old=5)
+        _, _crit_rec = await _make_scan_and_finding(db, admin_user, severity="critical", days_old=5)
         r = await client.get("/api/findings?sort=severity&sort_dir=desc", headers=auth(admin_token))
         assert r.status_code == 200
         items = r.json()["items"]
@@ -513,12 +521,15 @@ class TestFindingsAPI:
         Both the breach=true filter and the in_breach field in the response must
         reflect the same threshold.
         """
-        from app.services.finding_lifecycle import DEFAULT_SLA_HIGH, _compute_breach_cutoff
-        from app.models import FindingRecord, AlertSeverity
-        from datetime import datetime, timezone, timedelta
-        from app.models import RepoScan
+        from datetime import datetime, timedelta
 
-        now = datetime.now(timezone.utc)
+        from app.models import AlertSeverity, FindingRecord, RepoScan
+        from app.services.finding_lifecycle import (
+            DEFAULT_SLA_HIGH,
+            _compute_breach_cutoff,
+        )
+
+        now = datetime.now(UTC)
         sla = DEFAULT_SLA_HIGH  # 14 days for "high"
 
         scan = RepoScan(name="boundary-test", url="https://github.com/t/r", branch="main",
@@ -617,15 +628,15 @@ class TestListRepoScanResults:
         await db.commit()
         await db.refresh(scan)
 
-        from datetime import datetime, timezone
+        from datetime import datetime
         result = RepoScanResult(
             repo_scan_id=scan.id,
             status=RepoScanStatus.success,
             triggered_by=ScanTrigger.manual,
             finding_count=len(findings or []),
             findings=findings or [],
-            started_at=datetime.now(timezone.utc),
-            completed_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
         )
         db.add(result)
         await db.commit()
@@ -654,8 +665,15 @@ class TestListRepoScanResults:
 
     async def test_breaching_finding_sets_breach_true(self, client, db, admin_user, admin_token):
         """A high-severity finding older than the default 14-day SLA must flip scan_breach."""
-        from app.models import RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, FindingRecord
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
+
+        from app.models import (
+            FindingRecord,
+            RepoScan,
+            RepoScanResult,
+            RepoScanStatus,
+            ScanTrigger,
+        )
         scan = RepoScan(
             name="breach-scan", url="https://github.com/t/breach", branch="main",
             min_notify_severity="medium", created_by_id=admin_user.id,
@@ -664,7 +682,7 @@ class TestListRepoScanResults:
         await db.commit()
         await db.refresh(scan)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         record = FindingRecord(
             repo_scan_id=scan.id,
             advisory_id="GHSA-breach", package="old-pkg", ecosystem="pypi",

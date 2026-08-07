@@ -1,17 +1,18 @@
 """Tests for /api/alerts endpoints."""
 import pytest
-from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+
+from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
 from tests.conftest import auth
 
 
 async def _seed_alert(db, host, **kwargs):
-    defaults = dict(
-        host_id=host.id,
-        package_name="requests",
-        ecosystem=Ecosystem.pypi,
-        kind=AlertKind.osv,
-        severity=AlertSeverity.high,
-    )
+    defaults = {
+        "host_id": host.id,
+        "package_name": "requests",
+        "ecosystem": Ecosystem.pypi,
+        "kind": AlertKind.osv,
+        "severity": AlertSeverity.high,
+    }
     defaults.update(kwargs)
     alert = Alert(**defaults)
     db.add(alert)

@@ -217,8 +217,12 @@ function useDialogAccessibility(onClose: () => void) {
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  // onClose is mirrored so stableClose keeps a constant identity for
+  // useDialogAccessibility. The write is in an effect, not during render:
+  // a discarded or replayed render must not mutate the ref.
+  // React 19: replace with useEffectEvent.
   const onCloseRef = useRef(onClose)
-  onCloseRef.current = onClose // eslint-disable-line react-hooks/refs
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
   const stableClose = useCallback(() => onCloseRef.current(), [])
   const panelRef = useDialogAccessibility(stableClose)
   const titleId = useId()
@@ -261,8 +265,10 @@ export function Empty({ message }: { message: string }) {
 // ── Drawer ────────────────────────────────────────────────────────────────────
 
 export function Drawer({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  // See Modal above: ref mirror written in an effect, not during render.
+  // React 19: replace with useEffectEvent.
   const onCloseRef = useRef(onClose)
-  onCloseRef.current = onClose // eslint-disable-line react-hooks/refs
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
   const stableClose = useCallback(() => onCloseRef.current(), [])
   const panelRef = useDialogAccessibility(stableClose)
   const titleId = useId()

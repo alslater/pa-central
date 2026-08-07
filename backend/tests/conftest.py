@@ -6,21 +6,21 @@ connection that starts a SAVEPOINT so commits inside fixtures and handlers
 write to the DB, but the outer transaction is rolled back after the test.
 """
 import os
+
 # Must be set before any app module is imported so the insecure-default guard
 # in config.py doesn't fire during test runs.
 os.environ.setdefault("DEBUG", "true")
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.database import Base, get_db
-from app.core.security import hash_password, generate_api_key, create_access_token
+from app.core.security import create_access_token, generate_api_key, hash_password
 from app.main import app
-from app.models import User, UserRole, Host, ApiKey
-
+from app.models import ApiKey, Host, User, UserRole
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -36,6 +36,13 @@ async def engine():
         TEST_DATABASE_URL,
         connect_args={"check_same_thread": False},
     )
+
+    @event.listens_for(eng.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
+
     async with eng.begin() as conn:
         import app.models  # noqa
         await conn.run_sync(Base.metadata.create_all)
@@ -89,7 +96,7 @@ async def admin_user(db) -> User:
     user = User(
         email="admin@example.com",
         display_name="Admin",
-        hashed_password=hash_password("adminpass"),  # noqa: S106
+        hashed_password=hash_password("adminpass"),
         role=UserRole.admin,
         is_active=True,
     )
@@ -204,4 +211,8 @@ async def api_key(db, admin_user) -> tuple[str, ApiKey]:
 
 
 # Import AWS fixtures so they are available session-wide
-from tests.conftest_aws import localstack, secretsmanager, ecs_client  # noqa: F401, E402
+from tests.conftest_aws import (  # noqa: F401
+    ecs_client,
+    localstack,
+    secretsmanager,
+)

@@ -1,8 +1,11 @@
 """Tests for security utility functions."""
 from app.core.security import (
-    hash_password, verify_password,
-    create_access_token, decode_access_token,
-    generate_api_key, hash_api_key,
+    create_access_token,
+    decode_access_token,
+    generate_api_key,
+    hash_api_key,
+    hash_password,
+    verify_password,
 )
 
 
@@ -54,8 +57,8 @@ class TestApiKeyGeneration:
         assert hash_api_key(raw) == hashed
 
     def test_different_raws_produce_different_hashes(self):
-        r1, h1 = generate_api_key()
-        r2, h2 = generate_api_key()
+        _r1, h1 = generate_api_key()
+        _r2, h2 = generate_api_key()
         assert h1 != h2
 
     def test_raw_key_not_derivable_from_hash(self):

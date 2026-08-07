@@ -2,11 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user, require_admin, require_operator
 from app.core.database import get_db
-from app.models import Host, User
-from app.schemas import HostUpdate, HostOut
-from app.models import UserRole
-from app.api.deps import get_current_user, require_operator, require_admin
+from app.models import Host, User, UserRole
+from app.schemas import HostOut, HostUpdate
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
 
@@ -15,7 +14,7 @@ router = APIRouter(prefix="/hosts", tags=["hosts"])
 async def list_hosts(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> list[HostOut]:
     if user.role == UserRole.admin:
         result = await db.execute(select(Host).order_by(Host.name))
     else:
@@ -30,7 +29,7 @@ async def get_host(
     host_id: int,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+) -> HostOut:
     host = await db.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host not found")
@@ -45,7 +44,7 @@ async def update_host(
     body: HostUpdate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator),
-):
+) -> HostOut:
     host = await db.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host not found")
@@ -63,7 +62,7 @@ async def delete_host(
     host_id: int,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
-):
+) -> None:
     host = await db.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host not found")

@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
-
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 from sqlalchemy import delete, select
 
-from app.models import RepoScan, RepoScanResult, RepoScanStatus, ScanTrigger, SystemSetting, FindingRecord, utcnow
 from app.core.config import settings as app_settings
+from app.models import (
+    FindingRecord,
+    RepoScan,
+    RepoScanResult,
+    RepoScanStatus,
+    ScanTrigger,
+    SystemSetting,
+    utcnow,
+)
 from app.services.finding_lifecycle import DEFAULT_FINDING_RETENTION, parse_int
 
 logger = logging.getLogger(__name__)
@@ -45,7 +52,7 @@ def next_run_after(cron_expression: str, after: datetime, tz: ZoneInfo | None = 
     it = croniter(cron_expression, after_local)
     nxt_local = it.get_next(datetime)
     # Attach the zone and convert back to UTC
-    return nxt_local.replace(tzinfo=tz).astimezone(timezone.utc)
+    return nxt_local.replace(tzinfo=tz).astimezone(UTC)
 
 
 def is_due(cron_expression: str, last_run: datetime | None, now: datetime, tz: ZoneInfo | None = None) -> bool:
@@ -71,7 +78,7 @@ def should_trigger_scan(scan: Any, now: datetime, default_tz: ZoneInfo | None = 
 async def _acquire_scan_lock(scan_id: int) -> bool:
     if not app_settings.valkey_url:
         return True
-    from app.core.valkey import get_valkey, acquire_lock
+    from app.core.valkey import acquire_lock, get_valkey
     r = get_valkey(app_settings.valkey_url)
     try:
         return await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=3600)
@@ -149,7 +156,7 @@ async def trigger_scan(scan: Any, db_factory: Any) -> None:
             # task posts its result to ingest_repo_scan_result (or recover_stuck_scans
             # expires it), preventing overlapping runs while the task is in flight.
             logger.info("launched ECS task %s for scan %d result %d", task_arn, tracked_scan.id, result.id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             result.status = RepoScanStatus.failed
             result.error_message = str(exc)
             result.completed_at = utcnow()

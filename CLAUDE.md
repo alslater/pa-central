@@ -115,6 +115,40 @@ checklist before considering the upgrade done:
 - [ ] **Backend tests** — run `cd backend && .venv/bin/pytest` and confirm all
   scan-options and config-lint tests still pass.
 
+## API handler return annotations
+
+Every `@router.*` handler must have an explicit return type annotation. It
+should match the decorator's `response_model`:
+
+```python
+@router.get("", response_model=list[UserOut])
+async def list_users(db: DbDep, _: AdminDep) -> list[UserOut]:
+    ...
+```
+
+Rules for the cases that aren't a plain `response_model`:
+
+| Handler shape | Annotation |
+|--------------------------------------------|------------------------------|
+| `response_model=X` | `-> X` |
+| `status_code=204` with bare/no `return` | `-> None` |
+| Returns a `Response` subclass directly | `-> Response` (or the subclass, e.g. `PlainTextResponse`) |
+| Returns one of several schemas | `-> A \| B` |
+| Returns a plain dict | `-> dict[str, bool]` (or the actual shape) |
+
+Handlers that return ORM rows still annotate the schema type (`-> UserOut`,
+not `-> User`) — FastAPI serialises through `response_model`, and this matches
+FastAPI's own documented convention.
+
+Annotating a handler that previously had none will add its schema to the
+OpenAPI docs where it was `{}` before. That's the point, but diff
+`app.openapi()` before/after if the endpoint is consumed by the frontend, and
+mirror any resulting shape change into `frontend/src/lib/api.ts` per the
+full-stack consistency rule above.
+
+To find gaps: grep for handlers whose `def` line ends in `):` rather than
+`) -> ...:`.
+
 ## Authorization tests
 
 Every new API endpoint must have authorization tests covering:

@@ -1,8 +1,9 @@
 """Tests for /api/dashboard endpoint."""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+
+from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
 from tests.conftest import auth
 
 
@@ -25,7 +26,7 @@ class TestDashboard:
         assert r.json()["total_hosts"] >= 1
 
     async def test_counts_online_hosts(self, client, admin_token, host, db):
-        host.last_seen_at = datetime.now(timezone.utc)
+        host.last_seen_at = datetime.now(UTC)
         await db.commit()
         r = await client.get("/api/dashboard", headers=auth(admin_token))
         assert r.json()["hosts_online"] >= 1

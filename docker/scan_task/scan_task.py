@@ -29,7 +29,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-
 # ── Environment ───────────────────────────────────────────────────────────────
 
 def require_env(name: str) -> str:

@@ -1,6 +1,9 @@
 """Authorization gap tests — covers endpoints missing 401/403 checks in other test files."""
-import pytest
+from datetime import UTC
 from unittest.mock import patch
+
+import pytest
+
 from tests.conftest import auth
 
 REPO_PAYLOAD = {
@@ -51,9 +54,10 @@ class TestRepoScansAuthGaps:
 @pytest.mark.asyncio
 class TestScanAuthGaps:
     async def test_get_scan_requires_auth(self, client, admin_token, host, db):
+        from datetime import datetime
+
         from app.models import Scan
-        from datetime import datetime, timezone
-        scan = Scan(host_id=host.id, scan_type="project", project_path="/repo", received_at=datetime.now(timezone.utc))
+        scan = Scan(host_id=host.id, scan_type="project", project_path="/repo", received_at=datetime.now(UTC))
         db.add(scan)
         await db.commit()
         await db.refresh(scan)
@@ -61,10 +65,11 @@ class TestScanAuthGaps:
         assert r.status_code == 401
 
     async def test_get_scan_wrong_owner_returns_404(self, client, viewer_token, host, db):
+        from datetime import datetime
+
         from app.models import Scan
-        from datetime import datetime, timezone
         # host is owned by admin; viewer does not own it — 404 to prevent ID enumeration
-        scan = Scan(host_id=host.id, scan_type="project", project_path="/repo", received_at=datetime.now(timezone.utc))
+        scan = Scan(host_id=host.id, scan_type="project", project_path="/repo", received_at=datetime.now(UTC))
         db.add(scan)
         await db.commit()
         await db.refresh(scan)
@@ -164,7 +169,7 @@ class TestConfigTemplateAuthGaps:
 @pytest.mark.asyncio
 class TestAlertAuthGaps:
     async def test_get_alert_requires_auth(self, client, admin_token, host, db):
-        from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
         alert = Alert(
             host_id=host.id, package_name="pkg", ecosystem=Ecosystem.pypi,
             kind=AlertKind.osv, severity=AlertSeverity.high,
@@ -195,7 +200,7 @@ class TestAlertAuthGaps:
         assert r.status_code == 401
 
     async def test_bulk_acknowledge_requires_auth(self, client, host, db):
-        from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
         alert = Alert(
             host_id=host.id, package_name="pkg", ecosystem=Ecosystem.pypi,
             kind=AlertKind.osv, severity=AlertSeverity.high,
@@ -207,7 +212,7 @@ class TestAlertAuthGaps:
         assert r.status_code == 401
 
     async def test_bulk_acknowledge_viewer_forbidden(self, client, viewer_token, host, db):
-        from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
         alert = Alert(
             host_id=host.id, package_name="pkg", ecosystem=Ecosystem.pypi,
             kind=AlertKind.osv, severity=AlertSeverity.high,
@@ -219,7 +224,7 @@ class TestAlertAuthGaps:
         assert r.status_code == 403
 
     async def test_bulk_acknowledge_operator_succeeds(self, client, operator_token, host, db):
-        from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
         a1 = Alert(host_id=host.id, package_name="pkg1", ecosystem=Ecosystem.pypi, kind=AlertKind.osv, severity=AlertSeverity.high)
         a2 = Alert(host_id=host.id, package_name="pkg2", ecosystem=Ecosystem.pypi, kind=AlertKind.osv, severity=AlertSeverity.medium)
         db.add_all([a1, a2])
@@ -270,7 +275,7 @@ class TestDashboardScoping:
         assert r.status_code == 401
 
     async def test_admin_sees_fleet_wide_stats(self, client, admin_token, host, db):
-        from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
         alert = Alert(
             host_id=host.id, package_name="pkg", ecosystem=Ecosystem.pypi,
             kind=AlertKind.osv, severity=AlertSeverity.high,
@@ -292,7 +297,7 @@ class TestDashboardScoping:
         assert data["unacknowledged_alerts"] == 0
 
     async def test_developer_counts_own_host(self, client, developer_token, developer_user, db):
-        from app.models import Host, Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem, Host
         own_host = Host(
             owner_user_id=developer_user.id,
             name="dev-host",
@@ -315,7 +320,7 @@ class TestDashboardScoping:
 
     async def test_viewer_sees_fleet_wide_stats(self, client, viewer_token, host, db):
         # viewer is not a developer — should see fleet-wide data
-        from app.models import Alert, AlertSeverity, AlertKind, Ecosystem
+        from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
         alert = Alert(
             host_id=host.id, package_name="pkg2", ecosystem=Ecosystem.pypi,
             kind=AlertKind.osv, severity=AlertSeverity.medium,
