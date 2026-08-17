@@ -7,7 +7,7 @@ write to the DB, but the outer transaction is rolled back after the test.
 """
 import os
 
-_BOOL_STRINGS = {"true", "false", "1", "0", "yes", "no", "on", "off"}
+_BOOL_STRINGS = {"true", "false", "1", "0", "yes", "no", "on", "off", "t", "f", "y", "n"}
 
 
 def _ensure_debug_env_is_a_valid_bool() -> None:

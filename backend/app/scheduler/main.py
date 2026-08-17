@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -25,13 +24,11 @@ def _handle_signal(sig, frame):
 
 
 async def main() -> None:
-    from app.core.config import settings
+    from app.core.db_config import async_connect_args, async_url
 
-    if not settings.database_url:
-        logger.error("DATABASE_URL not configured")
-        sys.exit(1)
-
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = create_async_engine(
+        async_url(), pool_pre_ping=True, connect_args=async_connect_args()
+    )
     db_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     from app.scheduler.scheduler import (

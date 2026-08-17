@@ -139,6 +139,48 @@ async def test_async_driver_sends_a_client_certificate(postgres_tls):
         await engine.dispose()
 
 
+async def test_make_async_engine_carries_certificates_from_a_query_url(postgres_tls):
+    """The documented PA_TEST_POSTGRES_URL shape — certificate paths as URL
+    query options — must reach asyncpg through the fixture helper.
+
+    The postgres_url fixture propagates an external URL's query options
+    verbatim, but as_async_url() rejects sslrootcert/sslcert/sslkey outright
+    (asyncpg has no keyword argument for them), so integration tests that
+    built engines straight from the URL failed against a cert-authenticated
+    external server before attempting a single connection. make_async_engine()
+    is the fix: it moves the TLS options into an SSLContext via the production
+    connect-args path. Authenticating as the certificate-only role proves the
+    material genuinely reached the server, not merely that a URL parsed.
+    """
+    from tests.conftest_postgres import make_async_engine
+
+    url, ca, cert, key = postgres_tls
+    base = sa.engine.make_url(url)
+    external = sa.engine.URL.create(
+        "postgresql+psycopg2",
+        username=conftest_postgres_tls.TLS_CERT_USER,
+        host=base.host,
+        port=base.port,
+        database=base.database,
+        query={
+            "sslmode": "verify-full",
+            "sslrootcert": ca,
+            "sslcert": cert,
+            "sslkey": key,
+        },
+    ).render_as_string(hide_password=False)
+
+    engine = make_async_engine(external)
+    try:
+        async with engine.connect() as conn:
+            assert (
+                await conn.execute(sa.text("SELECT current_user"))
+            ).scalar() == conftest_postgres_tls.TLS_CERT_USER
+            assert (await conn.execute(sa.text(CLIENT_DN))).scalar() is not None
+    finally:
+        await engine.dispose()
+
+
 async def test_async_driver_without_a_client_certificate_is_rejected(postgres_tls):
     """Counterpart to the test above: it must be the certificate doing the work.
 

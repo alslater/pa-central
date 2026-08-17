@@ -13,7 +13,7 @@ services:
 
   # ── PA Central server ─────────────────────────────────────────────────────
   # Default storage: SQLite (zero external dependencies, good for a single dev machine).
-  # Switch to PostgreSQL by running with --profile pg and setting DATABASE_URL (see below).
+  # Switch to PostgreSQL by running with --profile pg and setting DATABASE_TYPE=postgresql (see below).
   pa-central:
     build: .
     restart: unless-stopped
@@ -25,8 +25,31 @@ services:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in your environment or .env file}
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:?Set SETTINGS_ENCRYPTION_KEY in your environment or .env file}
 
-      # SQLite by default. Override with a postgresql+asyncpg:// URL when using --profile pg.
-      DATABASE_URL: ${DATABASE_URL:-sqlite+aiosqlite:///./data/pa_central.db}
+      # Forwarded solely so the app can detect and reject it: DATABASE_URL is
+      # no longer read for connection info. Without this line, a value set on
+      # the host never reaches the container at all — compose's environment:
+      # block is an allowlist, not a passthrough — so an old deployment would
+      # silently fall back to SQLite instead of failing loudly at startup.
+      DATABASE_URL: ${DATABASE_URL:-}
+
+      # SQLite by default. For PostgreSQL set DATABASE_TYPE=postgresql and the
+      # host/name/user/password variables below.
+      DATABASE_TYPE: ${DATABASE_TYPE:-sqlite}
+      DATABASE_NAME: ${DATABASE_NAME:-./data/pa_central.db}
+      DATABASE_HOST: ${DATABASE_HOST:-}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_USER: ${DATABASE_USER:-}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-}
+      DATABASE_PASSWORD_FILE: ${DATABASE_PASSWORD_FILE:-}
+      DATABASE_SCHEMA: ${DATABASE_SCHEMA:-}
+      DATABASE_SSLMODE: ${DATABASE_SSLMODE:-prefer}
+      DATABASE_SSLROOTCERT: ${DATABASE_SSLROOTCERT:-}
+      DATABASE_SSLCERT: ${DATABASE_SSLCERT:-}
+      DATABASE_SSLKEY: ${DATABASE_SSLKEY:-}
+
+      # Ceiling on how long startup waits to acquire the PostgreSQL migration
+      # advisory lock before failing (seconds). Unused on SQLite.
+      MIGRATION_LOCK_TIMEOUT: ${MIGRATION_LOCK_TIMEOUT:-300}
 
       # If set, creates admin@localhost with this password on first startup.
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
@@ -44,8 +67,10 @@ services:
 
   # ── PostgreSQL (optional) ─────────────────────────────────────────────────
   # Activate with: docker compose --profile pg up
-  # Then set DATABASE_URL so pa-central connects to it:
-  #   DATABASE_URL=postgresql+asyncpg://pa_central:pa_central_dev@postgres/pa_central
+  # Then set these so pa-central connects to it:
+  #   DATABASE_TYPE=postgresql DATABASE_HOST=postgres
+  #   DATABASE_NAME=pa_central DATABASE_USER=pa_central
+  #   DATABASE_PASSWORD=pa_central_dev
   # The default password below is fine for local dev; use a strong password in production.
   postgres:
     image: postgres:16-alpine

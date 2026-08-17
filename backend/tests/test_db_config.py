@@ -5,6 +5,7 @@ URL/connect_args builders. Integration behaviour lives in
 test_postgres_behaviour.py.
 """
 import os
+import shutil
 
 import pytest
 
@@ -52,6 +53,19 @@ class TestAmbientDebugEnvIsSanitized:
         monkeypatch.delenv("DEBUG", raising=False)
         _ensure_debug_env_is_a_valid_bool()
         assert os.environ["DEBUG"] == "true"
+
+    def test_pydantic_short_boolean_forms_are_preserved(self, monkeypatch):
+        """Pydantic accepts 'f', 'n', 't', 'y' as boolean strings (in addition
+        to the common full forms). A real override using these valid short forms
+        must be preserved, not rewritten to 'true'."""
+        from tests.conftest import _ensure_debug_env_is_a_valid_bool
+
+        for short_form in ("f", "n", "t", "y"):
+            monkeypatch.setenv("DEBUG", short_form)
+            _ensure_debug_env_is_a_valid_bool()
+            assert (
+                os.environ["DEBUG"] == short_form
+            ), f"DEBUG={short_form} was incorrectly rewritten"
 
 
 class TestEnvFileIsIndependentOfCwd:
@@ -119,6 +133,19 @@ class TestDatabaseUrlIsRejected:
         with pytest.raises(RuntimeError) as exc:
             validate_database_settings(_settings())
         assert "hunter2" not in str(exc.value)
+
+    def test_error_does_not_claim_a_password_is_required(self, monkeypatch):
+        """validate_database_settings() itself accepts neither password form
+        for peer, trust, or IAM authentication
+        (TestPasswordSources.test_neither_password_form_is_valid) -- this
+        message must not tell an operator using passwordless auth that they
+        need to add credentials."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u@h/db")
+        with pytest.raises(RuntimeError) as exc:
+            validate_database_settings(_settings())
+        message = str(exc.value)
+        assert "one of DATABASE_PASSWORD" not in message
+        assert "and DATABASE_USER" in message
 
     def test_database_url_in_dotenv_only_is_rejected(self, monkeypatch, tmp_path):
         """A DATABASE_URL sitting only in .env (not the real environment) is
@@ -256,6 +283,23 @@ class TestPostgresRequiredFields:
             database_type="postgresql", database_host="h",
             database_name="pa", database_user="u", database_password="pw",
         ))
+
+    def test_compose_sqlite_default_does_not_mask_missing_name(self):
+        """docker-compose.yml's own DATABASE_NAME fallback
+        (`${DATABASE_NAME:-./data/pa_central.db}`) is applied unconditionally —
+        Compose's environment: block cannot vary a default based on another
+        variable's value, so it is forwarded into the container even when
+        DATABASE_TYPE=postgresql is set without an explicit DATABASE_NAME.
+        Without this check, that non-empty string satisfies the bare
+        `bool(cfg.database_name)` test below and startup proceeds, only to
+        fail much later at connection time against a PostgreSQL server with a
+        misleading "database does not exist" error naming a path-shaped
+        string instead of a startup error naming DATABASE_NAME as missing."""
+        with pytest.raises(RuntimeError, match="DATABASE_NAME"):
+            validate_database_settings(_settings(
+                database_type="postgresql", database_host="h",
+                database_name="./data/pa_central.db", database_user="u",
+            ))
 
 
 class TestPortValidation:
@@ -397,6 +441,43 @@ class TestTlsValidation:
                 database_user="u", database_sslmode=mode,
             ))
 
+    @pytest.mark.parametrize("mode", ["disable", "prefer"])
+    def test_rootcert_with_disable_or_prefer_is_rejected(self, mode, tmp_path):
+        """_ssl_context() returns before ever loading the CA under `disable`
+        (no TLS session at all) and `prefer` (passed to asyncpg as the bare
+        string "prefer", which cannot carry a trust store — an SSLContext
+        would force full verification and break the plaintext fallback, see
+        _ssl_context's docstring). libpq behaves the same way: neither mode
+        verifies the server certificate regardless of sslrootcert. So an
+        operator who supplies DATABASE_SSLROOTCERT under these modes gets no
+        certificate verification while the presence of a trust root suggests
+        otherwise. Rejecting at startup forces a mode that actually uses the
+        CA, mirroring the client-cert rule above."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("x", encoding="utf-8")
+        with pytest.raises(
+            RuntimeError, match="DATABASE_SSLROOTCERT is configured"
+        ):
+            validate_database_settings(_settings(
+                database_type="postgresql", database_host="h", database_name="pa",
+                database_user="u", database_sslmode=mode,
+                database_sslrootcert=str(ca),
+            ))
+
+    def test_rootcert_with_require_is_still_accepted(self, tmp_path):
+        """`require` + rootcert must not be swept into the rejection: it is
+        the one mode where a supplied CA upgrades behaviour (chain
+        verification) on both drivers — _ssl_context() sets CERT_REQUIRED,
+        and libpq documents the same root-CA backward-compatibility
+        promotion for `require`."""
+        ca = tmp_path / "ca.pem"
+        ca.write_text("x", encoding="utf-8")
+        validate_database_settings(_settings(
+            database_type="postgresql", database_host="h", database_name="pa",
+            database_user="u", database_sslmode="require",
+            database_sslrootcert=str(ca),
+        ))
+
 
 class TestVerifyCaRequiresAnExplicitRoot:
     def test_verify_ca_without_a_rootcert_is_rejected(self):
@@ -523,6 +604,23 @@ class TestResolvedPassword:
         # Trailing newline stripped: `echo secret > file` is the common way to
         # write one, and libpq would otherwise send the newline as part of it.
         assert resolved_password(cfg) == "frimfile"
+
+    def test_leading_newline_in_password_is_preserved(self, tmp_path):
+        """Only the trailing newline added by tools like `echo` is part of
+        the contract — a password that itself starts with CR/LF must survive
+        untouched, not be silently truncated."""
+        from app.core.db_config import resolved_password
+
+        pw_file = tmp_path / "pw"
+        # `open(..., encoding="utf-8")` performs universal-newline translation
+        # on read, so a leading "\r\n" on disk would arrive as "\n" regardless
+        # of this fix — write a bare "\n" so the test isolates strip direction.
+        pw_file.write_text("\nfrimfile\n", encoding="utf-8")
+        cfg = _settings(
+            database_type="postgresql", database_host="h", database_name="pa",
+            database_user="u", database_password_file=str(pw_file),
+        )
+        assert resolved_password(cfg) == "\nfrimfile"
 
     def test_no_password(self):
         from app.core.db_config import resolved_password
@@ -766,6 +864,10 @@ class TestAsyncConnectArgs:
         assert ctx.check_hostname is check_hostname
         assert ctx.verify_mode is getattr(ssl, verify_mode_name)
 
+    @pytest.mark.skipif(
+        shutil.which("openssl") is None,
+        reason="openssl binary not available",
+    )
     def test_require_with_a_rootcert_validates_like_libpq(self, tmp_path):
         """libpq's `require` behaves completely differently depending on
         whether sslrootcert is set: with none, it encrypts without validating
@@ -918,10 +1020,11 @@ class TestAlembicSubprocessEnv:
         """A DATABASE_* var left over from an unrelated ambient environment
         (e.g. a shell that once exported DATABASE_HOST for a different
         database) must not leak into the migration subprocess just because
-        this process's own settings leave that field unset. Only
-        DATABASE_PASSWORD_FILE was ever explicitly cleared before this fix —
-        every other optional field was merely left alone when falsy, so a
-        stale value already in os.environ passed straight through."""
+        this process's own settings leave that field unset. Each field is set
+        to an explicit empty string rather than left absent — a merely-popped
+        key would let the subprocess's own Settings() construction fall back
+        to a same-named value in backend/.env instead (see
+        TestAlembicSubprocessEnvDoesNotFallBackToDotenv)."""
         import subprocess
 
         from app import main
@@ -966,7 +1069,220 @@ class TestAlembicSubprocessEnv:
             "DATABASE_SSLKEY",
             "DATABASE_PASSWORD",
         ):
-            assert name not in env, f"{name} leaked a stale ambient value"
+            assert env[name] == "", f"{name} leaked a stale ambient value: {env[name]!r}"
+
+    def test_stale_ambient_vars_are_cleared_regardless_of_case(self, monkeypatch):
+        """Settings are read case-insensitively (pydantic-settings never sets
+        case_sensitive=True), so a lowercase or mixed-case ambient
+        database_password_file is exactly as live a threat as the uppercase
+        form — e.g. it would reach the subprocess alongside the freshly
+        resolved DATABASE_PASSWORD and trip Settings' own
+        'Set DATABASE_PASSWORD or DATABASE_PASSWORD_FILE, not both' check."""
+        import subprocess
+
+        from app import main
+
+        monkeypatch.setenv("database_password_file", "/stale/lower/pw")
+        monkeypatch.setenv("Database_Sslmode", "verify-full")
+
+        monkeypatch.setattr(main.settings, "database_password", "literal-pw")
+        monkeypatch.setattr(main.settings, "database_password_file", None)
+
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        main._alembic_upgrade(backend_dir=".")
+
+        env = captured["env"]
+        assert "database_password_file" not in env, (
+            "a lowercase ambient database_password_file leaked into the "
+            "subprocess env alongside the real DATABASE_PASSWORD"
+        )
+        assert "Database_Sslmode" not in env, "Database_Sslmode leaked"
+        assert env["DATABASE_PASSWORD"] == "literal-pw"
+        assert env["DATABASE_PASSWORD_FILE"] == ""
+
+
+class TestAlembicSubprocessEnvDoesNotFallBackToDotenv:
+    """Removing a key from the child's os.environ dict does not hide a value
+    from backend/.env, because the subprocess's own Settings() construction
+    (triggered when Alembic's env.py imports app.core.config) reloads that
+    same file. pydantic-settings' env-var source only outranks its dotenv
+    source when the key is actually present in os.environ -- even as an
+    empty string -- confirmed live: a *missing* key falls through to
+    whatever the configured env_file defines. In a documented direct-run
+    setup using DATABASE_PASSWORD_FILE, the parent would resolve the secret
+    into DATABASE_PASSWORD, then the child would reload DATABASE_PASSWORD_FILE
+    from .env, tripping the 'not both' validation."""
+
+    @staticmethod
+    def _settings_read_back_through(monkeypatch, env: dict, env_file) -> "Settings":
+        """Reconstruct Settings the way the Alembic subprocess would: fresh
+        process, same os.environ, same env_file on disk."""
+        from pydantic_settings import BaseSettings, SettingsConfigDict
+
+        class _ChildSettings(BaseSettings):
+            model_config = SettingsConfigDict(env_file=str(env_file), extra="ignore")
+
+            database_password: str | None = None
+            database_password_file: str | None = None
+            database_host: str | None = None
+
+        monkeypatch.setattr(os, "environ", env)
+        return _ChildSettings()
+
+    def test_password_file_does_not_leak_back_from_dotenv(self, monkeypatch, tmp_path):
+        import subprocess
+
+        from app import main
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_PASSWORD_FILE=/from/dotenv\n")
+
+        monkeypatch.setattr(main.settings, "database_password_file", None)
+        monkeypatch.setattr(main, "resolved_password", lambda: "resolved-pw")
+
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        main._alembic_upgrade(backend_dir=".")
+
+        child = self._settings_read_back_through(monkeypatch, captured["env"], env_file)
+        assert not child.database_password_file, (
+            "the subprocess's own Settings() fell back to backend/.env's "
+            "DATABASE_PASSWORD_FILE despite the parent already resolving "
+            f"the password: {child.database_password_file!r}"
+        )
+        assert child.database_password == "resolved-pw"
+
+    def test_host_does_not_leak_back_from_dotenv(self, monkeypatch, tmp_path):
+        """Not just DATABASE_PASSWORD_FILE -- every DATABASE_* field this
+        function clears when unset shares the identical pop()-does-not-shadow-
+        dotenv structure. A stray DATABASE_HOST left in backend/.env from a
+        prior configuration would otherwise resurface in the subprocess even
+        though this process's own settings have no host at all (e.g. SQLite)."""
+        import subprocess
+
+        from app import main
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_HOST=stale-dotenv-host.invalid\n")
+
+        monkeypatch.setattr(main.settings, "database_host", None)
+        monkeypatch.setattr(main, "resolved_password", lambda: None)
+
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        main._alembic_upgrade(backend_dir=".")
+
+        child = self._settings_read_back_through(monkeypatch, captured["env"], env_file)
+        assert not child.database_host, (
+            "the subprocess's own Settings() fell back to backend/.env's "
+            f"stale DATABASE_HOST despite the parent's settings having none: {child.database_host!r}"
+        )
+
+
+class TestOptionalDatabaseFieldsNormalizeBlankToNone:
+    """app.main._alembic_upgrade shadows every optional DATABASE_* field with
+    an explicit empty string rather than omitting the key (see
+    TestAlembicSubprocessEnvDoesNotFallBackToDotenv) -- but pydantic-settings
+    does not coerce an empty-string value to None on its own for a
+    ``str | None`` field, confirmed live. Left unnormalized, the subprocess's
+    own Settings() would resolve e.g. database_schema to the literal string
+    "" rather than None, and migrations/env.py passes it straight through as
+    Alembic's version_table_schema with no truthy guard -- SQLAlchemy/Alembic
+    treat schema="" as a real (if odd) schema name distinct from schema=None,
+    which broke a previously-passing concurrent-migration integration test by
+    corrupting the version-table existence check."""
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "database_name",
+            "database_host",
+            "database_user",
+            "database_password",
+            "database_password_file",
+            "database_schema",
+            "database_sslrootcert",
+            "database_sslcert",
+            "database_sslkey",
+        ],
+    )
+    def test_blank_value_resolves_to_none(self, field):
+        cfg = _settings(**{field: ""})
+        assert getattr(cfg, field) is None, (
+            f"{field}='' resolved to {getattr(cfg, field)!r}, not None -- "
+            "downstream code that passes this field straight through with no "
+            "truthy guard (e.g. migrations/env.py's version_table_schema) "
+            "will see a real, if odd, empty-string value instead of 'unset'"
+        )
+
+
+class TestMigrationLockTimeoutParsing:
+    """MIGRATION_LOCK_TIMEOUT gates the deadline check in _run_migrations:
+    `time.monotonic() >= deadline`. Plain float coercion happily accepts
+    "nan" and "inf" — both defeat that comparison forever (nan compares
+    False against everything; monotonic time never reaches +inf), silently
+    recreating the indefinite hang this timeout exists to prevent.
+
+    A Settings field (not a bare os.getenv() in app.main) so a value placed
+    in backend/.env — the documented direct-run configuration file — is
+    actually honored: pydantic-settings' dotenv source never touches
+    os.environ, so os.getenv() alone cannot see it."""
+
+    def test_rejects_nan(self):
+        with pytest.raises(ValueError, match="MIGRATION_LOCK_TIMEOUT"):
+            _settings(migration_lock_timeout="nan")
+
+    def test_rejects_positive_infinity(self):
+        with pytest.raises(ValueError, match="MIGRATION_LOCK_TIMEOUT"):
+            _settings(migration_lock_timeout="inf")
+
+    def test_rejects_negative(self):
+        with pytest.raises(ValueError, match="MIGRATION_LOCK_TIMEOUT"):
+            _settings(migration_lock_timeout="-1")
+
+    def test_rejects_malformed_value_with_a_clear_message(self):
+        with pytest.raises(ValueError, match="MIGRATION_LOCK_TIMEOUT"):
+            _settings(migration_lock_timeout="notanumber")
+
+    def test_accepts_a_finite_non_negative_value(self):
+        assert _settings(migration_lock_timeout="300").migration_lock_timeout == 300.0
+        assert _settings(migration_lock_timeout="0").migration_lock_timeout == 0.0
+
+    def test_default_is_300(self):
+        assert _settings().migration_lock_timeout == 300.0
+
+    def test_value_from_env_file_is_honored(self, tmp_path, monkeypatch):
+        """The bug this field replaces: app.main previously read
+        MIGRATION_LOCK_TIMEOUT via a bare os.getenv(), which only ever sees
+        the real process environment. A value placed solely in backend/.env
+        — the documented direct-run configuration file — never reached it,
+        and the timeout silently stayed at its 300s default. Settings loads
+        this env file itself, so the field must pick up a .env-only value
+        with nothing set in the real environment."""
+        monkeypatch.delenv("MIGRATION_LOCK_TIMEOUT", raising=False)
+        env_file = tmp_path / ".env"
+        env_file.write_text("MIGRATION_LOCK_TIMEOUT=42\n", encoding="utf-8")
+        cfg = Settings(debug=True, _env_file=str(env_file))
+        assert cfg.migration_lock_timeout == 42.0
 
 
 class TestPsycopg2VersionFloor:

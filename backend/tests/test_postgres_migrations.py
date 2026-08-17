@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
+from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
@@ -47,19 +49,6 @@ EXPECTED_ONDELETE = {
 MIGRATED_TABLES = sorted({t for t, _ in EXPECTED_ONDELETE})
 
 
-# Query keys this helper knows how to translate into their DATABASE_*
-# equivalent — the same libpq TLS vocabulary app.core.db_config uses. Anything
-# else on the URL (e.g. ?connect_timeout=5) has no DATABASE_* equivalent, so
-# silently keeping only the recognized keys would connect with weaker/
-# different settings than the caller asked for.
-_SUPPORTED_QUERY_OPTIONS = {
-    "sslmode": "DATABASE_SSLMODE",
-    "sslrootcert": "DATABASE_SSLROOTCERT",
-    "sslcert": "DATABASE_SSLCERT",
-    "sslkey": "DATABASE_SSLKEY",
-}
-
-
 def alembic(
     url: str, *args: str, schema: str | None = None
 ) -> subprocess.CompletedProcess:
@@ -78,9 +67,13 @@ def alembic(
     query = dict(parsed.query)
     unsupported = query.keys() - _SUPPORTED_QUERY_OPTIONS.keys()
     if unsupported:
+        # str(parsed), not the raw url!r: url may be an externally supplied
+        # PA_TEST_POSTGRES_URL carrying a real password, and URL.__str__
+        # masks it (unlike a plain string's repr, which has no idea a
+        # password is embedded in it).
         raise ValueError(
             f"alembic() cannot translate query option(s) {sorted(unsupported)} "
-            f"on {url!r} into DATABASE_* environment variables — add support "
+            f"on {parsed} into DATABASE_* environment variables — add support "
             "or strip them from the URL"
         )
 
@@ -90,8 +83,13 @@ def alembic(
     # DATABASE_SSLMODE (e.g. left set by the real app's own .env) would
     # silently take precedence over what *url* actually specifies, and the
     # migration could target the wrong schema or negotiate different TLS
-    # settings than the fixture provisioned.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("DATABASE_")}
+    # settings than the fixture provisioned. Matched case-insensitively:
+    # pydantic-settings' own config source is case-insensitive (Settings
+    # never sets case_sensitive=True), so a lowercase or mixed-case ambient
+    # var like database_schema is exactly as live a threat as DATABASE_SCHEMA.
+    env = {
+        k: v for k, v in os.environ.items() if not k.upper().startswith("DATABASE_")
+    }
     env.update(
         {
             "DATABASE_TYPE": "postgresql",
@@ -104,6 +102,26 @@ def alembic(
             # subprocess's environment must be fully determined by *url*,
             # never by whatever DATABASE_SSLMODE happens to be unset to.
             "DATABASE_SSLMODE": str(query.get("sslmode", "prefer")),
+            # Every optional DATABASE_* field this helper doesn't otherwise
+            # set is shadowed with an explicit empty value here, not merely
+            # omitted -- omitting the key here only clears the *parent's*
+            # os.environ copy, but the subprocess's own Settings() (built
+            # when Alembic's env.py imports app.core.config) reloads
+            # backend/.env independently. pydantic-settings' env-var source
+            # only outranks its dotenv source when the key is actually
+            # present, even as "" -- confirmed live: a URL without a
+            # password picked up a developer's real DATABASE_PASSWORD_FILE
+            # from backend/.env and crashed trying to read it, and an
+            # unset schema silently resolved to whatever DATABASE_SCHEMA
+            # happened to be sitting in that file. Settings' own
+            # _blank_to_none validator (app/core/config.py) collapses ""
+            # back to None, so this is safe to always set.
+            "DATABASE_PASSWORD": "",
+            "DATABASE_PASSWORD_FILE": "",
+            "DATABASE_SCHEMA": "",
+            "DATABASE_SSLROOTCERT": "",
+            "DATABASE_SSLCERT": "",
+            "DATABASE_SSLKEY": "",
         }
     )
     if parsed.password:
@@ -165,6 +183,10 @@ class TestAlembicHelperEnvironmentIsSanitized:
         alembic("postgresql+psycopg2://u:p@host/db", "upgrade", "head")
 
         env = captured["env"]
+        # Present-but-empty, not absent: an absent key would leave the
+        # subprocess's own Settings() free to fall back to backend/.env
+        # instead (see TestAlembicHelperEnvDoesNotFallBackToDotenv below) --
+        # the key must be *there*, just shadowed, to block both sources.
         for name in (
             "DATABASE_SCHEMA",
             "DATABASE_SSLROOTCERT",
@@ -172,10 +194,34 @@ class TestAlembicHelperEnvironmentIsSanitized:
             "DATABASE_SSLKEY",
             "DATABASE_PASSWORD_FILE",
         ):
-            assert name not in env, f"{name} leaked a stale ambient value"
+            assert name in env, f"{name} must be explicitly shadowed, not omitted"
+            assert env[name] == "", f"{name} leaked a stale ambient value: {env[name]!r}"
         assert env["DATABASE_SSLMODE"] == "prefer", (
             "sslmode must fall back to the real default, not the stale "
             "ambient value, when the URL specifies none"
+        )
+
+    def test_stale_ambient_vars_are_cleared_regardless_of_case(self, monkeypatch):
+        """The configuration source (pydantic-settings) reads DATABASE_* env
+        vars case-insensitively, so this helper's own sanitizer must strip
+        them the same way — a lowercase or mixed-case ambient var is exactly
+        as live a threat as an uppercase one."""
+        for name, stale in (
+            ("database_schema", "stale_lower_schema"),
+            ("Database_Sslmode", "verify-full"),
+            ("database_url", "postgresql://stale/should-not-be-read"),
+        ):
+            monkeypatch.setenv(name, stale)
+
+        captured = self._capture_env(monkeypatch)
+        alembic("postgresql+psycopg2://u:p@host/db", "upgrade", "head")
+
+        env = captured["env"]
+        for name in ("database_schema", "Database_Sslmode", "database_url"):
+            assert name not in env, f"{name} leaked a stale ambient value"
+        assert env["DATABASE_SSLMODE"] == "prefer", (
+            "sslmode must fall back to the real default, not the stale "
+            "lower/mixed-case ambient value, when the URL specifies none"
         )
 
     def test_sslmode_query_option_is_honored(self, monkeypatch):
@@ -198,6 +244,81 @@ class TestAlembicHelperEnvironmentIsSanitized:
                 "upgrade",
                 "head",
             )
+
+    def test_unsupported_query_option_error_does_not_leak_the_password(
+        self, monkeypatch
+    ):
+        """*url* can be an externally supplied PA_TEST_POSTGRES_URL carrying a
+        real password — the error naming the unsupported option must not
+        print that password into test/CI logs."""
+        self._capture_env(monkeypatch)
+        with pytest.raises(ValueError) as exc_info:
+            alembic(
+                "postgresql+psycopg2://u:supersecret@host/db?connect_timeout=5",
+                "upgrade",
+                "head",
+            )
+        assert "supersecret" not in str(exc_info.value)
+
+
+class TestAlembicHelperEnvDoesNotFallBackToDotenv:
+    """Clearing DATABASE_* only from the parent's os.environ copy does not
+    shadow backend/.env: the subprocess's own Settings() (constructed when
+    Alembic's env.py imports app.core.config) reloads that file
+    independently, and pydantic-settings' env-var source only outranks its
+    dotenv source when the key is actually *present* in the child's
+    environment, even as "". Confirmed live before the fix: a URL with no
+    password picked up a developer's real DATABASE_PASSWORD_FILE from
+    backend/.env and crashed trying to read it, and calling alembic() with
+    no schema kwarg silently resolved to whatever DATABASE_SCHEMA happened
+    to be sitting in that file -- identical mechanism to
+    TestAlembicSubprocessEnvDoesNotFallBackToDotenv in test_db_config.py,
+    just at a different call site."""
+
+    @staticmethod
+    def _settings_read_back_through(monkeypatch, env: dict, env_file) -> "object":
+        """Reconstruct Settings the way the Alembic subprocess would: fresh
+        process, same child env, same env_file on disk."""
+        from pydantic_settings import BaseSettings, SettingsConfigDict
+
+        class _ChildSettings(BaseSettings):
+            model_config = SettingsConfigDict(env_file=str(env_file), extra="ignore")
+
+            database_schema: str | None = None
+            database_password_file: str | None = None
+
+        monkeypatch.setattr(os, "environ", env)
+        return _ChildSettings()
+
+    def test_schema_does_not_leak_back_from_dotenv(self, monkeypatch, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_SCHEMA=stale-dotenv-schema\n")
+
+        captured = TestAlembicHelperEnvironmentIsSanitized._capture_env(monkeypatch)
+        alembic("postgresql+psycopg2://u:p@host/db", "upgrade", "head")  # schema=None
+
+        child = self._settings_read_back_through(monkeypatch, captured["env"], env_file)
+        assert not child.database_schema, (
+            "the subprocess's own Settings() fell back to backend/.env's "
+            f"stale DATABASE_SCHEMA despite alembic() being called with no "
+            f"schema: {child.database_schema!r}"
+        )
+
+    def test_password_file_does_not_leak_back_from_dotenv(self, monkeypatch, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("DATABASE_PASSWORD_FILE=/from/dotenv\n")
+
+        captured = TestAlembicHelperEnvironmentIsSanitized._capture_env(monkeypatch)
+        # No password in the URL -- mirrors a postgres_url fixture/URL that
+        # carries no credentials of its own.
+        alembic("postgresql+psycopg2://host/db", "upgrade", "head")
+
+        child = self._settings_read_back_through(monkeypatch, captured["env"], env_file)
+        assert not child.database_password_file, (
+            "the subprocess's own Settings() fell back to backend/.env's "
+            "stale DATABASE_PASSWORD_FILE despite the URL carrying no "
+            f"password: {child.database_password_file!r}"
+        )
 
 
 # Single-column FK constraints, joined via pg_class/pg_namespace.
@@ -372,6 +493,16 @@ class TestCliMigrationCreatesTheSchema:
     def test_cli_invocation_with_an_existing_schema_needs_no_ddl(
         self, postgres_url
     ):
+        """A returncode of 0 is not enough on its own: ensure_schema_sync()'s
+        schema-already-exists branch used to leave its SELECT's autobegun
+        transaction open, which context.configure() then treated as
+        externally managed and never committed — so the migration DDL ran,
+        Alembic exited 0, and the connection close at the end of
+        run_migrations_online() silently rolled the whole thing back anyway.
+        Confirmed live: this exact scenario (upgrade against a premade
+        schema) left alembic_version missing afterwards before the fix,
+        despite returncode == 0.
+        """
         engine = sa.create_engine(postgres_url)
         try:
             with engine.begin() as conn:
@@ -381,6 +512,137 @@ class TestCliMigrationCreatesTheSchema:
 
         r = alembic(postgres_url, "upgrade", "head", schema="premade_cli_schema")
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url)
+        try:
+            with engine.connect() as conn:
+                version = conn.execute(sa.text(
+                    'SELECT version_num FROM "premade_cli_schema".alembic_version'
+                )).scalar()
+        finally:
+            engine.dispose()
+        assert version == HEAD_REVISION, (
+            f"alembic_version in premade_cli_schema was {version!r}, not "
+            f"{HEAD_REVISION!r} — the migration reported success but was "
+            "silently rolled back"
+        )
+
+
+class TestOfflineSqlSchemaPreamble:
+    """`alembic upgrade --sql` with DATABASE_SCHEMA must emit a self-consistent
+    script: unlike the online path, offline mode never opens a connection, so
+    it can call neither ensure_schema_sync() nor rely on a connection-level
+    search_path — without an explicit preamble the generated script created
+    every table in whatever schema the executor's session defaulted to
+    (public), while only the alembic_version CREATE TABLE was schema-qualified.
+
+    Only generated up to BASE_REVISION: HEAD_REVISION reflects an existing
+    table via `autoload_with=bind` (035924a7a885_user_fk_cascades.py), which
+    needs a real connection to introspect and always fails against Alembic's
+    offline MockConnection — a separate, pre-existing limitation of offline
+    mode unrelated to schema/search_path handling.
+    """
+
+    def test_generated_sql_contains_schema_and_search_path_preamble(
+        self, postgres_url
+    ):
+        r = alembic(
+            postgres_url,
+            "upgrade",
+            f"base:{BASE_REVISION}",
+            "--sql",
+            schema="offline_preamble_schema",
+        )
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert "CREATE SCHEMA" in r.stdout
+        assert 'SET search_path TO "offline_preamble_schema"' in r.stdout
+
+        # The preamble must precede the schema-qualified alembic_version
+        # table, or that CREATE TABLE fails outright against a fresh database.
+        assert r.stdout.index("SET search_path") < r.stdout.index(
+            "CREATE TABLE offline_preamble_schema.alembic_version"
+        )
+
+    def test_generated_sql_applied_lands_every_table_in_the_schema(
+        self, postgres_url
+    ):
+        r = alembic(
+            postgres_url,
+            "upgrade",
+            f"base:{BASE_REVISION}",
+            "--sql",
+            schema="offline_preamble_schema",
+        )
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.connection.cursor().execute(r.stdout)
+
+                schema_exists = conn.execute(sa.text(
+                    "SELECT 1 FROM information_schema.schemata "
+                    "WHERE schema_name = 'offline_preamble_schema'"
+                )).scalar()
+                assert schema_exists == 1
+
+                tables = set(conn.execute(sa.text(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = "
+                    "'offline_preamble_schema'"
+                )).scalars().all())
+                assert {"alembic_version", "users", "hosts", "alerts"} <= tables
+
+                public_tables = set(conn.execute(sa.text(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                )).scalars().all())
+                assert not ({"users", "hosts", "alerts"} & public_tables)
+        finally:
+            engine.dispose()
+
+    def test_generated_sql_has_no_preamble_without_a_configured_schema(
+        self, postgres_url
+    ):
+        r = alembic(postgres_url, "upgrade", f"base:{BASE_REVISION}", "--sql")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert "CREATE SCHEMA" not in r.stdout
+        assert "SET search_path" not in r.stdout
+        assert "CREATE TABLE alembic_version" in r.stdout
+
+    def test_schema_name_containing_dollar_dollar_is_handled_safely(
+        self, postgres_url
+    ):
+        """A fixed `$$` dollar-quote tag around the preamble's DO block is
+        unsafe: Postgres dollar-quoting has no escape mechanism and closes on
+        the first literal occurrence of the tag, ignoring quoting context —
+        so a schema name containing "$$" (a valid, if unusual, PostgreSQL
+        identifier once double-quoted) truncates the DO block early and
+        leaves a dangling SQL fragment. DATABASE_SCHEMA has no character
+        restriction, so this must be handled, not merely avoided by
+        convention.
+        """
+        schema = "a$$b"
+        r = alembic(
+            postgres_url, "upgrade", f"base:{BASE_REVISION}", "--sql", schema=schema
+        )
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.connection.cursor().execute(r.stdout)
+
+                exists = conn.execute(sa.text(
+                    "SELECT 1 FROM information_schema.schemata "
+                    "WHERE schema_name = :schema"
+                ), {"schema": schema}).scalar()
+                assert exists == 1
+
+                tables = set(conn.execute(sa.text(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = :schema"
+                ), {"schema": schema}).scalars().all())
+                assert "alembic_version" in tables
+        finally:
+            engine.dispose()
 
 
 class TestDowngradeRepairsOrphanedAudit:

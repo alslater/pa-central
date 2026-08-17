@@ -175,7 +175,11 @@ docker compose up -d
 
 # Run with PostgreSQL
 POSTGRES_PASSWORD=secret \
-DATABASE_URL=postgresql+asyncpg://pa_central:secret@postgres/pa_central \
+DATABASE_TYPE=postgresql \
+DATABASE_HOST=postgres \
+DATABASE_NAME=pa_central \
+DATABASE_USER=pa_central \
+DATABASE_PASSWORD=secret \
 docker compose --profile pg up -d
 ```
 
@@ -188,6 +192,7 @@ docker compose --profile pg up -d
 | None (in-memory SQLite) | Core API tests | No setup needed |
 | Redis or Valkey on `localhost:6379` | Concurrency / locking tests | Either is compatible |
 | LocalStack on `localhost:4566` | AWS service tests (Secrets Manager, ECS) | Managed automatically — see below |
+| PostgreSQL on `localhost:55432` | Migration and dialect-specific tests | Managed automatically via Docker — see below |
 
 ### LocalStack
 
@@ -197,6 +202,37 @@ LocalStack must be installed:
 
 ```bash
 pip install localstack
+```
+
+### PostgreSQL
+
+The suite runs on SQLite, but production runs on PostgreSQL, and some behaviour differs between them — `batch_alter_table` rebuilds a table on SQLite while emitting `ALTER TABLE` on PostgreSQL, and SQLite ignores foreign-key actions unless `PRAGMA foreign_keys` is on. `tests/test_postgres_migrations.py` and `tests/test_postgres_behaviour.py` cover those paths against a real server.
+
+These tests are **skipped automatically** when no PostgreSQL is available, so the suite stays green on a machine without Docker. Once a server is provided, they run — a misconfigured `PA_TEST_POSTGRES_URL` fails loudly rather than skipping, so CI cannot pass by quietly not running them.
+
+Nothing to set up if Docker is running: the fixture starts `postgres:16-alpine` on port `55432`, creates a throwaway database per test, and removes the container when the session ends. A container it finds already running is left alone.
+
+To use an existing server instead of Docker, set `PA_TEST_POSTGRES_URL`:
+
+```bash
+# Either driver works — the URL is normalised internally
+export PA_TEST_POSTGRES_URL="postgresql+psycopg2://postgres:secret@localhost:5432/postgres"
+export PA_TEST_POSTGRES_URL="postgresql+asyncpg://postgres:secret@db.internal:5432/postgres"
+
+# Connection options are preserved and translated between drivers
+export PA_TEST_POSTGRES_URL="postgresql+psycopg2://postgres@db.internal:5432/postgres?sslmode=require"
+```
+
+Point it at the **maintenance database** (usually `postgres`); the fixture creates and drops its own per-test databases, so the account needs `CREATEDB`. Some tests in `test_postgres_behaviour.py` also create and drop throwaway login roles (e.g. `lowpriv_lock_probe`) to exercise permission-denied paths, which needs `CREATEROLE` as well — `CREATEDB` alone does not grant it. Setting it to a non-PostgreSQL URL fails immediately with a clear error rather than skipping.
+
+> **Client certificates:** `DATABASE_SSLCERT` and `DATABASE_SSLKEY` work on both
+> drivers. The async driver receives them as an `ssl.SSLContext` and the sync
+> driver as libpq file paths, both built from the same settings.
+
+If both are unavailable the tests skip with:
+
+```
+Docker not available and PA_TEST_POSTGRES_URL unset — skipping PostgreSQL integration tests
 ```
 
 ### Redis / Valkey
@@ -230,14 +266,24 @@ uv run pytest tests/test_ingest.py -v
 
 ## Switching databases
 
-Change `DATABASE_URL` in `.env` or the Docker environment:
+Change `DATABASE_TYPE` and the related `DATABASE_*` variables in `.env` or the Docker environment:
 
-```env
-# SQLite (default — good for small fleets)
-DATABASE_URL=sqlite+aiosqlite:///./data/pa_central.db
+```bash
+# SQLite (default) — DATABASE_NAME is optional; omitted, it resolves to
+# backend/pa_central.db. Docker Compose overrides it to ./data/pa_central.db,
+# a path inside the container that its pa_central_data volume persists.
+DATABASE_TYPE=sqlite
+DATABASE_NAME=./data/pa_central.db
 
-# PostgreSQL (recommended for production)
-DATABASE_URL=postgresql+asyncpg://user:password@localhost/pa_central
+# PostgreSQL
+DATABASE_TYPE=postgresql
+DATABASE_HOST=localhost
+DATABASE_PORT=5432
+DATABASE_NAME=pa_central
+DATABASE_USER=pa_central
+DATABASE_PASSWORD=secret
+DATABASE_SSLMODE=verify-full
+DATABASE_SSLROOTCERT=/etc/ssl/certs/rds-ca.pem   # e.g. Aurora
 ```
 
 For PostgreSQL: `asyncpg` is already included in the Docker image (via `uv sync --no-dev --frozen`).
@@ -255,7 +301,19 @@ For PostgreSQL: `asyncpg` is already included in the Docker image (via `uv sync 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SECRET_KEY` | `changeme-...` | JWT signing key — **change this in production** |
-| `DATABASE_URL` | `sqlite+aiosqlite:///./data/pa_central.db` | Database connection string |
+| `DATABASE_TYPE` | `sqlite` | `sqlite` or `postgresql` |
+| `DATABASE_NAME` | `<repo>/backend/pa_central.db` running the app directly; `./data/pa_central.db` under Docker Compose (see `docker-compose.yml`) | SQLite file path, or PostgreSQL database name |
+| `DATABASE_HOST` | *(unset)* | PostgreSQL host (unused for SQLite) |
+| `DATABASE_PORT` | `5432` | PostgreSQL port |
+| `DATABASE_USER` | *(unset)* | PostgreSQL user |
+| `DATABASE_PASSWORD` | *(unset)* | PostgreSQL password |
+| `DATABASE_PASSWORD_FILE` | *(unset)* | Path to a file containing the PostgreSQL password, as an alternative to `DATABASE_PASSWORD` |
+| `DATABASE_SCHEMA` | *(unset)* | PostgreSQL schema — defaults to the connection's own default (usually `public`) if unset |
+| `DATABASE_SSLMODE` | `prefer` | `disable`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` |
+| `DATABASE_SSLROOTCERT` | *(unset)* | Path to a CA certificate for verifying the PostgreSQL server. Required when `DATABASE_SSLMODE=verify-ca` (libpq refuses to pair verify-ca with the system trust store). If unset under `verify-full`, falls back to the OS trust store on both drivers |
+| `DATABASE_SSLCERT` | *(unset)* | Path to a client certificate for PostgreSQL mTLS |
+| `DATABASE_SSLKEY` | *(unset)* | Path to a client key for PostgreSQL mTLS |
+| `MIGRATION_LOCK_TIMEOUT` | `300` | Seconds to wait for the PostgreSQL migration advisory lock at startup before failing (unused on SQLite) |
 | `BOOTSTRAP_ADMIN_PASSWORD` | *(unset)* | Creates `admin@localhost` on first startup if set |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `480` | Session duration (8 hours) |
 | `DEBUG` | `false` | Enables SQLAlchemy query logging **and disables TOTP entirely** — tokens are issued immediately on `POST /auth/login` with no second factor. Never set this in production. |

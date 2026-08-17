@@ -883,6 +883,7 @@ dependencies = [
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-settings" },
     { name = "pyotp" },
+    { name = "python-dotenv" },
     { name = "python-jose", extra = ["cryptography"] },
     { name = "python-multipart" },
     { name = "redis" },
@@ -898,8 +899,10 @@ dev = [
     { name = "docker" },
     { name = "freezegun" },
     { name = "httpx" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -907,7 +910,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "alembic", specifier = ">=1.13.0" },
-    { name = "asyncpg", specifier = ">=0.30.0" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
@@ -915,14 +918,15 @@ requires-dist = [
     { name = "greenlet", specifier = ">=3.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "package-alert", specifier = "==0.6.5" },
-    { name = "psycopg2-binary", specifier = ">=2.9.0" },
+    { name = "psycopg2-binary", specifier = ">=2.9.8" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.2.0" },
     { name = "pyotp", specifier = ">=2.9.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-jose", extras = ["cryptography"], specifier = ">=3.3.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "redis", specifier = ">=8.0.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.18" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
 ]
 
@@ -934,8 +938,10 @@ dev = [
     { name = "docker", specifier = ">=7.0.0" },
     { name = "freezegun", specifier = ">=1.5.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "packaging", specifier = ">=22" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "ruff", specifier = ">=0.4.0" },
 ]
 

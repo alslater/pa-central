@@ -18,6 +18,7 @@ from collections.abc import Iterator
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.core.db_config import mask
 
@@ -29,6 +30,20 @@ PG_ADMIN_DB = "postgres"
 
 # Set PA_TEST_POSTGRES_URL to point at an existing server instead of Docker.
 PG_URL_ENV = "PA_TEST_POSTGRES_URL"
+
+# Query keys this module knows how to translate into their DATABASE_*
+# equivalent — the same libpq TLS vocabulary app.core.db_config uses. Anything
+# else on the URL (e.g. ?connect_timeout=5) has no DATABASE_* equivalent, so
+# silently keeping only the recognized keys would connect with weaker/
+# different settings than the caller asked for. Shared with
+# test_postgres_migrations.py's alembic() helper, which needs the identical
+# translation.
+_SUPPORTED_QUERY_OPTIONS = {
+    "sslmode": "DATABASE_SSLMODE",
+    "sslrootcert": "DATABASE_SSLROOTCERT",
+    "sslcert": "DATABASE_SSLCERT",
+    "sslkey": "DATABASE_SSLKEY",
+}
 
 
 def _admin_url(host_url: str, database: str) -> str:
@@ -134,6 +149,19 @@ def _as_sync_url(url: str) -> str:
     )
 
 
+# asyncpg.connect() has no sslrootcert/sslcert/sslkey keyword argument at
+# all — it takes TLS material only as a pre-built ssl.SSLContext, never file
+# paths (confirmed against asyncpg.connect()'s own signature). SQLAlchemy
+# expands unrecognized URL query keys into DBAPI connect() kwargs verbatim,
+# so left unrenamed like sslmode is, these would reach asyncpg.connect() and
+# fail with `TypeError: connect() got an unexpected keyword argument
+# 'sslrootcert'` — far from any indication of what actually went wrong.
+# Rejected here instead: callers needing an async mTLS engine must go through
+# make_async_engine()/async_engine_args() below, which move the certificate
+# material into an SSLContext the way asyncpg requires.
+_ASYNCPG_UNSUPPORTED_QUERY_OPTIONS = frozenset({"sslrootcert", "sslcert", "sslkey"})
+
+
 def as_async_url(url: str) -> str:
     """Swap a test URL's driver to asyncpg.
 
@@ -144,16 +172,116 @@ def as_async_url(url: str) -> str:
     the way asyncpg.connect() expects it; left unrenamed, it raises
     `TypeError: connect() got an unexpected keyword argument 'sslmode'`.
 
-    Client certificates are handled correctly on both drivers by
-    app.core.db_config (async_connect_args() builds a real ssl.SSLContext from
-    DATABASE_SSLCERT/DATABASE_SSLKEY/DATABASE_SSLROOTCERT); this conversion
-    helper does not need to carry that limitation forward.
+    Client certificates (`sslrootcert`/`sslcert`/`sslkey`) cannot be carried
+    the same way — asyncpg has no keyword argument for them at all, renamed
+    or not — so a URL containing any of them is rejected outright rather than
+    silently produced and left to fail later inside asyncpg.connect(). Use
+    make_async_engine() (or async_engine_args()) instead, which carries them
+    as an SSLContext.
+
+    Every other query key is rejected too, not passed through: SQLAlchemy
+    forwards an unrecognized key straight to asyncpg.connect() as a keyword
+    argument, and asyncpg's own connect() signature accepts only a fixed,
+    narrow set — a perfectly valid libpq/psycopg2 option like
+    `application_name` has no matching top-level parameter there at all (it
+    belongs inside `server_settings`, a dict a URL query cannot express), so
+    passing it through produces a URL that looks fine and fails only once a
+    real connection is attempted, with an unrelated `TypeError`. `sslmode` is
+    the one key this module knows how to translate; anything else is refused
+    at the point the async URL is built.
     """
     _require_postgres(url)
-    parsed = _rename_query_keys(make_url(url), _TO_ASYNCPG_QUERY_ALIAS)
+    parsed = make_url(url)
+    unsupported = _ASYNCPG_UNSUPPORTED_QUERY_OPTIONS & parsed.query.keys()
+    if unsupported:
+        raise ValueError(
+            f"as_async_url() cannot carry {sorted(unsupported)} — asyncpg has "
+            "no keyword argument for these; it takes TLS material only as a "
+            "pre-built ssl.SSLContext. Build the async engine via "
+            "make_async_engine() (or async_engine_args()) instead: "
+            f"{mask(url)}"
+        )
+    # Keys this helper accepts as-is: sslmode is renamed below, and ssl is its
+    # already-asyncpg-spelled target — both may be present at once (see
+    # _rename_query_keys' own conflicting-value guard).
+    recognized = _TO_ASYNCPG_QUERY_ALIAS.keys() | _TO_ASYNCPG_QUERY_ALIAS.values()
+    unrecognized = parsed.query.keys() - recognized
+    if unrecognized:
+        raise ValueError(
+            f"as_async_url() does not recognize {sorted(unrecognized)} — "
+            "asyncpg.connect() accepts only a fixed set of keyword arguments, "
+            "and an unrecognized query key would be forwarded to it verbatim "
+            "and fail with an unrelated TypeError at connection time. Remove "
+            f"it from the URL, or extend this helper to translate it: {mask(url)}"
+        )
+    parsed = _rename_query_keys(parsed, _TO_ASYNCPG_QUERY_ALIAS)
     return parsed.set(drivername="postgresql+asyncpg").render_as_string(
         hide_password=False
     )
+
+
+def async_engine_args(url: str) -> tuple[str, dict]:
+    """An asyncpg URL and matching connect_args for a test URL, TLS included.
+
+    as_async_url() must reject sslrootcert/sslcert/sslkey — asyncpg takes TLS
+    material only as a pre-built ssl.SSLContext, which a URL cannot express —
+    so an externally supplied PA_TEST_POSTGRES_URL using certificate
+    authentication (README.md documents the query form) could never reach the
+    async driver through a URL alone. This translates the URL's query options
+    into a Settings snapshot and builds the context through the production
+    path (app.core.db_config.async_connect_args), returning a query-free
+    asyncpg URL beside the connect_args that now carry everything the query
+    used to say.
+    """
+    from app.core.config import Settings
+    from app.core.db_config import async_connect_args
+
+    _require_postgres(url)
+    parsed = make_url(url)
+    query = dict(parsed.query)
+    unsupported = query.keys() - _SUPPORTED_QUERY_OPTIONS.keys()
+    if unsupported:
+        raise ValueError(
+            f"async_engine_args() cannot translate query option(s) "
+            f"{sorted(unsupported)} on {mask(url)} into connect_args — "
+            "add support or strip them from the URL"
+        )
+
+    def _opt(key: str) -> str | None:
+        value = query.get(key)
+        return None if value is None else str(value)
+
+    cfg = Settings(
+        _env_file=None,
+        debug=True,
+        database_type="postgresql",
+        database_host=parsed.host,
+        database_port=parsed.port or 5432,
+        database_name=parsed.database,
+        database_user=parsed.username,
+        database_password=parsed.password,
+        database_sslmode=_opt("sslmode") or "prefer",
+        database_sslrootcert=_opt("sslrootcert"),
+        database_sslcert=_opt("sslcert"),
+        database_sslkey=_opt("sslkey"),
+    )
+    # Every surviving query key was just validated as a TLS option and is now
+    # expressed in connect_args, so the URL carries none of them — asyncpg
+    # would reject leftovers as unknown connect() kwargs.
+    clean = parsed.set(drivername="postgresql+asyncpg", query={})
+    return clean.render_as_string(hide_password=False), async_connect_args(cfg)
+
+
+def make_async_engine(url: str, **kwargs) -> AsyncEngine:
+    """create_async_engine() for a test URL, TLS query options honored.
+
+    A caller-supplied ``connect_args`` wins outright: callers that already
+    built their own (apply_postgres_settings() + async_connect_args()) carry
+    the URL's TLS material there, and merging would second-guess them.
+    """
+    engine_url, connect_args = async_engine_args(url)
+    kwargs.setdefault("connect_args", connect_args)
+    return create_async_engine(engine_url, **kwargs)
 
 
 def _server_ready(url: str) -> bool:
@@ -307,12 +435,32 @@ def apply_postgres_settings(monkeypatch, url: str) -> None:
     The fixtures still yield a URL because 60 test call sites take one, and
     decomposing it here keeps that churn out of the tests. This is the only
     place a URL is parsed — production code builds them and never parses.
+
+    An externally supplied PA_TEST_POSTGRES_URL may carry TLS query options
+    (README.md documents ``?sslmode=require``, and client-certificate URLs add
+    sslrootcert/sslcert/sslkey) — those must reach both the patched Settings
+    object and the Alembic subprocess environment, not be silently replaced
+    with sslmode="prefer" and no certificate material.
     """
     import sqlalchemy as sa
 
     from app.core.config import settings as app_settings
 
     parsed = sa.engine.make_url(url)
+    query = dict(parsed.query)
+    unsupported = query.keys() - _SUPPORTED_QUERY_OPTIONS.keys()
+    if unsupported:
+        raise ValueError(
+            f"apply_postgres_settings() cannot translate query option(s) "
+            f"{sorted(unsupported)} on {_safe_url(url)} into DATABASE_* "
+            "settings — add support or strip them from the URL"
+        )
+
+    sslmode = str(query.get("sslmode", "prefer"))
+    sslrootcert = query.get("sslrootcert")
+    sslcert = query.get("sslcert")
+    sslkey = query.get("sslkey")
+
     values = {
         "database_type": "postgresql",
         "database_host": parsed.host,
@@ -322,10 +470,10 @@ def apply_postgres_settings(monkeypatch, url: str) -> None:
         "database_password": parsed.password,
         "database_password_file": None,
         "database_schema": None,
-        "database_sslmode": "prefer",
-        "database_sslrootcert": None,
-        "database_sslcert": None,
-        "database_sslkey": None,
+        "database_sslmode": sslmode,
+        "database_sslrootcert": sslrootcert,
+        "database_sslcert": sslcert,
+        "database_sslkey": sslkey,
     }
     for attr, value in values.items():
         monkeypatch.setattr(app_settings, attr, value)
@@ -343,3 +491,13 @@ def apply_postgres_settings(monkeypatch, url: str) -> None:
     monkeypatch.delenv("DATABASE_PASSWORD_FILE", raising=False)
     monkeypatch.delenv("DATABASE_SCHEMA", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_SSLMODE", sslmode)
+    for key, env_name in (
+        ("sslrootcert", "DATABASE_SSLROOTCERT"),
+        ("sslcert", "DATABASE_SSLCERT"),
+        ("sslkey", "DATABASE_SSLKEY"),
+    ):
+        if key in query:
+            monkeypatch.setenv(env_name, str(query[key]))
+        else:
+            monkeypatch.delenv(env_name, raising=False)

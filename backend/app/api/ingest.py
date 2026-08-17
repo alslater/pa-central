@@ -175,7 +175,7 @@ async def get_cooldown_entries(
     return result.scalars().all()
 
 
-async def _send_result_email(result_id: int, database_url: str) -> None:
+async def _send_result_email(result_id: int) -> None:
     """Background task: load result and dispatch appropriate email notification."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import (
@@ -185,6 +185,7 @@ async def _send_result_email(result_id: int, database_url: str) -> None:
     )
 
     from app.core.config import settings as app_settings
+    from app.core.db_config import async_connect_args, async_url
     from app.core.email import (
         EmailService,
         SmtpConfig,
@@ -204,85 +205,89 @@ async def _send_result_email(result_id: int, database_url: str) -> None:
         UserRole,
     )
 
-    engine = create_async_engine(database_url, pool_pre_ping=True)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as session:
-        result = await session.get(RepoScanResult, result_id)
-        if not result:
-            return
-        scan = await session.get(RepoScan, result.repo_scan_id)
-        if not scan:
-            return
+    engine = create_async_engine(
+        async_url(), pool_pre_ping=True, connect_args=async_connect_args()
+    )
+    try:
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as session:
+            result = await session.get(RepoScanResult, result_id)
+            if not result:
+                return
+            scan = await session.get(RepoScan, result.repo_scan_id)
+            if not scan:
+                return
 
-        # Load SMTP config from system settings
-        sm_result = await session.execute(select(SystemSetting))
-        settings_map: dict[str, str] = {}
-        for s in sm_result.scalars().all():
-            if s.value is None:
-                settings_map[s.key] = ""
-            elif s.value_type == SettingValueType.secret:
-                try:
-                    settings_map[s.key] = decrypt_value(s.value, app_settings.settings_encryption_key)
-                except Exception:  # noqa: BLE001
+            # Load SMTP config from system settings
+            sm_result = await session.execute(select(SystemSetting))
+            settings_map: dict[str, str] = {}
+            for s in sm_result.scalars().all():
+                if s.value is None:
                     settings_map[s.key] = ""
-            else:
-                settings_map[s.key] = s.value
+                elif s.value_type == SettingValueType.secret:
+                    try:
+                        settings_map[s.key] = decrypt_value(s.value, app_settings.settings_encryption_key)
+                    except Exception:  # noqa: BLE001
+                        settings_map[s.key] = ""
+                else:
+                    settings_map[s.key] = s.value
 
-        smtp_host = settings_map.get("smtp_host")
-        if not smtp_host:
-            return  # SMTP not configured
+            smtp_host = settings_map.get("smtp_host")
+            if not smtp_host:
+                return  # SMTP not configured
 
-        smtp_cfg = SmtpConfig(
-            host=smtp_host,
-            port=int(settings_map.get("smtp_port") or "587"),
-            username=settings_map.get("smtp_username") or None,
-            password=settings_map.get("smtp_password") or None,
-            from_addr=settings_map.get("smtp_from", "pa-central@localhost"),
-            tls_mode=settings_map.get("smtp_tls_mode", "starttls"),
-        )
-        svc = EmailService(smtp_cfg)
+            smtp_cfg = SmtpConfig(
+                host=smtp_host,
+                port=int(settings_map.get("smtp_port") or "587"),
+                username=settings_map.get("smtp_username") or None,
+                password=settings_map.get("smtp_password") or None,
+                from_addr=settings_map.get("smtp_from", "pa-central@localhost"),
+                tls_mode=settings_map.get("smtp_tls_mode", "starttls"),
+            )
+            svc = EmailService(smtp_cfg)
 
-        admins = await session.execute(
-            select(User).where(User.role == UserRole.admin, User.is_active.is_(True))
-        )
-        admin_emails = [u.email for u in admins.scalars().all()]
-        if not admin_emails:
-            return
+            admins = await session.execute(
+                select(User).where(User.role == UserRole.admin, User.is_active.is_(True))
+            )
+            admin_emails = [u.email for u in admins.scalars().all()]
+            if not admin_emails:
+                return
 
-        valkey = None
-        if app_settings.valkey_url:
-            valkey = get_valkey(app_settings.valkey_url)
+            valkey = None
+            if app_settings.valkey_url:
+                valkey = get_valkey(app_settings.valkey_url)
 
-        lock_key = f"repo_scan_result:{result_id}:notify"
-        try:
-            if result.status == RepoScanStatus.failed:
-                msg = build_failure_email(
-                    repo_name=scan.name, repo_url=scan.url, branch=scan.branch,
-                    pa_version=result.pa_version, error_message=result.error_message or "",
-                    ecs_task_arn=result.ecs_task_arn,
-                    recipients=admin_emails, from_addr=smtp_cfg.from_addr,
-                )
-                sent = await svc.send_with_dedup(msg, admin_emails, valkey, lock_key)
-            else:
-                findings = result.findings or []
-                filtered = filter_findings_by_severity(findings, scan.min_notify_severity)
-                if not filtered:
-                    return
-                all_recipients = list(set(admin_emails + (scan.notify_recipients or [])))
-                msg = build_findings_email(
-                    repo_name=scan.name, branch=scan.branch, pa_version=result.pa_version or "",
-                    findings=findings, min_severity=scan.min_notify_severity,
-                    recipients=all_recipients, from_addr=smtp_cfg.from_addr,
-                )
-                sent = await svc.send_with_dedup(msg, all_recipients, valkey, lock_key)
+            lock_key = f"repo_scan_result:{result_id}:notify"
+            try:
+                if result.status == RepoScanStatus.failed:
+                    msg = build_failure_email(
+                        repo_name=scan.name, repo_url=scan.url, branch=scan.branch,
+                        pa_version=result.pa_version, error_message=result.error_message or "",
+                        ecs_task_arn=result.ecs_task_arn,
+                        recipients=admin_emails, from_addr=smtp_cfg.from_addr,
+                    )
+                    sent = await svc.send_with_dedup(msg, admin_emails, valkey, lock_key)
+                else:
+                    findings = result.findings or []
+                    filtered = filter_findings_by_severity(findings, scan.min_notify_severity)
+                    if not filtered:
+                        return
+                    all_recipients = list(set(admin_emails + (scan.notify_recipients or [])))
+                    msg = build_findings_email(
+                        repo_name=scan.name, branch=scan.branch, pa_version=result.pa_version or "",
+                        findings=findings, min_severity=scan.min_notify_severity,
+                        recipients=all_recipients, from_addr=smtp_cfg.from_addr,
+                    )
+                    sent = await svc.send_with_dedup(msg, all_recipients, valkey, lock_key)
 
-            if sent:
-                result.notified = True
-                await session.commit()
-        finally:
-            if valkey:
-                await valkey.aclose()
-    await engine.dispose()
+                if sent:
+                    result.notified = True
+                    await session.commit()
+            finally:
+                if valkey:
+                    await valkey.aclose()
+    finally:
+        await engine.dispose()
 
 
 @router.post("/repo-scan-result", status_code=204)
@@ -328,5 +333,5 @@ async def ingest_repo_scan_result(
     )
     if needs_email:
         background_tasks.add_task(
-            _send_result_email, result.id, app_settings.database_url
+            _send_result_email, result.id
         )

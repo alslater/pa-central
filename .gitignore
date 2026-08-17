@@ -62,6 +62,7 @@ Thumbs.db
 backend/.python-version
 Pipfile
 superpowers/
+.superpowers/
 
 .agents/
 backend/backfill_findings.py

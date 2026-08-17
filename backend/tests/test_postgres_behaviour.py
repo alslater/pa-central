@@ -13,13 +13,14 @@ either cannot run on SQLite at all, or that SQLite implements differently:
 Skipped automatically when neither Docker nor PA_TEST_POSTGRES_URL is available.
 """
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from tests.conftest_postgres import as_async_url as async_url
+from tests.conftest_postgres import make_async_engine
 from tests.test_postgres_migrations import HEAD_REVISION, alembic
 
 # Ceiling for the concurrent-migration test. Measured at ~4s locally; generous
@@ -33,6 +34,70 @@ def migrated_url(postgres_url: str) -> str:
     r = alembic(postgres_url, "upgrade", "head")
     assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
     return postgres_url
+
+
+# ── apply_postgres_settings TLS translation ──────────────────────────────────
+# No postgres_url fixture here: these exercise pure URL-to-settings/env
+# translation and must run even without Docker or PA_TEST_POSTGRES_URL.
+
+class TestApplyPostgresSettingsHonorsTlsQueryOptions:
+    """apply_postgres_settings() must translate an externally supplied
+    PA_TEST_POSTGRES_URL's TLS query options into both the patched Settings
+    and the subprocess environment, not hard-code sslmode="prefer" and drop
+    the rest — the same query-discarding bug class alembic() had (see
+    TestAlembicHelperEnvironmentIsSanitized in test_postgres_migrations.py).
+    """
+
+    def test_sslmode_query_option_is_honored(self, monkeypatch):
+        from app.core.config import settings as app_settings
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(
+            monkeypatch, "postgresql+psycopg2://u:p@host/db?sslmode=verify-full"
+        )
+        assert app_settings.database_sslmode == "verify-full"
+        assert os.environ["DATABASE_SSLMODE"] == "verify-full"
+
+    def test_tls_material_paths_reach_settings_and_environment(self, monkeypatch):
+        from app.core.config import settings as app_settings
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(
+            monkeypatch,
+            "postgresql+psycopg2://u:p@host/db"
+            "?sslmode=verify-full&sslrootcert=/ca.pem&sslcert=/cert.pem&sslkey=/key.pem",
+        )
+        assert app_settings.database_sslrootcert == "/ca.pem"
+        assert app_settings.database_sslcert == "/cert.pem"
+        assert app_settings.database_sslkey == "/key.pem"
+        assert os.environ["DATABASE_SSLROOTCERT"] == "/ca.pem"
+        assert os.environ["DATABASE_SSLCERT"] == "/cert.pem"
+        assert os.environ["DATABASE_SSLKEY"] == "/key.pem"
+
+    def test_stale_ambient_tls_env_vars_are_cleared_without_query_options(
+        self, monkeypatch
+    ):
+        """A URL with no TLS query options must not leak a previous test's
+        (or the developer's own .env) DATABASE_SSLROOTCERT/CERT/KEY."""
+        from tests.conftest_postgres import apply_postgres_settings
+
+        monkeypatch.setenv("DATABASE_SSLROOTCERT", "/stale/ca.pem")
+        monkeypatch.setenv("DATABASE_SSLCERT", "/stale/cert.pem")
+        monkeypatch.setenv("DATABASE_SSLKEY", "/stale/key.pem")
+
+        apply_postgres_settings(monkeypatch, "postgresql+psycopg2://u:p@host/db")
+
+        assert os.environ["DATABASE_SSLMODE"] == "prefer"
+        for name in ("DATABASE_SSLROOTCERT", "DATABASE_SSLCERT", "DATABASE_SSLKEY"):
+            assert name not in os.environ, f"{name} leaked a stale ambient value"
+
+    def test_unsupported_query_option_is_rejected(self, monkeypatch):
+        from tests.conftest_postgres import apply_postgres_settings
+
+        with pytest.raises(ValueError, match="connect_timeout"):
+            apply_postgres_settings(
+                monkeypatch, "postgresql+psycopg2://u:p@host/db?connect_timeout=5"
+            )
 
 
 # ── Advisory lock ─────────────────────────────────────────────────────────────
@@ -51,7 +116,7 @@ class TestMigrationAdvisoryLock:
         # Imported, not duplicated: a changed lock ID must not leave this test
         # silently probing an unrelated one and passing regardless.
         from app.main import MIGRATION_LOCK_ID as lock_id
-        engine = create_async_engine(async_url(migrated_url))
+        engine = make_async_engine(migrated_url)
         try:
             async with engine.connect() as first:
                 got_first = (await first.execute(
@@ -97,12 +162,11 @@ class TestMigrationAdvisoryLock:
         from tests.conftest_postgres import apply_postgres_settings
 
         apply_postgres_settings(monkeypatch, postgres_url)
-        url = async_url(postgres_url)
         # Short ceiling so the test does not wait the production default.
         monkeypatch.setattr(app_main, "MIGRATION_LOCK_TIMEOUT", 2.0)
 
-        holder = create_async_engine(url)
-        test_engine = create_async_engine(url)
+        holder = make_async_engine(postgres_url)
+        test_engine = make_async_engine(postgres_url)
         monkeypatch.setattr(app_db, "engine", test_engine)
         try:
             # Take the lock on a separate session and never release it.
@@ -134,10 +198,9 @@ class TestMigrationAdvisoryLock:
         #     and for _alembic_upgrade's subprocess, which shells out to
         #     `alembic` and reads the environment, not settings.
         apply_postgres_settings(monkeypatch, postgres_url)
-        url = async_url(postgres_url)
         #  2. the module-level engine, imported inside _run_migrations
         import app.core.database as app_db
-        test_engine = create_async_engine(url)
+        test_engine = make_async_engine(postgres_url)
         monkeypatch.setattr(app_db, "engine", test_engine)
 
         # Bounded: _run_migrations spin-waits on pg_try_advisory_lock with no
@@ -169,7 +232,7 @@ class TestMigrationAdvisoryLock:
         # Exactly one alembic_version row, and it is at head. Checking the count
         # alone would pass if the migrations had silently no-opped and left the
         # database at its base revision — one row, wrong value.
-        check = create_async_engine(url)
+        check = make_async_engine(postgres_url)
         try:
             async with check.connect() as conn:
                 versions = (await conn.execute(
@@ -182,6 +245,121 @@ class TestMigrationAdvisoryLock:
             f"found {versions!r} — more than one row means the lock failed to "
             "serialise; a different value means migrations did not reach head"
         )
+
+    async def test_lock_is_released_if_ensure_schema_raises(
+        self, postgres_url, monkeypatch
+    ):
+        """`_ensure_schema` runs after the lock is acquired but must not be
+        able to leak it.
+
+        `_ensure_schema` sits between the lock-acquisition loop and the
+        try/finally that unlocks — if it raises (its own documented
+        insufficient-privilege path, for one), the exception used to escape
+        `_run_migrations` without ever reaching `pg_advisory_unlock`.
+        Returning the connection to the pool afterwards does not release a
+        Postgres session-level advisory lock — only an explicit unlock or the
+        physical session actually closing does — so a retry that reuses a
+        pooled connection would block on its own orphaned session until
+        MIGRATION_LOCK_TIMEOUT.
+        """
+        import app.core.database as app_db
+        import app.main as app_main
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(monkeypatch, postgres_url)
+        test_engine = make_async_engine(postgres_url)
+        monkeypatch.setattr(app_db, "engine", test_engine)
+
+        async def failing_ensure_schema(_conn):
+            raise RuntimeError("simulated schema creation failure")
+
+        monkeypatch.setattr(app_main, "_ensure_schema", failing_ensure_schema)
+
+        probe = make_async_engine(postgres_url)
+        try:
+            with pytest.raises(RuntimeError, match="simulated schema creation failure"):
+                await app_main._run_migrations()
+
+            async with probe.connect() as conn:
+                got = (await conn.execute(
+                    sa.text("SELECT pg_try_advisory_lock(:id)"),
+                    {"id": app_main.MIGRATION_LOCK_ID},
+                )).scalar()
+                if got:
+                    await conn.execute(
+                        sa.text("SELECT pg_advisory_unlock(:id)"),
+                        {"id": app_main.MIGRATION_LOCK_ID},
+                    )
+            assert got, (
+                "the advisory lock was not released after _ensure_schema "
+                "raised — a retry would block on its own orphaned session "
+                "until MIGRATION_LOCK_TIMEOUT"
+            )
+        finally:
+            await test_engine.dispose()
+            await probe.dispose()
+
+    async def test_lock_is_released_after_a_real_ensure_schema_failure(
+        self, postgres_url, monkeypatch
+    ):
+        """A genuine PostgreSQL error from `_ensure_schema` — not a mocked
+        Python exception — leaves this connection's transaction aborted.
+        Postgres then refuses any further command on that connection,
+        including `pg_advisory_unlock`, until a rollback happens: without one,
+        the unlock itself raises InFailedSqlTransaction, masking the real
+        schema-creation error and leaving the session-level lock held on the
+        pooled connection. `test_lock_is_released_if_ensure_schema_raises`
+        mocks `_ensure_schema` with a plain RuntimeError, which never touches
+        the connection's transaction state and so cannot catch this."""
+        import app.core.database as app_db
+        import app.main as app_main
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(monkeypatch, postgres_url)
+        monkeypatch.setattr(app_main.settings, "database_schema", "denied_schema_lock")
+
+        admin = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with admin.connect() as conn:
+                conn.execute(sa.text("DROP ROLE IF EXISTS lowpriv_lock_probe"))
+                conn.execute(sa.text(
+                    "CREATE ROLE lowpriv_lock_probe LOGIN PASSWORD 'x'"
+                ))
+            parsed = sa.engine.make_url(postgres_url)
+            low = parsed.set(username="lowpriv_lock_probe", password="x")
+            test_engine = make_async_engine(
+                low.render_as_string(hide_password=False)
+            )
+            monkeypatch.setattr(app_db, "engine", test_engine)
+
+            probe = make_async_engine(postgres_url)
+            try:
+                with pytest.raises(RuntimeError, match="denied_schema_lock"):
+                    await app_main._run_migrations()
+
+                async with probe.connect() as conn:
+                    got = (await conn.execute(
+                        sa.text("SELECT pg_try_advisory_lock(:id)"),
+                        {"id": app_main.MIGRATION_LOCK_ID},
+                    )).scalar()
+                    if got:
+                        await conn.execute(
+                            sa.text("SELECT pg_advisory_unlock(:id)"),
+                            {"id": app_main.MIGRATION_LOCK_ID},
+                        )
+                assert got, (
+                    "the advisory lock was not released after a real "
+                    "_ensure_schema failure aborted the connection's "
+                    "transaction — the unlock query itself likely raised "
+                    "InFailedSqlTransaction and was swallowed or masked"
+                )
+            finally:
+                await test_engine.dispose()
+                await probe.dispose()
+        finally:
+            with admin.connect() as conn:
+                conn.execute(sa.text("DROP ROLE IF EXISTS lowpriv_lock_probe"))
+            admin.dispose()
 
     @pytest.mark.parametrize("cancels", [1, 2, 3])
     async def test_cancelling_startup_holds_the_lock_until_alembic_finishes(
@@ -210,8 +388,7 @@ class TestMigrationAdvisoryLock:
         from tests.conftest_postgres import apply_postgres_settings
 
         apply_postgres_settings(monkeypatch, postgres_url)
-        url = async_url(postgres_url)
-        test_engine = create_async_engine(url)
+        test_engine = make_async_engine(postgres_url)
         monkeypatch.setattr(app_db, "engine", test_engine)
 
         started = threading.Event()
@@ -227,7 +404,7 @@ class TestMigrationAdvisoryLock:
 
         monkeypatch.setattr(app_main, "_alembic_upgrade", fake_upgrade)
 
-        probe = create_async_engine(url)
+        probe = make_async_engine(postgres_url)
         try:
             task = asyncio.create_task(app_main._run_migrations())
             # Wait for the migration thread to be genuinely in flight.
@@ -283,6 +460,135 @@ class TestMigrationAdvisoryLock:
             await test_engine.dispose()
             await probe.dispose()
 
+    async def test_cancellation_during_cleanup_still_unlocks(
+        self, postgres_url, monkeypatch
+    ):
+        """A cancellation landing on the finally block's own rollback/unlock
+        awaits — after the migration has already finished and the drain loop
+        has exited — must not skip the unlock and leak the session-level
+        advisory lock on a connection that returns to the pool.
+
+        The migration-in-flight case is already covered by
+        test_cancelling_startup_holds_the_lock_until_alembic_finishes; this
+        covers the narrower, later window the finally block's two awaits
+        (rollback, then unlock) are themselves exposed to once that drain is
+        done.
+        """
+        import app.core.database as app_db
+        import app.main as app_main
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(monkeypatch, postgres_url)
+        test_engine = make_async_engine(postgres_url)
+        monkeypatch.setattr(app_db, "engine", test_engine)
+        # Migration finishes immediately — nothing for the drain loop to wait on.
+        monkeypatch.setattr(app_main, "_alembic_upgrade", lambda _backend_dir: None)
+
+        entered_rollback = asyncio.Event()
+        release_rollback = asyncio.Event()
+        from sqlalchemy.ext.asyncio import AsyncConnection
+        real_rollback = AsyncConnection.rollback
+
+        async def blocking_rollback(self):
+            entered_rollback.set()
+            await release_rollback.wait()
+            await real_rollback(self)
+
+        monkeypatch.setattr(AsyncConnection, "rollback", blocking_rollback)
+
+        probe = make_async_engine(postgres_url)
+        try:
+            task = asyncio.create_task(app_main._run_migrations())
+            await asyncio.wait_for(entered_rollback.wait(), timeout=10)
+
+            # Cancel while execution is inside the finally block's own
+            # rollback() await — after the migration future is already done,
+            # so the earlier drain loop has already exited. A single cancel
+            # is absorbed by the shield-and-drain (identical semantics to the
+            # migration drain above it: Task.cancel() only requests
+            # cancellation once, and a future that completes before the next
+            # cancellation point raises nothing), so _run_migrations returns
+            # normally rather than propagating CancelledError — the point
+            # under test is that the unlock still ran either way.
+            task.cancel()
+            await asyncio.sleep(0.2)
+            release_rollback.set()
+
+            await asyncio.wait_for(task, timeout=10)
+
+            async with probe.connect() as conn:
+                freed = (await conn.execute(
+                    sa.text("SELECT pg_try_advisory_lock(:id)"),
+                    {"id": app_main.MIGRATION_LOCK_ID},
+                )).scalar()
+                if freed:
+                    await conn.execute(
+                        sa.text("SELECT pg_advisory_unlock(:id)"),
+                        {"id": app_main.MIGRATION_LOCK_ID},
+                    )
+            assert freed, (
+                "a cancellation landing on the finally block's own cleanup "
+                "awaits skipped pg_advisory_unlock, leaking the session-level "
+                "lock on a connection returned to the pool"
+            )
+        finally:
+            release_rollback.set()
+            await test_engine.dispose()
+            await probe.dispose()
+
+    async def test_lock_is_released_if_cleanup_itself_fails(
+        self, postgres_url, monkeypatch
+    ):
+        """If _finish_migration_lock() itself raises (rollback or the unlock
+        query fails), the drain loop in the finally block must not silently
+        swallow that as an unobserved task exception and let the connection
+        return to the pool while still holding the session-level lock.
+
+        The drain (`while not cleanup.done(): with suppress(BaseException):
+        await asyncio.shield(cleanup)`) exits as soon as cleanup.done() is
+        true, whether it finished by returning or by raising — this test
+        forces the latter, standing in for a genuine unlock failure (e.g. the
+        connection was already broken) rather than the cancellation this
+        drain was originally built to survive."""
+        import app.core.database as app_db
+        import app.main as app_main
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(monkeypatch, postgres_url)
+        test_engine = make_async_engine(postgres_url)
+        monkeypatch.setattr(app_db, "engine", test_engine)
+        monkeypatch.setattr(app_main, "_alembic_upgrade", lambda _backend_dir: None)
+
+        async def failing_cleanup(_conn):
+            raise RuntimeError("simulated unlock failure")
+
+        monkeypatch.setattr(app_main, "_finish_migration_lock", failing_cleanup)
+
+        probe = make_async_engine(postgres_url)
+        try:
+            with pytest.raises(RuntimeError, match="simulated unlock failure"):
+                await app_main._run_migrations()
+
+            async with probe.connect() as conn:
+                freed = (await conn.execute(
+                    sa.text("SELECT pg_try_advisory_lock(:id)"),
+                    {"id": app_main.MIGRATION_LOCK_ID},
+                )).scalar()
+                if freed:
+                    await conn.execute(
+                        sa.text("SELECT pg_advisory_unlock(:id)"),
+                        {"id": app_main.MIGRATION_LOCK_ID},
+                    )
+            assert freed, (
+                "cleanup failing was silently swallowed by the drain loop — "
+                "the connection returned to the pool still holding the "
+                "session-level lock, so the next startup would time out "
+                "waiting for it"
+            )
+        finally:
+            await test_engine.dispose()
+            await probe.dispose()
+
 
 # ── Partial unique index ──────────────────────────────────────────────────────
 
@@ -297,7 +603,7 @@ class TestOpenFindingPartialIndex:
 
     @pytest.fixture
     async def session(self, migrated_url):
-        engine = create_async_engine(async_url(migrated_url))
+        engine = make_async_engine(migrated_url)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as s:
             # Naive UTC — see _insert_params below.
@@ -420,13 +726,24 @@ class TestFixtureUrlConversionTranslatesSslAliases:
         assert query.get("sslmode") == "verify-full"
         assert "ssl" not in query
 
-    def test_unrelated_query_params_pass_through_unchanged(self):
+    def test_unrecognized_query_params_are_rejected(self):
+        """SQLAlchemy forwards unrecognized query keys straight to
+        asyncpg.connect() as keyword arguments, but asyncpg's own connect()
+        signature has no top-level `application_name` parameter at all — it
+        belongs inside `server_settings`, a dict with no URL-query spelling
+        this helper can produce. Passing it through unchanged (the previous
+        behaviour this test enshrined) produced a URL that fails only once a
+        real connection is attempted, with `TypeError: connect() got an
+        unexpected keyword argument 'application_name'` — confirmed live
+        against a real asyncpg connect() call. Reject at the point the async
+        URL is built instead, the same way sslrootcert/sslcert/sslkey already
+        are, rather than deferring to an unrelated TypeError deep in asyncpg."""
         from tests.conftest_postgres import as_async_url
 
-        out = as_async_url(
-            "postgresql+psycopg2://u@h:5432/db?application_name=x"
-        )
-        assert sa.engine.make_url(out).query.get("application_name") == "x"
+        with pytest.raises(ValueError, match="application_name"):
+            as_async_url(
+                "postgresql+psycopg2://u@h:5432/db?application_name=x"
+            )
 
     def test_no_query_string_is_unaffected(self):
         from tests.conftest_postgres import as_async_url
@@ -467,6 +784,129 @@ class TestFixtureUrlConversionTranslatesSslAliases:
         )
         assert sa.engine.make_url(out).query.get("ssl") == "require"
 
+    @pytest.mark.parametrize("option", ["sslrootcert", "sslcert", "sslkey"])
+    def test_certificate_query_options_are_rejected(self, option):
+        """asyncpg.connect() has no sslrootcert/sslcert/sslkey keyword argument
+        at all — it takes TLS material only as a pre-built ssl.SSLContext, not
+        file paths. Left unrenamed (like sslmode is), these would reach
+        asyncpg.connect() as unrecognized kwargs and fail with an unrelated
+        TypeError far from any indication of what went wrong; reject them here
+        instead, at the point the caller asked for an async URL."""
+        from tests.conftest_postgres import as_async_url
+
+        with pytest.raises(ValueError, match=option):
+            as_async_url(
+                f"postgresql+psycopg2://u@h:5432/db?{option}=/tmp/x.pem"
+            )
+
+
+class TestAsyncEngineArgsCarryCertificateOptions:
+    """async_engine_args() must carry a test URL's TLS query options to asyncpg
+    as connect_args, where as_async_url() alone can only reject them.
+
+    The postgres_url fixture propagates an external PA_TEST_POSTGRES_URL's
+    query options (README.md documents the ``?sslmode=...&sslrootcert=...``
+    form), but every integration test in this file builds its async engine
+    straight from the URL — so the documented external-server path failed the
+    moment certificate authentication was required, before a single connection
+    was attempted. asyncpg takes TLS material only as a pre-built
+    ssl.SSLContext, which a URL cannot express; this helper builds that context
+    through the production path (Settings snapshot -> async_connect_args) and
+    hands back a query-free asyncpg URL beside it.
+    """
+
+    @staticmethod
+    def _self_signed_material(directory) -> tuple[str, str]:
+        """One self-signed certificate, usable as both CA file and client chain.
+
+        Generated with the already-present ``cryptography`` dependency rather
+        than shelling out to openssl, so these unit tests run on machines
+        without the binary (the TLS *integration* fixture still needs it)."""
+        import datetime
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, "pa-central-unit-test")]
+        )
+        now = datetime.datetime.now(datetime.UTC)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=1))
+            .not_valid_after(now + datetime.timedelta(hours=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        cert_pem = directory / "cert.pem"
+        key_pem = directory / "key.pem"
+        cert_pem.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        key_pem.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        return str(cert_pem), str(key_pem)
+
+    def test_certificate_options_become_an_ssl_context(self, tmp_path):
+        """The exact URL shape as_async_url() rejects must come back as a
+        query-free asyncpg URL plus an SSLContext that actually loaded the CA."""
+        import ssl
+
+        from tests.conftest_postgres import async_engine_args
+
+        cert, key = self._self_signed_material(tmp_path)
+        a_url, connect_args = async_engine_args(
+            "postgresql+psycopg2://u:p@h:5432/db"
+            f"?sslmode=verify-full&sslrootcert={cert}&sslcert={cert}&sslkey={key}"
+        )
+
+        parsed = sa.engine.make_url(a_url)
+        assert parsed.drivername == "postgresql+asyncpg"
+        assert parsed.query == {}, (
+            "TLS options must move into connect_args, not survive on the URL "
+            "where asyncpg.connect() rejects them as unknown kwargs"
+        )
+
+        ctx = connect_args["ssl"]
+        assert isinstance(ctx, ssl.SSLContext)
+        assert ctx.check_hostname is True
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+        assert ctx.get_ca_certs(), (
+            "the sslrootcert file was not loaded into the SSLContext — "
+            "verification would run against an empty trust store"
+        )
+
+    def test_plain_url_defaults_to_prefer(self):
+        """No query options must mean asyncpg's advisory-string 'prefer', not
+        an SSLContext — passing a context at all forces mandatory TLS with no
+        plaintext fallback (see TestPreferConnectsToAPlaintextServer)."""
+        from tests.conftest_postgres import async_engine_args
+
+        a_url, connect_args = async_engine_args("postgresql+psycopg2://u:p@h:5432/db")
+        assert sa.engine.make_url(a_url).drivername == "postgresql+asyncpg"
+        assert connect_args == {"ssl": "prefer"}
+
+    def test_unsupported_query_option_is_rejected(self):
+        """Same contract as apply_postgres_settings(): an option with no
+        translation must raise, not be silently dropped into a connection with
+        weaker/different settings than the caller asked for."""
+        from tests.conftest_postgres import async_engine_args
+
+        with pytest.raises(ValueError, match="connect_timeout"):
+            async_engine_args(
+                "postgresql+psycopg2://u:p@h:5432/db?connect_timeout=5"
+            )
+
 
 # ── UtcDateTime ───────────────────────────────────────────────────────────────
 
@@ -488,7 +928,7 @@ class TestUtcDateTimeOnPostgres:
         # UtcDateTime.process_result_value never runs. These tests exist to
         # exercise exactly that method, so they would assert against their own
         # input. See test_reads_come_from_the_database_not_the_identity_map.
-        engine = create_async_engine(async_url(migrated_url))
+        engine = make_async_engine(migrated_url)
         factory = async_sessionmaker(engine)
         async with factory() as s:
             yield s
@@ -606,7 +1046,7 @@ class TestSchemaSupport:
             __import__("app.core.config", fromlist=["settings"]).settings,
             "database_schema", "made_up_schema",
         )
-        engine = create_async_engine(async_url(postgres_url))
+        engine = make_async_engine(postgres_url)
         monkeypatch.setattr(app_db, "engine", engine)
         try:
             async with engine.connect() as conn:
@@ -631,7 +1071,7 @@ class TestSchemaSupport:
             __import__("app.core.config", fromlist=["settings"]).settings,
             "database_schema", "premade",
         )
-        engine = create_async_engine(async_url(postgres_url))
+        engine = make_async_engine(postgres_url)
         monkeypatch.setattr(app_db, "engine", engine)
         try:
             async with engine.begin() as conn:
@@ -639,6 +1079,53 @@ class TestSchemaSupport:
             async with engine.connect() as conn:
                 # Must not raise: the schema is already there.
                 await app_main._ensure_schema(conn)
+        finally:
+            await engine.dispose()
+
+    async def test_no_migrations_fallback_ensures_the_schema(
+        self, postgres_url, monkeypatch
+    ):
+        """The init_db() fallback in _run_migrations (migrations directory
+        absent) must ensure the configured schema before creating tables.
+        Base.metadata is schema-qualified when DATABASE_SCHEMA is set, so
+        create_all emits `CREATE TABLE <schema>.<table>` — against a fresh
+        database this supported fallback otherwise dies with
+        InvalidSchemaName. The migrated path already runs _ensure_schema
+        under the advisory lock; the fallback path returns before ever
+        reaching it."""
+        import app.core.database as app_db
+        import app.main as app_main
+        from tests.conftest_postgres import apply_postgres_settings
+
+        apply_postgres_settings(monkeypatch, postgres_url)
+        monkeypatch.setattr(
+            __import__("app.core.config", fromlist=["settings"]).settings,
+            "database_schema", "fallback_schema",
+        )
+        # Force the no-migrations-directory fallback branch. Only the
+        # migrations path is lied about; everything else sees the real
+        # filesystem.
+        real_isdir = os.path.isdir
+        monkeypatch.setattr(
+            app_main.os.path, "isdir",
+            lambda p: (
+                False if str(p).endswith("migrations") else real_isdir(p)
+            ),
+        )
+        engine = make_async_engine(postgres_url)
+        monkeypatch.setattr(app_db, "engine", engine)
+        try:
+            await app_main._run_migrations()
+            async with engine.connect() as conn:
+                exists = (await conn.execute(sa.text(
+                    "SELECT 1 FROM information_schema.schemata "
+                    "WHERE schema_name = 'fallback_schema'"
+                ))).scalar()
+            assert exists == 1, (
+                "the no-migrations init_db() fallback never created the "
+                "configured schema — with schema-qualified metadata, "
+                "create_all fails with InvalidSchemaName"
+            )
         finally:
             await engine.dispose()
 
@@ -659,9 +1146,9 @@ class TestSchemaSupport:
                 ))
             parsed = sa.engine.make_url(postgres_url)
             low = parsed.set(username="lowpriv_probe", password="x")
-            engine = create_async_engine(async_url(
+            engine = make_async_engine(
                 low.render_as_string(hide_password=False)
-            ))
+            )
             monkeypatch.setattr(
                 __import__("app.core.config", fromlist=["settings"]).settings,
                 "database_schema", "denied_schema",
@@ -767,8 +1254,8 @@ class TestSchemaNameWithSpecialCharacters:
             with admin.connect() as conn:
                 conn.execute(sa.text(f"CREATE SCHEMA {quoted}"))
 
-            engine = create_async_engine(
-                async_url(postgres_url), connect_args=async_connect_args(app_settings)
+            engine = make_async_engine(
+                postgres_url, connect_args=async_connect_args(app_settings)
             )
             try:
                 async with engine.connect() as conn:
@@ -851,8 +1338,8 @@ class TestPreferConnectsToAPlaintextServer:
             database_password=parsed.password,
             database_sslmode="prefer",
         )
-        engine = create_async_engine(
-            async_url(postgres_url), connect_args=async_connect_args(cfg)
+        engine = make_async_engine(
+            postgres_url, connect_args=async_connect_args(cfg)
         )
         try:
             async with engine.connect() as conn:

@@ -76,6 +76,20 @@ class TestAllDatabaseFieldsAreForwarded:
         assert env.get("DATABASE_SCHEMA") == "my_schema"
 
 
+class TestMigrationLockTimeoutIsForwarded:
+    def test_migration_lock_timeout_set_on_the_host_reaches_the_container(
+        self, monkeypatch
+    ):
+        """MIGRATION_LOCK_TIMEOUT tunes the startup deadline for acquiring the
+        PostgreSQL migration advisory lock, but compose's environment: block
+        is an allowlist — a value set on the host or in .env has no effect on
+        the container unless named here, leaving operators unable to tune the
+        deadline at all."""
+        monkeypatch.setenv("MIGRATION_LOCK_TIMEOUT", "42")
+        env = _rendered_environment(monkeypatch)
+        assert env.get("MIGRATION_LOCK_TIMEOUT") == "42"
+
+
 class TestLegacyDatabaseUrlIsForwarded:
     def test_database_url_set_on_the_host_reaches_the_container(self, monkeypatch):
         """DATABASE_URL must be forwarded even though the app no longer reads
