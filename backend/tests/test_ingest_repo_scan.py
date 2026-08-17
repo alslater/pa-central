@@ -304,7 +304,6 @@ class TestFindingLifecycleIngest:
         )).scalars().all()
         assert len(open_rows) == 1
 
-
 class TestConfigChangeReset:
     async def test_config_change_closes_open_findings_with_reason(self, db, repo_scan):
         """When scan_config_hash changes between results, open findings are closed with closed_reason='config_change'."""

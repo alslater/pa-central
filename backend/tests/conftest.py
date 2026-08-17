@@ -7,9 +7,28 @@ write to the DB, but the outer transaction is rolled back after the test.
 """
 import os
 
-# Must be set before any app module is imported so the insecure-default guard
+_BOOL_STRINGS = {"true", "false", "1", "0", "yes", "no", "on", "off", "t", "f", "y", "n"}
+
+
+def _ensure_debug_env_is_a_valid_bool() -> None:
+    """Discard an unparseable ambient DEBUG value; a real override still wins.
+
+    Some IDE extensions (e.g. a known bug in the OpenAI Codex VS Code
+    extension — github.com/openai/codex/issues/13694) leak a DEBUG=release
+    environment variable into every other extension's spawned subprocesses,
+    including the Python extension's pytest-discovery subprocess. "release"
+    is not a valid Settings.debug boolean, so pydantic raises a
+    ValidationError before any test runs at all.
+    """
+    if os.environ.get("DEBUG", "").strip().lower() not in _BOOL_STRINGS:
+        os.environ["DEBUG"] = "true"
+    else:
+        os.environ.setdefault("DEBUG", "true")
+
+
+# Must run before any app module is imported so the insecure-default guard
 # in config.py doesn't fire during test runs.
-os.environ.setdefault("DEBUG", "true")
+_ensure_debug_env_is_a_valid_bool()
 
 import pytest
 import pytest_asyncio
@@ -21,6 +40,16 @@ from app.core.database import Base, get_db
 from app.core.security import create_access_token, generate_api_key, hash_password
 from app.main import app
 from app.models import ApiKey, Host, User, UserRole
+
+# Register the AWS and PostgreSQL fixture modules as plugins. Declaring them
+# here is pytest's documented mechanism; importing their fixture names into this
+# module would work too, but only as an import side effect — which needs F401
+# suppressions and makes the registration look like a removable unused import.
+pytest_plugins = [
+    "tests.conftest_aws",
+    "tests.conftest_postgres",
+    "tests.conftest_postgres_tls",
+]
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -208,11 +237,3 @@ async def api_key(db, admin_user) -> tuple[str, ApiKey]:
     await db.commit()
     await db.refresh(key)
     return raw, key
-
-
-# Import AWS fixtures so they are available session-wide
-from tests.conftest_aws import (  # noqa: F401
-    ecs_client,
-    localstack,
-    secretsmanager,
-)
