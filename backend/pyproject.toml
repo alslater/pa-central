@@ -30,7 +30,7 @@ dependencies = [
     "psycopg2-binary>=2.9.8",
     "asyncpg>=0.31.0",
     "pyotp>=2.9.0",
-    "package-alert==0.6.5",
+    "package-alert==0.7.0",
 ]
 
 [dependency-groups]
