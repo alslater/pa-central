@@ -12,6 +12,7 @@ import ApiKeys from '@/pages/ApiKeys'
 import Users from '@/pages/Users'
 import RepoScans from '@/pages/RepoScans'
 import Vulnerabilities from '@/pages/Vulnerabilities'
+import Risks from '@/pages/Risks'
 import SystemSettings from '@/pages/SystemSettings'
 import { ReactNode } from 'react'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="/users" element={<Guard><AdminGuard><Users /></AdminGuard></Guard>} />
           <Route path="/repo-scans" element={<Guard><AdminGuard><RepoScans /></AdminGuard></Guard>} />
           <Route path="/vulnerabilities" element={<Guard><AdminGuard><Vulnerabilities /></AdminGuard></Guard>} />
+          <Route path="/risks" element={<Guard><AdminGuard><Risks /></AdminGuard></Guard>} />
           <Route path="/settings" element={<Guard><AdminGuard><SystemSettings /></AdminGuard></Guard>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

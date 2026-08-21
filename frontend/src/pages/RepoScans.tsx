@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
 import {
-  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions, FindingRecord,
+  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions, FindingRecord, RiskRecord,
 } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { useAuth } from '@/hooks/useAuth'
-import { Card, Button, Drawer, FindingAcceptForm, FindingRecordDetail, FindingRevokeButton, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, FindingsTable, SeverityBadge, timeAgo } from '@/components/ui'
+import { Card, Button, Drawer, FindingAcceptForm, FindingRecordDetail, FindingRevokeButton, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, ScanDetailTabs, SeverityBadge, timeAgo, RiskRecordDetail, RiskAcceptForm, RiskRevokeButton, RiskLevelBadge } from '@/components/ui'
 import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settings2 } from 'lucide-react'
 import { CronField } from '@/components/CronField'
 import { TimezoneField } from '@/components/TimezoneField'
@@ -216,16 +216,18 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
         <div className="result-empty-wrap"><Empty message="No scan results yet" /></div>
       ) : results.map(r => {
         const hasFindings = r.findings && r.findings.length > 0
+        const hasRisks = r.risks && r.risks.length > 0
+        const hasRiskFailures = (r.risk_failures ?? 0) > 0
         const isExpanded = expandedId === r.id
         return (
           <div key={r.id} className="result-row">
             <div
-              className={`result-row-content ${hasFindings ? 'result-row-clickable' : 'result-row-static'}`}
-              onClick={() => hasFindings && setExpandedId(isExpanded ? null : r.id)}
-              onKeyDown={e => { if (hasFindings && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
-              role={hasFindings ? 'button' : undefined}
-              tabIndex={hasFindings ? 0 : undefined}
-              aria-expanded={hasFindings ? isExpanded : undefined}
+              className={`result-row-content ${(hasFindings || hasRisks) ? 'result-row-clickable' : 'result-row-static'}`}
+              onClick={() => (hasFindings || hasRisks) && setExpandedId(isExpanded ? null : r.id)}
+              onKeyDown={e => { if ((hasFindings || hasRisks) && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
+              role={(hasFindings || hasRisks) ? 'button' : undefined}
+              tabIndex={(hasFindings || hasRisks) ? 0 : undefined}
+              aria-expanded={(hasFindings || hasRisks) ? isExpanded : undefined}
             >
               <RepoScanStatusBadge status={r.status} />
               <span className="result-trigger-label">
@@ -236,13 +238,33 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
                   {r.finding_count} finding{r.finding_count !== 1 ? 's' : ''}
                 </span>
               )}
+              {r.risks == null ? (
+                <span
+                  className="result-finding-count no-findings"
+                  title="No risk pass was reported for this scan — risk status is unknown, not clean"
+                >
+                  risks unavailable
+                </span>
+              ) : (
+                <span className={`result-finding-count ${hasRisks ? 'has-findings' : 'no-findings'}`}>
+                  {r.risks.length} risk{r.risks.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              {hasRiskFailures && (
+                <span
+                  className="result-finding-count has-findings"
+                  title={`Risk scoring was unavailable for ${r.risk_failures} package(s) — an empty or short risk list may not mean the scan is clean`}
+                >
+                  ⚠ {r.risk_failures} unscored
+                </span>
+              )}
               {r.pa_version && (
                 <span className="result-pa-version">pa@{r.pa_version}</span>
               )}
               <span className="result-timestamp">
                 {r.started_at ? timeAgo(r.started_at) : ''}
               </span>
-              {hasFindings && (
+              {(hasFindings || hasRisks) && (
                 <span className="result-chevron">
                   {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </span>
@@ -259,9 +281,9 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
             {r.error_message && (
               <pre className="result-error-pre">{r.error_message}</pre>
             )}
-            {isExpanded && hasFindings && (
+            {isExpanded && (hasFindings || hasRisks) && (
               <div className="result-findings-expanded">
-                <FindingsTable findings={r.findings!} />
+                <ScanDetailTabs findings={r.findings} risks={r.risks} />
               </div>
             )}
           </div>
@@ -403,6 +425,132 @@ function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, k
   )
 }
 
+function RiskDetailDrawer({ r, onClose, onAccepted, show }: { r: RiskRecord; onClose: () => void; onAccepted: () => void; show: (msg: string, kind: 'ok' | 'err') => void }) {
+  const [accepting, setAccepting] = React.useState(false)
+
+  return (
+    <Drawer title={r.package} onClose={onClose}>
+      <RiskRecordDetail r={r}>
+        <div className="mt-4 pt-4 border-t border-border">
+          {r.is_accepted ? (
+            <RiskRevokeButton risk={r} onDone={onAccepted} show={show} />
+          ) : accepting ? (
+            <RiskAcceptForm
+              risk={r}
+              onDone={() => { setAccepting(false); onAccepted() }}
+              onCancel={() => setAccepting(false)}
+              show={show}
+            />
+          ) : (
+            <Button variant="secondary" onClick={() => setAccepting(true)} className="text-[12px] px-3 h-8">Accept risk</Button>
+          )}
+        </div>
+      </RiskRecordDetail>
+    </Drawer>
+  )
+}
+
+function RisksPanel({ scanId, show }: { scanId: number; show: (msg: string, kind: 'ok' | 'err') => void }) {
+  const [risks, setRisks] = React.useState<RiskRecord[] | null>(null)
+  const [loading, setLoading] = React.useState(true)
+  const [loadError, setLoadError] = React.useState(false)
+  const [selected, setSelected] = React.useState<RiskRecord | null>(null)
+
+  const reqSeq = React.useRef(0)
+
+  const reload = React.useCallback((background = false) => {
+    const seq = ++reqSeq.current
+    setLoadError(false)
+    if (!background) { setLoading(true); setRisks(null) }
+    api.risks.listAllForRepo(scanId).then(data => {
+      if (seq !== reqSeq.current) return
+      setRisks(data)
+      setLoading(false)
+      setSelected(prev => prev ? data.find(r => r.id === prev.id) ?? null : null)
+    }).catch((e: Error) => {
+      if (seq !== reqSeq.current) return
+      setLoading(false)
+      if (!background) setLoadError(true)
+      show(e.message ?? 'Failed to load risks', 'err')
+    })
+  }, [scanId, show])
+
+  React.useEffect(() => {
+    reload() // eslint-disable-line react-hooks/set-state-in-effect
+    // reqSeq is an abort counter: incrementing it in cleanup is intentional — it invalidates
+    // any in-flight response from the previous render so stale data is never committed.
+    return () => { reqSeq.current++ } // eslint-disable-line react-hooks/exhaustive-deps
+  }, [reload])
+
+  if (loading && !risks) return <div className="p-3 text-[13px] text-muted-foreground">Loading risks…</div>
+  if (loadError) return (
+    <div className="p-3 text-[13px] text-status-fail-text flex items-center gap-2">
+      Failed to load risks.
+      <button type="button" onClick={() => reload()} className="underline hover:no-underline">Retry</button>
+    </div>
+  )
+  const rows = risks ?? []
+  if (rows.length === 0) return <div className="px-4 py-2"><Empty message="No open risks." /></div>
+
+  return (
+    <>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="text-left border-b border-border">
+              <th scope="col" className="px-4 py-2 text-style-caption">Level</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Package</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Ecosystem</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Score</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Open since</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr
+                key={r.id}
+                className="border-b border-border/50 hover:bg-muted/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
+                tabIndex={0}
+                role="button"
+                aria-label={`${r.package} — view details`}
+                onClick={() => setSelected(r)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(r) } }}
+              >
+                <td className="px-4 py-2"><RiskLevelBadge level={r.level} /></td>
+                <td className="px-4 py-2 font-mono">
+                  {r.package}
+                  {r.reopen_count > 0 && (
+                    <span className="ml-1.5 text-[11px] text-status-review-text">↩×{r.reopen_count}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-muted-foreground">{r.ecosystem}</td>
+                <td className="px-4 py-2 font-mono text-muted-foreground">{r.score}</td>
+                <td className="px-4 py-2 font-medium text-muted-foreground">{r.days_open}d</td>
+                <td className="px-4 py-2">
+                  {r.is_accepted ? (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-info/12 text-status-info-text" title={r.accepted_reason ?? undefined}>Accepted</span>
+                  ) : (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Open</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <RiskDetailDrawer
+          r={selected}
+          onClose={() => setSelected(null)}
+          onAccepted={() => { reload(true); setSelected(null) }}
+          show={show}
+        />
+      )}
+    </>
+  )
+}
+
 // ── Structured scan args field ────────────────────────────────────────────────
 //
 // UNCONTROLLED after mount: defaultScanFlags seeds state once via the lazy
@@ -533,7 +681,7 @@ function ScanCard({
   show: (msg: string, kind: 'ok' | 'err') => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const [expandedTab, setExpandedTab] = useState<'results' | 'findings'>('results')
+  const [expandedTab, setExpandedTab] = useState<'results' | 'findings' | 'risks'>('results')
   const [editing, setEditing] = useState(false)
   const [latestStatus, setLatestStatus] = useState<RepoScanResult['status'] | null>(null)
   const [resultsRefreshKey, setResultsRefreshKey] = useState(0)
@@ -640,14 +788,14 @@ function ScanCard({
       {expanded && (
         <div className="form-section-border">
           <div className="scan-card-inner-tab-bar">
-            {(['results', 'findings'] as const).map(t => (
+            {(['results', 'findings', 'risks'] as const).map(t => (
               <button
                 key={t}
                 type="button"
                 onClick={() => setExpandedTab(t)}
                 className={expandedTab === t ? 'tab-btn-inner active' : 'tab-btn-inner'}
               >
-                {t === 'results' ? 'Results' : 'Findings'}
+                {t === 'results' ? 'Results' : t === 'findings' ? 'Findings' : 'Risks'}
                 {t === 'findings' && scan.breach_count > 0 && (
                   <span className="inner-tab-breach-badge">{scan.breach_count}</span>
                 )}
@@ -656,8 +804,10 @@ function ScanCard({
           </div>
           {expandedTab === 'results' ? (
             <ResultsPanel scan={scan} refreshKey={resultsRefreshKey} />
-          ) : (
+          ) : expandedTab === 'findings' ? (
             <FindingsPanel scanId={scan.id} show={show} />
+          ) : (
+            <RisksPanel scanId={scan.id} show={show} />
           )}
         </div>
       )}

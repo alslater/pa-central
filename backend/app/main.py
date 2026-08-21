@@ -25,6 +25,7 @@ from app.api import (
     ingest,
     repo_credentials,
     repo_scans,
+    risks,
     scan_options,
     scans,
     system_settings,
@@ -380,6 +381,7 @@ for router in [
     repo_scans.router,
     repo_credentials.router,
     findings.router,
+    risks.router,
 ]:
     app.include_router(router, prefix="/api")
 

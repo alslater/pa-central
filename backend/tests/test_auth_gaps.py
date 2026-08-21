@@ -430,3 +430,44 @@ class TestFindingsAuthGaps:
             json={"sla_high_days": 14, "sla_medium_days": 90, "finding_retention_days": 365},
             headers=auth(operator_token))
         assert r.status_code == 403
+
+
+# ── /api/risks ────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestRisksAuthGaps:
+    async def test_list_risks_requires_auth(self, client):
+        r = await client.get("/api/risks")
+        assert r.status_code == 401
+
+    async def test_list_risks_non_admin_forbidden(self, client, operator_token):
+        r = await client.get("/api/risks", headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_list_risks_admin_ok(self, client, admin_token):
+        r = await client.get("/api/risks", headers=auth(admin_token))
+        assert r.status_code == 200
+
+    async def test_accept_risk_requires_auth(self, client):
+        r = await client.post("/api/risks/999/accept", json={"reason": "ok"})
+        assert r.status_code == 401
+
+    async def test_accept_risk_non_admin_forbidden(self, client, operator_token):
+        r = await client.post("/api/risks/999/accept", json={"reason": "ok"}, headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_revoke_risk_accept_requires_auth(self, client):
+        r = await client.delete("/api/risks/999/accept")
+        assert r.status_code == 401
+
+    async def test_revoke_risk_accept_non_admin_forbidden(self, client, operator_token):
+        r = await client.delete("/api/risks/999/accept", headers=auth(operator_token))
+        assert r.status_code == 403
+
+    async def test_repo_scan_risks_requires_auth(self, client):
+        r = await client.get("/api/repo-scans/1/risks")
+        assert r.status_code == 401
+
+    async def test_repo_scan_risks_non_admin_forbidden(self, client, operator_token):
+        r = await client.get("/api/repo-scans/1/risks", headers=auth(operator_token))
+        assert r.status_code == 403

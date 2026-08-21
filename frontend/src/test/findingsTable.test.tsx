@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FindingsTable } from '@/components/ui'
 
@@ -68,6 +68,33 @@ describe('FindingsTable', () => {
     render(<FindingsTable findings={makeFindings(26)} />)
     await user.click(screen.getByText('→'))
     expect(screen.getByText('→')).toBeDisabled()
+  })
+
+  it('clamps to the last page when a findings update shrinks the page count', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(<FindingsTable findings={makeFindings(60)} />)
+    // 3 pages of 25 — move to the last page (page index 2).
+    await user.click(screen.getByText('→'))
+    await user.click(screen.getByText('→'))
+    expect(screen.getByText('pkg-50')).toBeInTheDocument()
+
+    // Shrink to a single page: page 2 is now out of range.
+    rerender(<FindingsTable findings={makeFindings(10)} />)
+
+    await waitFor(() => expect(screen.getByText('pkg-0')).toBeInTheDocument())
+    expect(screen.queryByText(/←/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument()
+  })
+
+  it('clamps to page 0 when a findings update empties the list entirely', async () => {
+    const user = userEvent.setup()
+    const { container, rerender } = render(<FindingsTable findings={makeFindings(30)} />)
+    await user.click(screen.getByText('→'))
+    expect(screen.getByText('pkg-25')).toBeInTheDocument()
+
+    rerender(<FindingsTable findings={[]} />)
+
+    await waitFor(() => expect(container.firstChild).toBeNull())
   })
 
   it('expands a finding row when clicked', async () => {

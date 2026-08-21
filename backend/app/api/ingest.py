@@ -32,6 +32,7 @@ from app.schemas import (
     ScanPayload,
 )
 from app.services.finding_lifecycle import update_finding_records
+from app.services.risk_lifecycle import update_risk_records
 
 ApiKeyDep = Annotated[tuple, Depends(get_api_key)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -110,6 +111,8 @@ async def ingest_scan(
         status=body.status,
         finding_count=body.finding_count,
         findings=body.findings,
+        risks=body.risks,
+        risk_failures=body.risk_failures,
         sources=body.sources,
         scanned_at=body.scanned_at or utcnow(),
         raw=body.raw,
@@ -311,12 +314,15 @@ async def ingest_repo_scan_result(
     result.pa_version = body.pa_version
     result.finding_count = body.finding_count
     result.findings = body.findings
+    result.risks = body.risks
+    result.risk_failures = body.risk_failures
     result.sources = body.sources
     result.error_message = body.error_message
     result.completed_at = utcnow()
 
     if body.status == RepoScanStatus.success:
         await update_finding_records(db, result)
+        await update_risk_records(db, result)
 
     await db.commit()
 

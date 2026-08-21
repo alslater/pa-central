@@ -26,10 +26,19 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "035924a7a885"
+HEAD_REVISION = "7ace8b60203b"
 
-# (table, column) -> expected ON DELETE action after upgrade.
+# (table, column) -> expected ON DELETE action once HEAD_REVISION is applied.
 # 'c' = CASCADE, 'n' = SET NULL, 'a' = NO ACTION (pg_constraint.confdeltype)
+#
+# Every altered/added FK belongs here regardless of when its table was
+# created — this is what MIGRATED_TABLES, fk_counts, and
+# test_every_altered_column_has_exactly_one_fk key off, so a table missing
+# from this dict has its FK constraints silently unchecked for duplication
+# (the exact bug these tests exist to catch: batch mode ALTERs in place on
+# PostgreSQL, so an unresolved copy_from can leave the old constraint
+# alongside the new one). DOWNGRADE_EXPECTED_ONDELETE below is the narrower
+# subset actually exercised by the downgrade-to-BASE_REVISION test.
 EXPECTED_ONDELETE = {
     ("hosts", "owner_user_id"): "c",
     ("alerts", "host_id"): "c",
@@ -44,9 +53,20 @@ EXPECTED_ONDELETE = {
     ("cooldown_entries", "created_by_id"): "n",
     ("repo_scans", "created_by_id"): "n",
     ("system_settings", "updated_by_id"): "n",
+    ("risk_records", "repo_scan_id"): "c",
+    ("risk_records", "accepted_by_id"): "n",
 }
 
 MIGRATED_TABLES = sorted({t for t, _ in EXPECTED_ONDELETE})
+
+# Downgrading to BASE_REVISION only unwinds migrations up to that point, so
+# only entries for tables/columns that already existed at BASE_REVISION can
+# be checked after a downgrade — risk_records postdates it (added by
+# HEAD_REVISION) and doesn't exist yet at that point in the chain.
+_POST_BASE_REVISION_TABLES = {"risk_records"}
+DOWNGRADE_EXPECTED_ONDELETE = {
+    k: v for k, v in EXPECTED_ONDELETE.items() if k[0] not in _POST_BASE_REVISION_TABLES
+}
 
 
 def alembic(
@@ -409,6 +429,29 @@ class TestMigrationChain:
             "BASE_REVISION still cover it (see CLAUDE.md)"
         )
 
+    def test_risk_records_partial_unique_index_exists(self, postgres_url):
+        """`uq_risk_records_open_identity` is raw DDL with a WHERE clause
+        (same pattern as `uq_finding_records_open_identity`, see
+        TestOpenFindingPartialIndex in test_postgres_behaviour.py) — SQLite's
+        DDL execution path can silently diverge from Postgres's, so this
+        confirms the partial index actually exists with its WHERE clause
+        intact on a real PostgreSQL server.
+        """
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(postgres_url)
+        try:
+            with engine.connect() as conn:
+                indexdef = conn.execute(sa.text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE indexname = 'uq_risk_records_open_identity'"
+                )).scalar()
+        finally:
+            engine.dispose()
+        assert indexdef is not None, "partial unique index was not created"
+        assert "closed_at IS NULL" in indexdef, (
+            f"index lost its WHERE clause, so it would block closed duplicates too: {indexdef}"
+        )
+
     def test_every_altered_column_has_exactly_one_fk(self, postgres_url):
         """Guards the PostgreSQL duplication bug.
 
@@ -436,7 +479,7 @@ class TestMigrationChain:
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
 
         actions = fk_actions(postgres_url)
-        for (table, col) in EXPECTED_ONDELETE:
+        for (table, col) in DOWNGRADE_EXPECTED_ONDELETE:
             assert actions.get((table, col)) == "a", (
                 f"{table}.{col} should be NO ACTION after downgrade, got {actions.get((table, col))!r}"
             )

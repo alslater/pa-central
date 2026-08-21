@@ -1,6 +1,7 @@
 import { useState, useEffect, useEffectEvent, useRef, useCallback, useMemo, useId, forwardRef } from 'react'
 import type { CSSProperties, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
-import { api, AlertSeverity, DaemonStatus, FindingRecord, ScanStatus } from '@/lib/api'
+import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus } from '@/lib/api'
+import { useRovingTabs } from '@/lib/hooks'
 
 // ── URL sanitization ──────────────────────────────────────────────────────────
 
@@ -29,6 +30,20 @@ export function SeverityBadge({ severity }: { severity: AlertSeverity }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-style-tag whitespace-nowrap ${SEV_CLASSES[severity]}`}>
       {severity}
+    </span>
+  )
+}
+
+const RISK_LEVEL_CLASSES: Record<'critical' | 'warning' | 'info', string> = {
+  critical: SEV_CLASSES.critical,
+  warning: SEV_CLASSES.medium,
+  info: SEV_CLASSES.info,
+}
+
+export function RiskLevelBadge({ level }: { level: 'critical' | 'warning' | 'info' }) {
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-style-tag whitespace-nowrap ${RISK_LEVEL_CLASSES[level]}`}>
+      {level}
     </span>
   )
 }
@@ -467,6 +482,193 @@ export function FindingRevokeButton({
   )
 }
 
+// ── Risk acceptance controls ─────────────────────────────────────────────────
+
+export function RiskAcceptForm({
+  risk,
+  onDone,
+  onCancel,
+  show,
+  size = 'md',
+}: {
+  risk: RiskRecord
+  onDone: () => void
+  onCancel: () => void
+  show: (msg: string, kind: 'ok' | 'err') => void
+  size?: 'sm' | 'md'
+}) {
+  const [reason, setReason] = useState('')
+  const [acceptedUntil, setAcceptedUntil] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  // Compute tomorrow in UTC to match the server's date.today() (UTC).
+  const tomorrow = (() => {
+    const d = new Date()
+    d.setUTCDate(d.getUTCDate() + 1)
+    return d.toISOString().slice(0, 10)
+  })()
+  // Both are YYYY-MM-DD strings — lexicographic order is correct for ISO dates
+  // and avoids browser inconsistencies in Date() parsing of date-only strings.
+  const dateInvalid = !!acceptedUntil && acceptedUntil < tomorrow
+
+  const handleAccept = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      await api.risks.accept(risk.id, { reason: reason.trim(), accepted_until: acceptedUntil || undefined })
+      setReason(''); setAcceptedUntil('')
+      show('Risk accepted', 'ok')
+      onDone()
+    } catch (e: any) {
+      show(e.message ?? 'Failed to accept risk', 'err')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const inputCls = size === 'sm' ? 'text-[12px]' : undefined
+
+  return (
+    <div className="flex flex-col gap-2">
+      <Textarea
+        label="Reason (required)"
+        value={reason}
+        onChange={e => setReason(e.target.value)}
+        rows={size === 'sm' ? 2 : 3}
+        maxLength={1000}
+        className={inputCls}
+      />
+      <div>
+        <Input
+          label="Expires (optional)"
+          type="date"
+          min={tomorrow}
+          value={acceptedUntil}
+          onChange={e => setAcceptedUntil(e.target.value)}
+          className={inputCls}
+        />
+        {dateInvalid && (
+          <p className="mt-1 text-[11px] text-status-fail-text">Expiry must be a future date.</p>
+        )}
+      </div>
+      <div className="flex gap-2">
+        <Button
+          variant="primary"
+          disabled={!reason.trim() || dateInvalid || submitting}
+          onClick={handleAccept}
+          className={size === 'sm' ? 'text-[11px] px-2.5 h-7' : 'text-[12px] px-3 h-8'}
+        >
+          {submitting ? 'Saving…' : 'Save'}
+        </Button>
+        <Button
+          variant="ghost"
+          disabled={submitting}
+          onClick={onCancel}
+          className={size === 'sm' ? 'text-[11px] px-2.5 h-7' : 'text-[12px] px-3 h-8'}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+export function RiskRevokeButton({
+  risk,
+  onDone,
+  show,
+  size = 'md',
+}: {
+  risk: RiskRecord
+  onDone: () => void
+  show: (msg: string, kind: 'ok' | 'err') => void
+  size?: 'sm' | 'md'
+}) {
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleRevoke = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      await api.risks.revokeAccept(risk.id)
+      show('Acceptance revoked', 'ok')
+      onDone()
+    } catch (e: any) {
+      show(e.message ?? 'Failed to revoke acceptance', 'err')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      disabled={submitting}
+      onClick={handleRevoke}
+      className={size === 'sm' ? 'text-[11px] px-2.5 h-7' : 'text-[12px] px-3 h-8'}
+    >
+      {submitting ? 'Revoking…' : `Revoke${size === 'md' ? ' acceptance' : ''}`}
+    </Button>
+  )
+}
+
+// ── Shared risk detail ────────────────────────────────────────────────────────
+
+export function RiskRecordDetail({ r, children }: { r: RiskRecord; children?: ReactNode }) {
+  const statusLabel = r.is_accepted ? 'Accepted' : 'Open'
+  const statusClass = r.is_accepted
+    ? 'bg-status-info/12 text-status-info-text'
+    : 'bg-muted text-muted-foreground'
+
+  return (
+    <div className="flex flex-col gap-0">
+      <div className="flex flex-wrap gap-2 mb-4">
+        <RiskLevelBadge level={r.level} />
+        <span className={`inline-flex items-center px-2 py-0.5 rounded text-style-tag ${statusClass}`}>{statusLabel}</span>
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Score {r.score}</span>
+        {r.reopen_count > 0 && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Reopened ×{r.reopen_count}</span>
+        )}
+      </div>
+
+      <DetailRow label="Package" value={<span className="font-mono font-medium">{r.package}{r.package_version ? ` ${r.package_version}` : ''}</span>} />
+      <DetailRow label="Ecosystem" value={r.ecosystem} />
+      {r.scan_name && <DetailRow label="Repo" value={r.scan_name} />}
+      <DetailRow label="Open since" value={`${r.days_open} day${r.days_open !== 1 ? 's' : ''}`} />
+
+      {r.signals.length > 0 && (
+        <div className="py-2 border-b border-border/50">
+          <div className="text-[11px] text-muted-foreground mb-1">Signals</div>
+          <div className="flex flex-col gap-1.5">
+            {r.signals.map((s, i) => (
+              <div key={i} className="text-[13px]">
+                <span className="font-mono font-medium">{s.name}</span>
+                <span className="text-muted-foreground"> ({s.score}) — {s.reason}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {r.closed_reason === 'config_change' && (
+        <div className="py-2 border-t border-border/50 mt-2">
+          <div className="text-[12px] text-muted-foreground">Closed because scan configuration changed</div>
+        </div>
+      )}
+
+      {r.is_accepted && (
+        <div className="mt-3 p-3 rounded bg-status-info/8 border border-status-info/20">
+          <div className="text-[11px] text-muted-foreground mb-1">Accepted</div>
+          {r.accepted_reason && <div className="text-[13px] mb-1">{r.accepted_reason}</div>}
+          {r.accepted_until && <div className="text-[11px] text-muted-foreground">Expires: {r.accepted_until}</div>}
+        </div>
+      )}
+
+      {children}
+    </div>
+  )
+}
+
 // ── Shared finding detail ─────────────────────────────────────────────────────
 
 function DetailRow({ label, value }: { label: string; value: ReactNode }) {
@@ -660,9 +862,16 @@ export function FindingsTable({ findings }: { findings: Record<string, unknown>[
   const selectedIdx = selectedKey !== null ? (rowKeyIndex.get(selectedKey) ?? -1) : -1
   const selected = selectedIdx !== -1 ? items[selectedIdx] : null
 
+  const totalPages = Math.ceil(items.length / PAGE_SIZE)
+  // Clamp page when findings updates shrink the page count (e.g. some
+  // findings resolved) — otherwise a user left on a now-out-of-range page
+  // sees an empty pageItems slice with no way back, since the pager itself
+  // may disappear if totalPages also drops to 1 or 0.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern, matches Vulnerabilities.tsx / RisksTable
+  useEffect(() => { setPage(p => totalPages > 0 ? Math.min(p, totalPages - 1) : 0) }, [totalPages])
+
   if (!items.length) return null
 
-  const totalPages = Math.ceil(items.length / PAGE_SIZE)
   const pageItems = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
   return (
@@ -735,6 +944,246 @@ export function FindingsTable({ findings }: { findings: Record<string, unknown>[
       </Drawer>
     )}
     </>
+  )
+}
+
+// ── Raw risks table ───────────────────────────────────────────────────────────
+
+interface RawRisk {
+  package?: string
+  ecosystem?: string
+  version?: string
+  score?: number
+  level?: string
+  signals?: { name: string; score: number; reason: string }[]
+  closed_reason?: string
+  [key: string]: unknown
+}
+
+const LEVEL_ORDER: Record<string, number> = { critical: 0, warning: 1, info: 2 }
+const RISK_PAGE_SIZE = 25
+
+function RawRiskDetail({ r }: { r: RawRisk }) {
+  const rawLevel = r.level?.toLowerCase() ?? 'info'
+  const level = (RISK_LEVEL_CLASSES[rawLevel as 'critical' | 'warning' | 'info'] ? rawLevel : 'info') as 'critical' | 'warning' | 'info'
+  return (
+    <div className="flex flex-col gap-0">
+      <div className="flex flex-wrap gap-2 mb-4">
+        <RiskLevelBadge level={level} />
+        {typeof r.score === 'number' && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Score {r.score}</span>
+        )}
+      </div>
+      {r.package && (
+        <div className="py-2 border-b border-border/50">
+          <div className="text-[11px] text-muted-foreground mb-0.5">Package</div>
+          <div className="text-[13px] font-mono font-medium">{r.package}{r.version ? ` ${r.version}` : ''}</div>
+        </div>
+      )}
+      {r.ecosystem && (
+        <div className="py-2 border-b border-border/50">
+          <div className="text-[11px] text-muted-foreground mb-0.5">Ecosystem</div>
+          <div className="text-[13px]">{r.ecosystem}</div>
+        </div>
+      )}
+      {Array.isArray(r.signals) && r.signals.length > 0 && (
+        <div className="py-2">
+          <div className="text-[11px] text-muted-foreground mb-1">Signals</div>
+          <div className="flex flex-col gap-1.5">
+            {r.signals.map((s, i) => (
+              <div key={i} className="text-[13px]">
+                <span className="font-mono font-medium">{s.name}</span>
+                <span className="text-muted-foreground"> ({s.score}) — {s.reason}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {r.closed_reason === 'config_change' && (
+        <div className="py-2 border-t border-border/50 mt-2">
+          <div className="text-[12px] text-muted-foreground">Closed because scan configuration changed</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function RisksTable({ risks }: { risks: Record<string, unknown>[] }) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+
+  const { items, rowKeys, rowKeyIndex } = useMemo(() => {
+    const sorted = [...risks].sort((a, b) => {
+      const r = a as RawRisk, s = b as RawRisk
+      return (LEVEL_ORDER[r.level?.toLowerCase() ?? 'info'] ?? 9) -
+             (LEVEL_ORDER[s.level?.toLowerCase() ?? 'info'] ?? 9)
+    }) as RawRisk[]
+    // Build stable row keys: identity tuple is preferred; append a
+    // disambiguating counter only for rows that share the same triple.
+    const keyCounts = new Map<string, number>()
+    const keys = sorted.map(r => {
+      // JSON.stringify the tuple so field values containing the delimiter
+      // can't produce collisions.
+      const base = JSON.stringify([r.package ?? '', r.ecosystem ?? '', r.version ?? ''])
+      const n = (keyCounts.get(base) ?? 0) + 1
+      keyCounts.set(base, n)
+      return n > 1 ? `${base}:${n}` : base
+    })
+    const index = new Map(keys.map((k, i) => [k, i]))
+    return { items: sorted, rowKeys: keys, rowKeyIndex: index }
+  }, [risks])
+
+  // Resolve the selected item by its stable rowKey so selection survives
+  // risks updates (new results, reordering, insertions, removals).
+  const selectedIdx = selectedKey !== null ? (rowKeyIndex.get(selectedKey) ?? -1) : -1
+  const selected = selectedIdx !== -1 ? items[selectedIdx] : null
+
+  const totalPages = Math.ceil(items.length / RISK_PAGE_SIZE)
+  // Clamp page when risks updates shrink the page count (e.g. some risks
+  // resolved) — otherwise a user left on a now-out-of-range page sees an
+  // empty pageItems slice with no way back, since the pager itself may
+  // disappear if totalPages also drops to 1 or 0.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern, matches Vulnerabilities.tsx
+  useEffect(() => { setPage(p => totalPages > 0 ? Math.min(p, totalPages - 1) : 0) }, [totalPages])
+
+  if (!items.length) return null
+
+  const pageItems = items.slice(page * RISK_PAGE_SIZE, (page + 1) * RISK_PAGE_SIZE)
+
+  return (
+    <>
+    <div className="flex flex-col">
+      {pageItems.map((r, i) => {
+        const itemIndex = page * RISK_PAGE_SIZE + i
+        const rowKey = rowKeys[itemIndex]
+        const rawLevel = r.level?.toLowerCase() ?? 'info'
+        const level = (RISK_LEVEL_CLASSES[rawLevel as 'critical' | 'warning' | 'info'] ? rawLevel : 'info') as 'critical' | 'warning' | 'info'
+        return (
+          <div key={rowKey} className="border-b border-border">
+            <div
+              onClick={() => setSelectedKey(k => k === rowKey ? null : rowKey)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedKey(k => k === rowKey ? null : rowKey) } }}
+              className="flex items-center gap-2.5 px-4 py-2.5 cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
+              tabIndex={0}
+              role="button"
+              aria-label={`${r.package ?? 'risk'} — view details`}
+            >
+              <RiskLevelBadge level={level} />
+              <span className="font-mono text-xs font-semibold">
+                {r.package ?? '—'}
+              </span>
+              {r.version && (
+                <span className="text-[11px] text-muted-foreground">{r.version}</span>
+              )}
+              {r.ecosystem && (
+                <span className="text-[11px] text-muted-foreground uppercase">{r.ecosystem}</span>
+              )}
+              <span className="flex-1" />
+              {typeof r.score === 'number' && (
+                <span className="text-[11px] text-muted-foreground font-mono shrink-0">Score {r.score}</span>
+              )}
+            </div>
+          </div>
+        )
+      })}
+      {totalPages > 1 && (
+        <div className="flex items-center gap-2 px-4 py-2.5 border-t border-border">
+          <button
+            type="button"
+            onClick={() => { setPage(p => p - 1); setSelectedKey(null) }}
+            disabled={page === 0}
+            className={`text-xs px-2.5 py-1 rounded border border-border bg-muted ${page === 0 ? 'text-muted-foreground cursor-default' : 'text-foreground cursor-pointer'}`}
+          >←</button>
+          <span className="text-xs text-muted-foreground">
+            {page * RISK_PAGE_SIZE + 1}–{Math.min((page + 1) * RISK_PAGE_SIZE, items.length)} of {items.length}
+          </span>
+          <button
+            type="button"
+            onClick={() => { setPage(p => p + 1); setSelectedKey(null) }}
+            disabled={page >= totalPages - 1}
+            className={`text-xs px-2.5 py-1 rounded border border-border bg-muted ${page >= totalPages - 1 ? 'text-muted-foreground cursor-default' : 'text-foreground cursor-pointer'}`}
+          >→</button>
+        </div>
+      )}
+    </div>
+    {selected && (
+      <Drawer
+        title={`${selected.package ?? 'Risk'}`}
+        onClose={() => setSelectedKey(null)}
+      >
+        <RawRiskDetail r={selected} />
+      </Drawer>
+    )}
+    </>
+  )
+}
+
+// ── Scan detail tabs (findings vs. risks) ───────────────────────────────────────
+
+// Shared by every raw-scan-result expansion (HostDetail, Scans, RepoScans'
+// ResultsPanel): shows findings and risks as separate sub-tabs rather than
+// stacking both tables, so a scan with both stays readable instead of forcing
+// the reader to scroll past one to reach the other. When only one of the two
+// is present, that table renders directly with no tab bar — a single-type
+// result shouldn't gain tab chrome it doesn't need.
+type ScanDetailTab = 'findings' | 'risks'
+
+export function ScanDetailTabs({
+  findings, risks,
+}: {
+  findings: Record<string, unknown>[] | null | undefined
+  risks: Record<string, unknown>[] | null | undefined
+}) {
+  const hasFindings = !!findings?.length
+  const hasRisks = !!risks?.length
+  const [tab, setTab] = useState<ScanDetailTab>(hasFindings ? 'findings' : 'risks')
+  const uid = useId()
+  const TAB_IDS: readonly ScanDetailTab[] = ['findings', 'risks']
+  const { tabRef, onKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
+
+  if (hasFindings && !hasRisks) return <FindingsTable findings={findings!} />
+  if (hasRisks && !hasFindings) return <RisksTable risks={risks!} />
+  if (!hasFindings && !hasRisks) return null
+
+  return (
+    <div>
+      <div className="scan-card-inner-tab-bar" role="tablist">
+        <button
+          ref={tabRef('findings')}
+          type="button"
+          role="tab"
+          aria-selected={tab === 'findings'}
+          aria-controls={`${uid}-panel-findings`}
+          id={`${uid}-tab-findings`}
+          tabIndex={tab === 'findings' ? 0 : -1}
+          onClick={() => setTab('findings')}
+          onKeyDown={onKeyDown}
+          className={tab === 'findings' ? 'tab-btn-inner active' : 'tab-btn-inner'}
+        >
+          Findings ({findings!.length})
+        </button>
+        <button
+          ref={tabRef('risks')}
+          type="button"
+          role="tab"
+          aria-selected={tab === 'risks'}
+          aria-controls={`${uid}-panel-risks`}
+          id={`${uid}-tab-risks`}
+          tabIndex={tab === 'risks' ? 0 : -1}
+          onClick={() => setTab('risks')}
+          onKeyDown={onKeyDown}
+          className={tab === 'risks' ? 'tab-btn-inner active' : 'tab-btn-inner'}
+        >
+          Risks ({risks!.length})
+        </button>
+      </div>
+      <div id={`${uid}-panel-findings`} role="tabpanel" aria-labelledby={`${uid}-tab-findings`} hidden={tab !== 'findings'}>
+        <FindingsTable findings={findings!} />
+      </div>
+      <div id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`} hidden={tab !== 'risks'}>
+        <RisksTable risks={risks!} />
+      </div>
+    </div>
   )
 }
 
