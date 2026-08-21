@@ -170,6 +170,61 @@ class TestIngestScan:
         assert r.status_code == 201
         assert r.json()["status"] == "clean"
 
+    async def test_scan_risks_are_saved(self, client, api_key, db):
+        raw, _ = api_key
+        risks = [{"kind": "maintainer_change", "package": "left-pad", "severity": "medium"}]
+        r = await client.post("/api/ingest/scans", json={
+            "hostname": "risk-host",
+            "project_path": "/app/riskyproject",
+            "scan_type": "project",
+            "status": "findings",
+            "finding_count": 0,
+            "risks": risks,
+        }, headers=api_key_header(raw))
+        assert r.status_code == 201
+        data = r.json()
+        assert data["risks"] == risks
+
+        result = await db.execute(select(Scan).where(Scan.project_path == "/app/riskyproject"))
+        scan = result.scalar_one_or_none()
+        assert scan is not None
+        assert scan.risks == risks
+
+    async def test_scan_risk_failures_are_saved(self, client, api_key, db):
+        """Host scans must carry risk_failures through like repo scans do —
+        otherwise a scan with scoring failures is stored and displayed as
+        zero-risk/clean, since extra Pydantic fields are silently dropped."""
+        raw, _ = api_key
+        r = await client.post("/api/ingest/scans", json={
+            "hostname": "risk-failure-host",
+            "project_path": "/app/partialscan",
+            "scan_type": "project",
+            "status": "findings",
+            "finding_count": 0,
+            "risks": [],
+            "risk_failures": 2,
+        }, headers=api_key_header(raw))
+        assert r.status_code == 201
+        data = r.json()
+        assert data["risk_failures"] == 2
+
+        result = await db.execute(select(Scan).where(Scan.project_path == "/app/partialscan"))
+        scan = result.scalar_one_or_none()
+        assert scan is not None
+        assert scan.risk_failures == 2
+
+    async def test_scan_negative_risk_failures_is_rejected(self, client, api_key):
+        raw, _ = api_key
+        r = await client.post("/api/ingest/scans", json={
+            "hostname": "bad-risk-failure-host",
+            "project_path": "/app/badscan",
+            "scan_type": "project",
+            "status": "findings",
+            "finding_count": 0,
+            "risk_failures": -1,
+        }, headers=api_key_header(raw))
+        assert r.status_code == 422
+
 
 @pytest.mark.asyncio
 class TestIngestConfig:

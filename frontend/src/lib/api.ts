@@ -70,6 +70,9 @@ export interface Scan {
   id: number; host_id: number; project_path: string
   scan_type: string; status: ScanStatus; finding_count: number
   findings: Record<string, unknown>[] | null
+  risks: Record<string, unknown>[] | null
+  /** Packages package-alert could not score this scan. Nonzero means an empty/short `risks` list may reflect scoring failure, not a clean scan. */
+  risk_failures: number
   sources: string[] | null
   scanned_at: string; received_at: string
 }
@@ -126,6 +129,11 @@ export interface RepoScanResult {
   status: RepoScanStatus; triggered_by: ScanTrigger
   pa_version: string | null; finding_count: number | null
   findings: Record<string, unknown>[] | null
+  risks: Record<string, unknown>[] | null
+  /** Packages package-alert could not score this scan. Nonzero means an
+   *  empty/short `risks` list may reflect scoring failure, not a clean scan —
+   *  see risk_lifecycle.update_risk_records on the backend for the same rule. */
+  risk_failures: number
   sources: string[] | null
   error_message: string | null; ecs_task_arn: string | null
   notified: boolean
@@ -203,6 +211,43 @@ export interface ScanFlag {
 export interface ScanOptions {
   flags: ScanFlag[]
   exclusions: string[][]
+}
+
+export interface RiskSignal {
+  name: string
+  score: number
+  reason: string
+}
+
+export interface RiskRecord {
+  id: number
+  repo_scan_id: number
+  package: string
+  ecosystem: string
+  package_version: string | null
+  score: number
+  level: 'critical' | 'warning' | 'info'
+  signals: RiskSignal[]
+  first_found_at: string
+  closed_at: string | null
+  closed_reason: string | null
+  reopen_count: number
+  accepted_by_id: number | null
+  accepted_at: string | null
+  accepted_reason: string | null
+  accepted_until: string | null
+  is_accepted: boolean
+  days_open: number
+  scan_name: string | null
+}
+
+export type RiskSortKey = 'level' | 'days_open' | 'repo' | 'score'
+
+export interface PaginatedRisks {
+  items: RiskRecord[]
+  total: number
+  page: number
+  page_size: number
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -377,6 +422,35 @@ export const api = {
       request<FindingRecord>(`/findings/${id}/accept`, { method: 'POST', body: JSON.stringify(body) }),
     revokeAccept: (id: number): Promise<FindingRecord> =>
       request<FindingRecord>(`/findings/${id}/accept`, { method: 'DELETE' }),
+  },
+
+  risks: {
+    list: (params?: {
+      level?: ('critical' | 'warning' | 'info')[]
+      accepted?: boolean
+      repo_scan_id?: number
+      page?: number
+      page_size?: number
+      sort?: RiskSortKey
+      sort_dir?: SortDir
+    }): Promise<PaginatedRisks> => {
+      const q = new URLSearchParams()
+      if (params?.level) params.level.forEach(l => q.append('level', l))
+      if (params?.accepted !== undefined) q.set('accepted', String(params.accepted))
+      if (params?.repo_scan_id !== undefined) q.set('repo_scan_id', String(params.repo_scan_id))
+      if (params?.page !== undefined) q.set('page', String(params.page))
+      if (params?.page_size !== undefined) q.set('page_size', String(params.page_size))
+      if (params?.sort) q.set('sort', params.sort)
+      if (params?.sort_dir) q.set('sort_dir', params.sort_dir)
+      const qs = q.toString()
+      return request<PaginatedRisks>(`/risks${qs ? `?${qs}` : ''}`)
+    },
+    listAllForRepo: (repoScanId: number): Promise<RiskRecord[]> =>
+      request<RiskRecord[]>(`/repo-scans/${repoScanId}/risks`),
+    accept: (id: number, body: { reason: string; accepted_until?: string }): Promise<RiskRecord> =>
+      request<RiskRecord>(`/risks/${id}/accept`, { method: 'POST', body: JSON.stringify(body) }),
+    revokeAccept: (id: number): Promise<RiskRecord> =>
+      request<RiskRecord>(`/risks/${id}/accept`, { method: 'DELETE' }),
   },
 
   findingSettings: {

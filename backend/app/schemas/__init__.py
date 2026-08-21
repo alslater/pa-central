@@ -224,6 +224,9 @@ class ScanPayload(BaseModel):
     status: ScanStatus
     finding_count: int = 0
     findings: list[dict] | None = None
+    risks: list[dict] | None = None
+    # See RepoScanResultIngest.risk_failures for why negative counts are rejected.
+    risk_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
     unpinned: list[dict] | None = None  # packages without pinned versions
     scanned_at: datetime | None = None
@@ -245,6 +248,8 @@ class ScanOut(OrmBase):
     status: ScanStatus
     finding_count: int
     findings: list[dict] | None
+    risks: list[dict] | None
+    risk_failures: int
     sources: list[str] | None
     scanned_at: datetime
     received_at: datetime
@@ -476,6 +481,8 @@ class RepoScanResultOut(OrmBase):
     pa_version: str | None
     finding_count: int
     findings: list[dict] | None
+    risks: list[dict] | None
+    risk_failures: int
     sources: list[str] | None
     error_message: str | None
     triggered_by: ScanTrigger
@@ -500,6 +507,13 @@ class RepoScanResultIngest(BaseModel):
     pa_version: str | None = None
     finding_count: int = 0
     findings: list[dict] | None = None
+    risks: list[dict] | None = None
+    # A negative value is truthy in Python, so `if not result.risk_failures`
+    # (risk_lifecycle.update_risk_records) would treat it as "scoring failed"
+    # and skip closing absent risks, while the frontend's `> 0` check would
+    # simultaneously hide the warning that explains why — stale risks with no
+    # visible reason. Rejecting negative counts at ingestion closes that gap.
+    risk_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
     error_message: str | None = None
 
@@ -573,3 +587,54 @@ class FindingSettingsPut(BaseModel):
     sla_high_days: int = Field(..., gt=0)
     sla_medium_days: int = Field(..., gt=0)
     finding_retention_days: int = Field(..., gt=0)
+
+
+# ── Risk Record ─────────────────────────────────────────────────────────────
+
+class RiskRecordOut(OrmBase):
+    id: int
+    repo_scan_id: int
+    package: str
+    ecosystem: str
+    package_version: str | None
+    score: int
+    level: str
+    signals: list[dict]
+    first_found_at: datetime
+    closed_at: datetime | None
+    closed_reason: str | None = None
+    reopen_count: int
+    accepted_by_id: int | None
+    accepted_at: datetime | None
+    accepted_reason: str | None
+    accepted_until: date | None
+    is_accepted: bool
+    days_open: int
+    scan_name: str | None = None
+
+
+class PaginatedRisksOut(BaseModel):
+    items: list[RiskRecordOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class RiskAcceptBody(BaseModel):
+    reason: str = Field(..., max_length=1000)
+    accepted_until: date | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_not_be_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("reason must not be blank")
+        return stripped
+
+    @field_validator("accepted_until")
+    @classmethod
+    def must_be_future(cls, v: date | None) -> date | None:
+        if v is not None and v <= datetime.now(UTC).date():
+            raise ValueError("accepted_until must be a future date")
+        return v

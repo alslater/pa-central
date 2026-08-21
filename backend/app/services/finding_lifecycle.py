@@ -237,9 +237,14 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
     """
     incoming: dict[tuple[str, str, str], dict] = {}
     for f in (result.findings or []):
-        advisory_id = (f.get("advisory_id") or "").strip()
-        package = (f.get("package") or "").strip()
-        ecosystem = (f.get("ecosystem") or "").strip()
+        # Truncate to the FindingRecord column widths before building the
+        # identity key: a key built from the untruncated value would never
+        # match the open row's (already-truncated) advisory_id/package/
+        # ecosystem on a later scan, closing and recreating a long-valued
+        # finding's record every time.
+        advisory_id = (f.get("advisory_id") or "").strip()[:200]
+        package = (f.get("package") or "").strip()[:200]
+        ecosystem = (f.get("ecosystem") or "").strip()[:100]
         if not advisory_id or not package:
             continue
         key = (advisory_id, package, ecosystem)
@@ -359,9 +364,11 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
 
         record = FindingRecord(
             repo_scan_id=result.repo_scan_id,
-            advisory_id=advisory_id[:200],
-            package=package[:200],
-            ecosystem=ecosystem[:100],
+            # advisory_id/package/ecosystem are already truncated to column
+            # width — see the identity-key construction above.
+            advisory_id=advisory_id,
+            package=package,
+            ecosystem=ecosystem,
             severity=severity,
             summary=_str_or_none(finding.get("summary"), 2000),
             details=_str_or_none(finding.get("details")),

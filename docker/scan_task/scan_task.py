@@ -61,6 +61,8 @@ def post_result(
     pa_version: str | None = None,
     finding_count: int = 0,
     findings: list[dict] | None = None,
+    risks: list[dict] | None = None,
+    risk_failures: int = 0,
     sources: list[str] | None = None,
     error_message: str | None = None,
 ) -> None:
@@ -69,11 +71,14 @@ def post_result(
         "repo_scan_result_id": result_id,
         "status": status,
         "finding_count": finding_count,
+        "risk_failures": risk_failures,
     }
     if pa_version:
         payload["pa_version"] = pa_version
     if findings is not None:
         payload["findings"] = findings
+    if risks is not None:
+        payload["risks"] = risks
     if sources is not None:
         payload["sources"] = sources
     if error_message:
@@ -180,8 +185,16 @@ def run_pa_scan(
     config_toml: str,
     scan_flags: str = "",
     subfolder: str = "",
-) -> tuple[int, list[dict], list[str]]:
-    """Run pa scan-project. Returns (finding_count, findings, sources)."""
+) -> tuple[int, list[dict], list[dict] | None, int, list[str]]:
+    """Run pa scan-project. Returns (finding_count, findings, risks, risk_failures, sources).
+
+    risks is None (not []) when the key is absent from pa's JSON output — an
+    older package-alert binary that predates risk scoring — so the backend
+    can tell "no risk pass was reported" apart from "risk pass ran, found
+    nothing". package-alert 0.7.0+ always includes the key, even for a clean
+    scan, so only a missing key carries this ambiguity; the value itself is
+    passed through unchanged otherwise.
+    """
     import shlex
     cmd = [str(Path(sys.executable).parent / "pa"), "scan-project", "--format", "json"]
     config_tmp = None
@@ -235,8 +248,10 @@ def run_pa_scan(
             f"pa scan-project output was not valid JSON: {exc}. Output: {snippet!r}"
         ) from exc
     findings = data.get("findings", [])
+    risks = data.get("risks")
+    risk_failures = data.get("risk_failures", 0)
     sources = data.get("sources", [])
-    return len(findings), findings, sources
+    return len(findings), findings, risks, risk_failures, sources
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -292,7 +307,7 @@ def main() -> None:
         try:
             scan_flags = get_env("PA_SCAN_FLAGS", "")
             subfolder = get_env("PA_SUBFOLDER", "")
-            finding_count, findings, sources = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
+            finding_count, findings, risks, risk_failures, sources = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
         except RuntimeError as exc:
             post_result(fleet_url, fleet_key, result_id, "failed",
                         pa_version=pa_version, error_message=str(exc))
@@ -304,6 +319,8 @@ def main() -> None:
             pa_version=pa_version,
             finding_count=finding_count,
             findings=findings,
+            risks=risks,
+            risk_failures=risk_failures,
             sources=sources or None,
         )
 

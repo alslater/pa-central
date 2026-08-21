@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { api, Host, Alert, Scan, ConfigTemplate } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
-import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, useToast, Empty, FindingsTable, timeAgo } from '@/components/ui'
+import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, useToast, Empty, ScanDetailTabs, timeAgo } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useRovingTabs } from '@/lib/hooks'
 import { ArrowLeft, Bell, ScanSearch, Settings2 } from 'lucide-react'
@@ -185,15 +185,20 @@ function HostScans({ hostId }: { hostId: number }) {
 
   return (
     <div className="host-scans-list">
-      {scans.map(s => (
+      {scans.map(s => {
+        const hasFindings = !!s.findings?.length
+        const hasRisks = !!s.risks?.length
+        const hasRiskFailures = (s.risk_failures ?? 0) > 0
+        const hasDetail = hasFindings || hasRisks
+        return (
         <Card key={s.id}>
           <div
-            className={`host-scan-card-row ${s.findings?.length ? 'data-tr-clickable' : 'data-tr-static'}`}
-            onClick={s.findings?.length ? () => setExpanded(expanded === s.id ? null : s.id) : undefined}
-            onKeyDown={s.findings?.length ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(expanded === s.id ? null : s.id) } }) : undefined}
-            role={s.findings?.length ? 'button' : undefined}
-            tabIndex={s.findings?.length ? 0 : undefined}
-            aria-expanded={s.findings?.length ? expanded === s.id : undefined}
+            className={`host-scan-card-row ${hasDetail ? 'data-tr-clickable' : 'data-tr-static'}`}
+            onClick={hasDetail ? () => setExpanded(expanded === s.id ? null : s.id) : undefined}
+            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(expanded === s.id ? null : s.id) } }) : undefined}
+            role={hasDetail ? 'button' : undefined}
+            tabIndex={hasDetail ? 0 : undefined}
+            aria-expanded={hasDetail ? expanded === s.id : undefined}
           >
             <ScanBadge status={s.status} />
             <div className="host-scan-info">
@@ -210,15 +215,36 @@ function HostScans({ hostId }: { hostId: number }) {
             <span className={`host-scan-count ${s.finding_count > 0 ? 'has-findings' : 'no-findings'}`}>
               {s.finding_count} finding{s.finding_count !== 1 ? 's' : ''}
             </span>
+            {s.risks == null ? (
+              <span
+                className="host-scan-count no-findings"
+                title="No risk pass was reported for this scan — risk status is unknown, not clean"
+              >
+                risks unavailable
+              </span>
+            ) : (
+              <span className={`host-scan-count ${hasRisks ? 'has-findings' : 'no-findings'}`}>
+                {s.risks.length} risk{s.risks.length !== 1 ? 's' : ''}
+              </span>
+            )}
+            {hasRiskFailures && (
+              <span
+                className="host-scan-count has-findings"
+                title={`Risk scoring was unavailable for ${s.risk_failures} package(s) — an empty or short risk list may not mean the scan is clean`}
+              >
+                ⚠ {s.risk_failures} unscored
+              </span>
+            )}
             <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>
           </div>
-          {expanded === s.id && s.findings && s.findings.length > 0 && (
+          {expanded === s.id && hasDetail && (
             <div className="host-scan-findings-panel">
-              <FindingsTable findings={s.findings} />
+              <ScanDetailTabs findings={s.findings} risks={s.risks} />
             </div>
           )}
         </Card>
-      ))}
+        )
+      })}
     </div>
   )
 }

@@ -20,6 +20,7 @@ from app.models import (
     RepoScan,
     RepoScanResult,
     RepoScanStatus,
+    RiskRecord,
     ScanTrigger,
     User,
     utcnow,
@@ -31,6 +32,7 @@ from app.schemas import (
     RepoScanResultOut,
     RepoScanResultWithName,
     RepoScanUpdate,
+    RiskRecordOut,
 )
 from app.services.finding_lifecycle import (
     build_finding_out,
@@ -40,6 +42,7 @@ from app.services.finding_lifecycle import (
     get_global_sla,
     not_accepted_sql_expr,
 )
+from app.services.risk_lifecycle import build_risk_out
 
 router = APIRouter(prefix="/repo-scans", tags=["repo-scans"])
 
@@ -328,6 +331,28 @@ async def get_repo_scan_findings(scan_id: int, db: DbDep, _: AdminDep) -> list[F
         )
     )
     return [build_finding_out(r, eff_high, eff_medium, now) for r in rows.scalars().all()]
+
+
+@router.get("/{scan_id}/risks", response_model=list[RiskRecordOut])
+async def get_repo_scan_risks(scan_id: int, db: DbDep, _: AdminDep) -> list[RiskRecordOut]:
+    scan = await db.get(RepoScan, scan_id)
+    if not scan:
+        raise HTTPException(404, "Repo scan not found")
+    now = datetime.now(UTC)
+    rows = await db.execute(
+        select(RiskRecord)
+        .where(RiskRecord.repo_scan_id == scan_id)
+        .where(RiskRecord.closed_at.is_(None))
+        .order_by(
+            case(
+                (RiskRecord.level == "critical", 0),
+                (RiskRecord.level == "warning", 1),
+                else_=2,
+            ),
+            RiskRecord.first_found_at,
+        )
+    )
+    return [build_risk_out(r, now) for r in rows.scalars().all()]
 
 
 @router.post("/{scan_id}/trigger", status_code=202)

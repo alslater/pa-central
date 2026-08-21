@@ -220,6 +220,8 @@ class Scan(Base):
     status: Mapped[ScanStatus] = mapped_column(Enum(ScanStatus), default=ScanStatus.clean)
     finding_count: Mapped[int] = mapped_column(Integer, default=0)
     findings: Mapped[list | None] = mapped_column(JSON, nullable=True)  # list of finding dicts
+    risks: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    risk_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # e.g. ["Python (requirements.txt)", "Node.js (package-lock.json)"]
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     scanned_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
@@ -358,6 +360,12 @@ class RepoScanResult(Base):
     pa_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     findings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    risks: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Packages package-alert could not score (network/registry failures, etc).
+    # A nonzero count means an empty/partial `risks` list may reflect scoring
+    # failure rather than a clean scan — see risk_lifecycle.update_risk_records,
+    # which reads this to decide whether it's safe to close absent risks.
+    risk_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     triggered_by: Mapped[ScanTrigger] = mapped_column(
@@ -425,4 +433,45 @@ class FindingRecord(Base):
         # filter used by all breach queries. Also serves single-column closed_at lookups
         # (leftmost prefix), so the old ix_finding_records_closed_at is not needed.
         Index("ix_finding_records_closed_breach", "closed_at", "sla_breach_cutoff_at"),
+    )
+
+
+# ── Risk Record ────────────────────────────────────────────────────────────
+
+class RiskRecord(Base):
+    __tablename__ = "risk_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    repo_scan_id: Mapped[int] = mapped_column(
+        ForeignKey("repo_scans.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Identity key — two columns; not unique (episodes repeat)
+    package: Mapped[str] = mapped_column(String(200), nullable=False)
+    ecosystem: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    # Refreshed on every scan while the episode stays open — unlike
+    # FindingRecord's detail fields, which freeze at first appearance. A risk
+    # score legitimately drifts as the heuristic engine's own inputs change,
+    # and showing a stale score would mislead. See risk_lifecycle.py.
+    package_version: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    level: Mapped[str] = mapped_column(String(20), nullable=False)
+    signals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+    first_found_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    closed_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reopen_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    accepted_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    accepted_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    accepted_until: Mapped[date | None] = mapped_column(Date(), nullable=True)
+
+    __table_args__ = (
+        Index("ix_risk_records_identity", "repo_scan_id", "package", "ecosystem"),
+        Index("ix_risk_records_closed", "closed_at"),
     )
