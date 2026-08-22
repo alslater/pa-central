@@ -238,6 +238,41 @@
   margin-bottom: 28px;
 }
 
+/* ── Severity tiles row (Dashboard) ───────────────────────────────────────── */
+.severity-tiles-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.severity-tile {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.severity-tile-badge {
+  display: flex;
+  align-items: center;
+}
+
+.severity-tile-count {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: hsl(var(--foreground));
+}
+
+/* ── Exposure chart card ─────────────────────────────────────────────────── */
+.exposure-chart-card {
+  padding: 16px;
+  margin-bottom: 28px;
+}
+
 /* ── Alert table cell variants ───────────────────────────────────────────── */
 .data-td-mono-12 {
   padding: 10px 16px;

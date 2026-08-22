@@ -11,18 +11,15 @@ from app.api.deps import require_admin
 from app.core.database import get_db
 from app.models import (
     AlertSeverity,
+    FindingAcceptanceEvent,
     FindingRecord,
     RepoScan,
-    SettingValueType,
-    SystemSetting,
     User,
     utcnow,
 )
 from app.schemas import (
     FindingAcceptBody,
     FindingRecordOut,
-    FindingSettingsOut,
-    FindingSettingsPut,
     PaginatedFindingsOut,
 )
 from app.services.finding_lifecycle import (
@@ -155,6 +152,10 @@ async def accept_finding(
     record.accepted_at = now
     record.accepted_reason = body.reason
     record.accepted_until = body.accepted_until
+    db.add(FindingAcceptanceEvent(
+        finding_record_id=record.id, action="accepted", at=now,
+        by_user_id=user.id, reason=body.reason, accepted_until=body.accepted_until,
+    ))
     await db.commit()
     await db.refresh(record)
     global_high, global_medium, _retention = await get_global_sla(db)
@@ -167,13 +168,17 @@ async def accept_finding(
 async def revoke_accept(
     finding_id: int,
     db: DbDep,
-    _: AdminDep,
+    user: AdminDep,
 ) -> FindingRecordOut:
     record = await db.get(FindingRecord, finding_id)
     if not record:
         raise HTTPException(404, "Finding record not found")
     if record.closed_at is not None:
         raise HTTPException(409, "Cannot revoke acceptance on a closed finding")
+    now = utcnow()
+    db.add(FindingAcceptanceEvent(
+        finding_record_id=record.id, action="revoked", at=now, by_user_id=user.id,
+    ))
     record.accepted_by_id = None
     record.accepted_at = None
     record.accepted_reason = None
@@ -183,37 +188,4 @@ async def revoke_accept(
     global_high, global_medium, _retention = await get_global_sla(db)
     scan = await db.get(RepoScan, record.repo_scan_id)
     eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium) if scan else (global_high, global_medium)
-    now = utcnow()
     return build_finding_out(record, eff_high, eff_medium, now, scan_name=scan.name if scan else None)
-
-
-@router.get("/settings/findings", response_model=FindingSettingsOut)
-async def get_finding_settings(db: DbDep, _: AdminDep) -> FindingSettingsOut:
-    high, medium, retention = await get_global_sla(db)
-    return FindingSettingsOut(sla_high_days=high, sla_medium_days=medium, finding_retention_days=retention)
-
-
-@router.put("/settings/findings", response_model=FindingSettingsOut)
-async def put_finding_settings(body: FindingSettingsPut, db: DbDep, user: AdminDep) -> FindingSettingsOut:
-    now = utcnow()
-    for key, value in [
-        ("sla_high_days", str(body.sla_high_days)),
-        ("sla_medium_days", str(body.sla_medium_days)),
-        ("finding_retention_days", str(body.finding_retention_days)),
-    ]:
-        existing = await db.get(SystemSetting, key)
-        if existing:
-            existing.value = value
-            existing.updated_at = now
-            existing.updated_by_id = user.id
-        else:
-            db.add(SystemSetting(
-                key=key, value=value, value_type=SettingValueType.int,
-                updated_at=now, updated_by_id=user.id,
-            ))
-    await db.commit()
-    return FindingSettingsOut(
-        sla_high_days=body.sla_high_days,
-        sla_medium_days=body.sla_medium_days,
-        finding_retention_days=body.finding_retention_days,
-    )

@@ -2,6 +2,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.models import AlertSeverity, RepoScan, RiskRecord
 from tests.conftest import auth
@@ -189,6 +190,58 @@ class TestRisksAPI:
         r = await client.delete(f"/api/risks/{record.id}/accept", headers=auth(admin_token))
         assert r.status_code == 200
         assert r.json()["is_accepted"] is False
+
+    async def test_accept_risk_creates_acceptance_event(self, client, db, admin_user, admin_token):
+        from app.models import RiskAcceptanceEvent
+        _, record = await _make_scan_and_risk(db, admin_user)
+        future = datetime.now(UTC).date() + timedelta(days=365)
+        r = await client.post(
+            f"/api/risks/{record.id}/accept",
+            json={"reason": "internal fork, verified safe", "accepted_until": future.isoformat()},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+        events = (await db.execute(
+            select(RiskAcceptanceEvent).where(RiskAcceptanceEvent.risk_record_id == record.id)
+        )).scalars().all()
+        assert len(events) == 1
+        assert events[0].action == "accepted"
+        assert events[0].by_user_id == admin_user.id
+        assert events[0].reason == "internal fork, verified safe"
+        assert events[0].accepted_until == future
+
+    async def test_revoke_risk_accept_creates_revoked_event(self, client, db, admin_user, admin_token):
+        from app.models import RiskAcceptanceEvent
+        _, record = await _make_scan_and_risk(db, admin_user, accepted=True)
+        r = await client.delete(f"/api/risks/{record.id}/accept", headers=auth(admin_token))
+        assert r.status_code == 200
+        events = (await db.execute(
+            select(RiskAcceptanceEvent)
+            .where(RiskAcceptanceEvent.risk_record_id == record.id)
+            .order_by(RiskAcceptanceEvent.at)
+        )).scalars().all()
+        # _make_scan_and_risk(accepted=True) doesn't itself insert an event
+        # (it directly sets the live columns to seed test state) — so the only
+        # event expected here is the one this revoke call creates.
+        assert len(events) == 1
+        assert events[0].action == "revoked"
+        assert events[0].by_user_id == admin_user.id
+
+    async def test_accept_then_revoke_risk_creates_two_events_in_order(self, client, db, admin_user, admin_token):
+        from app.models import RiskAcceptanceEvent
+        _, record = await _make_scan_and_risk(db, admin_user)
+        await client.post(
+            f"/api/risks/{record.id}/accept",
+            json={"reason": "internal fork, verified safe"},
+            headers=auth(admin_token),
+        )
+        await client.delete(f"/api/risks/{record.id}/accept", headers=auth(admin_token))
+        events = (await db.execute(
+            select(RiskAcceptanceEvent)
+            .where(RiskAcceptanceEvent.risk_record_id == record.id)
+            .order_by(RiskAcceptanceEvent.at)
+        )).scalars().all()
+        assert [e.action for e in events] == ["accepted", "revoked"]
 
     async def test_accept_missing_risk_404(self, client, admin_token):
         r = await client.post("/api/risks/999999/accept", json={"reason": "x"}, headers=auth(admin_token))

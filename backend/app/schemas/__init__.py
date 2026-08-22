@@ -344,8 +344,18 @@ class DashboardStats(BaseModel):
     hosts_offline: int
     unacknowledged_alerts: int
     critical_alerts: int
-    scans_with_findings: int
+    outstanding_scans_by_severity: dict[str, int] | None
     recent_alerts: list[AlertOut]
+
+
+class ExposurePoint(BaseModel):
+    date: date
+    exposure: int
+
+
+class ExposureHistoryOut(BaseModel):
+    points: list[ExposurePoint]
+    window_days: int
 
 
 # ── System Settings ───────────────────────────────────────────────────────────
@@ -474,6 +484,18 @@ class RepoScanOut(OrmBase):
     scan_config_hash: str | None
 
 
+class RepoScanHeadlineOut(BaseModel):
+    id: int
+    name: str
+    url: str
+    latest_status: RepoScanStatus | None
+    latest_scanned_at: datetime | None
+    open_findings_by_severity: dict[str, int]
+    open_risks_by_level: dict[str, int]
+    breach: bool
+    breach_count: int
+
+
 class RepoScanResultOut(OrmBase):
     id: int
     repo_scan_id: int
@@ -575,18 +597,6 @@ class FindingAcceptBody(BaseModel):
         if v is not None and v <= datetime.now(UTC).date():
             raise ValueError('accepted_until must be a future date')
         return v
-
-
-class FindingSettingsOut(BaseModel):
-    sla_high_days: int
-    sla_medium_days: int
-    finding_retention_days: int
-
-
-class FindingSettingsPut(BaseModel):
-    sla_high_days: int = Field(..., gt=0)
-    sla_medium_days: int = Field(..., gt=0)
-    finding_retention_days: int = Field(..., gt=0)
 
 
 # ── Risk Record ─────────────────────────────────────────────────────────────

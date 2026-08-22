@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +14,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     AlertSeverity,
+    FindingAcceptanceEvent,
     FindingRecord,
     RepoScan,
     RepoScanResult,
@@ -145,6 +149,105 @@ def is_accepted(record: FindingRecord, now: datetime | None = None) -> bool:
         if record.accepted_until <= today:
             return False
     return True
+
+
+EXPOSURE_WEIGHTS: dict[AlertSeverity, int] = {
+    AlertSeverity.critical: 81,
+    AlertSeverity.high: 27,
+    AlertSeverity.medium: 9,
+    AlertSeverity.warning: 5,
+    AlertSeverity.low: 3,
+    AlertSeverity.info: 1,
+}
+
+
+def is_accepted_as_of(events: Sequence[Any], day: date) -> bool:
+    """Replay a record's acceptance events up to and including `day` and
+    return whether it was accepted as of that day.
+
+    `events` must be that record's own FindingAcceptanceEvent/
+    RiskAcceptanceEvent rows (or any object exposing the same `.action`,
+    `.at`, `.accepted_until` attributes), in any order — this function sorts
+    them itself. Replacing the old "read accepted_at/accepted_until off the
+    record directly" approach: those columns only ever reflect *current*
+    state, and revoking nulls them out, destroying any evidence of a past
+    acceptance episode. The event log is append-only, so replaying it
+    correctly reconstructs "was this accepted on day X" for any past day,
+    including days during an acceptance that has since been revoked.
+    """
+    relevant = [e for e in events if e.at.date() <= day]
+    if not relevant:
+        return False
+    latest = max(relevant, key=lambda e: e.at)
+    if latest.action != "accepted":
+        return False
+    return latest.accepted_until is None or latest.accepted_until > day
+
+
+async def load_finding_acceptance_events(
+    db: AsyncSession, record_ids: Sequence[int]
+) -> dict[int, list[Any]]:
+    """Fetch the acceptance events for `record_ids`, grouped by record id.
+
+    Every id in `record_ids` gets an entry (empty list if it has no events),
+    so callers can index the result directly. Deliberately one plain
+    `IN (...)` select with no date filtering in SQL — the day-by-day replay
+    happens in Python (see compute_exposure_history), keeping this
+    dialect-neutral.
+
+    Shared by both exposure-history endpoints (dashboard-wide and per-scan)
+    so the two cannot drift apart.
+    """
+    events_by_record_id: dict[int, list[Any]] = {rid: [] for rid in record_ids}
+    if not events_by_record_id:
+        return events_by_record_id
+    event_rows = await db.execute(
+        select(
+            FindingAcceptanceEvent.finding_record_id,
+            FindingAcceptanceEvent.action,
+            FindingAcceptanceEvent.at,
+            FindingAcceptanceEvent.accepted_until,
+        ).where(FindingAcceptanceEvent.finding_record_id.in_(list(events_by_record_id)))
+    )
+    for record_id, action, at, accepted_until in event_rows:
+        events_by_record_id[record_id].append(
+            SimpleNamespace(action=action, at=at, accepted_until=accepted_until)
+        )
+    return events_by_record_id
+
+
+def compute_exposure_history(
+    records: Sequence[FindingRecord],
+    events_by_record_id: dict[int, list],
+    window_days: int,
+    today: date,
+) -> list[tuple[date, int]]:
+    """Return [(day, weighted_exposure_sum), ...] for the last window_days
+    days ending at (and including) today, oldest first.
+
+    A record contributes EXPOSURE_WEIGHTS[record.severity] to a given day if
+    it was open (first_found_at.date() <= day and (closed_at is None or
+    closed_at.date() > day)) and not accepted as of that day, per that
+    record's own acceptance event history (events_by_record_id[record.id]).
+    Pure Python — deliberately no SQL date-series logic, per this project's
+    dialect-neutrality requirement for this feature (see design spec).
+    """
+    days = [today - timedelta(days=i) for i in range(window_days - 1, -1, -1)]
+    totals = {day: 0 for day in days}
+    for record in records:
+        weight = EXPOSURE_WEIGHTS.get(record.severity, 0)
+        first_found_day = record.first_found_at.date()
+        closed_day = record.closed_at.date() if record.closed_at is not None else None
+        record_events = events_by_record_id.get(record.id, [])
+        for day in days:
+            if first_found_day > day:
+                continue
+            if closed_day is not None and closed_day <= day:
+                continue
+            if is_accepted_as_of(record_events, day):
+                continue
+            totals[day] += weight
+    return [(day, totals[day]) for day in days]
 
 
 def in_breach(record: FindingRecord, now: datetime) -> bool:

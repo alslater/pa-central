@@ -9,9 +9,8 @@ vi.mock('@/hooks/useAuth', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    hosts:   { get: vi.fn() },
+    hosts:   { get: vi.fn(), latestScans: vi.fn() },
     alerts:  { list: vi.fn() },
-    scans:   { list: vi.fn() },
     configs: { list: vi.fn(), forHost: vi.fn() },
   },
 }))
@@ -55,7 +54,7 @@ async function openScansTab() {
 
 describe('HostDetail scan row — risks', () => {
   it('a scan with risks but no findings is expandable and shows the risks table', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 1, host_id: 1, project_path: '/app/riskyproject', scan_type: 'project',
       status: 'findings', finding_count: 0, findings: null,
       risks: [{ package: 'reqeusts', ecosystem: 'pypi', score: 46, level: 'warning',
@@ -73,7 +72,7 @@ describe('HostDetail scan row — risks', () => {
   })
 
   it('shows a risk count badge alongside the finding count', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 3, host_id: 1, project_path: '/app/multirisk', scan_type: 'project',
       status: 'findings', finding_count: 2, findings: [{ package: 'flask' }],
       risks: [
@@ -90,7 +89,7 @@ describe('HostDetail scan row — risks', () => {
   })
 
   it('shows a "risks unavailable" marker, not silence, when risks is null', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 4, host_id: 1, project_path: '/app/onlyfindings', scan_type: 'project',
       status: 'findings', finding_count: 1, findings: [{ package: 'flask' }], risks: null,
       sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
@@ -103,7 +102,7 @@ describe('HostDetail scan row — risks', () => {
   })
 
   it('shows "0 risks", not unavailable, when risks is an explicit empty list', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 7, host_id: 1, project_path: '/app/cleanexplicit', scan_type: 'project',
       status: 'findings', finding_count: 1, findings: [{ package: 'flask' }], risks: [],
       sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
@@ -116,7 +115,7 @@ describe('HostDetail scan row — risks', () => {
   })
 
   it('shows an unscored warning when risk_failures is nonzero', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 5, host_id: 1, project_path: '/app/partialscan', scan_type: 'project',
       status: 'findings', finding_count: 0, findings: null,
       risks: [], risk_failures: 2,
@@ -129,7 +128,7 @@ describe('HostDetail scan row — risks', () => {
   })
 
   it('does not show an unscored warning when risk_failures is zero', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 6, host_id: 1, project_path: '/app/cleanriskscan', scan_type: 'project',
       status: 'findings', finding_count: 1, findings: [{ package: 'flask' }],
       risks: [], risk_failures: 0,
@@ -142,7 +141,7 @@ describe('HostDetail scan row — risks', () => {
   })
 
   it('a scan with neither findings nor risks renders as a static, non-expandable row', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 2, host_id: 1, project_path: '/app/cleanproject', scan_type: 'project',
       status: 'clean', finding_count: 0, findings: null, risks: null,
       sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
@@ -153,5 +152,48 @@ describe('HostDetail scan row — risks', () => {
     const row = pathEl.closest('.host-scan-card-row') as HTMLElement
     expect(row).not.toHaveAttribute('role', 'button')
     expect(within(row).queryByRole('button')).not.toBeInTheDocument()
+  })
+})
+
+describe('HostDetail scan row — rendering GET /hosts/{id}/latest-scans results', () => {
+  // Grouping to one row per project_path and sorting alphabetically are now
+  // done server-side (see TestHostLatestScans in backend/tests/test_hosts.py)
+  // — GET /scans caps at 100 rows by default and is the package-alert CLI's
+  // live surface, so client-side dedup against it could silently drop
+  // projects once a host had more scans than that cap. The component now
+  // renders whatever the endpoint returns, in the order it returns it.
+  it('renders one card per row returned by the endpoint, in the given order', async () => {
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/alpha', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+      { id: 2, host_id: 1, project_path: '/zeta', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    await openScansTab()
+
+    await screen.findByText('/alpha')
+    const paths = screen.getAllByText(/^\/(alpha|zeta)$/).map(el => el.textContent)
+    expect(paths).toEqual(['/alpha', '/zeta'])
+  })
+
+  it('expanding one project card does not expand another', async () => {
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/app/one', scan_type: 'project', status: 'findings',
+        finding_count: 1, findings: [{ package: 'flask' }], risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+      { id: 2, host_id: 1, project_path: '/app/two', scan_type: 'project', status: 'findings',
+        finding_count: 1, findings: [{ package: 'requests' }], risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    const user = await openScansTab()
+
+    const oneEl = await screen.findByText('/app/one')
+    const oneRow = oneEl.closest('.host-scan-card-row') as HTMLElement
+    await user.click(oneRow)
+
+    expect(screen.getByText('flask')).toBeInTheDocument()
+    expect(screen.queryByText('requests')).not.toBeInTheDocument()
   })
 })

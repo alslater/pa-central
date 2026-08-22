@@ -17,6 +17,9 @@ const KNOWN_SETTINGS: Array<{
   { key: 'smtp_tls_mode',  label: 'TLS Mode',      type: 'string' },
   { key: 'scan_result_retention_days',  label: 'Retention (days)',  hint: 'e.g. 30', type: 'int' },
   { key: 'scan_result_retention_count', label: 'Retention (count)', hint: 'e.g. 100', type: 'int' },
+  { key: 'sla_high_days',           label: 'SLA: High/Critical (days)', hint: 'e.g. 14', type: 'int' },
+  { key: 'sla_medium_days',         label: 'SLA: Medium (days)',        hint: 'e.g. 90', type: 'int' },
+  { key: 'finding_retention_days',  label: 'Finding retention (days)',  hint: 'e.g. 365', type: 'int' },
   { key: 'app_base_url',         label: 'App Base URL',          hint: 'https://pa-central.example.com', type: 'string' },
   { key: 'default_cron_timezone', label: 'Default cron timezone', hint: 'IANA name, e.g. Europe/London — leave blank for UTC', type: 'string' },
 ]
@@ -117,6 +120,25 @@ export default function SystemSettings() {
                     label={label}
                     type="number"
                     inputMode="numeric"
+                    min={0}
+                    placeholder={hint}
+                    value={settings[key] ?? ''}
+                    onChange={e => set(key, e.target.value)}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section>
+              <h3 className="text-style-caption mb-3">Findings / SLA</h3>
+              <div className="flex flex-col gap-3">
+                {KNOWN_SETTINGS.filter(s => s.key === 'sla_high_days' || s.key === 'sla_medium_days' || s.key === 'finding_retention_days').map(({ key, label, hint }) => (
+                  <Input
+                    key={key}
+                    label={label}
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
                     placeholder={hint}
                     value={settings[key] ?? ''}
                     onChange={e => set(key, e.target.value)}

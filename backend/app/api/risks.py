@@ -9,9 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.database import get_db
-from app.models import RepoScan, RiskRecord, User, utcnow
+from app.models import RepoScan, RiskAcceptanceEvent, RiskRecord, User, utcnow
 from app.schemas import PaginatedRisksOut, RiskAcceptBody, RiskRecordOut
-from app.services.risk_lifecycle import build_risk_out
+from app.services.risk_lifecycle import (
+    accepted_sql_expr,
+    build_risk_out,
+    not_accepted_sql_expr,
+)
 
 router = APIRouter(tags=["risks"])
 
@@ -30,22 +34,6 @@ _LEVEL_RANK = case(
     (RiskRecord.level == "info", 2),
     else_=3,
 )
-
-
-def _accepted_expr(today):
-    from sqlalchemy import and_, or_
-    return and_(
-        RiskRecord.accepted_at.isnot(None),
-        or_(RiskRecord.accepted_until.is_(None), RiskRecord.accepted_until > today),
-    )
-
-
-def _not_accepted_expr(today):
-    from sqlalchemy import and_, or_
-    return or_(
-        RiskRecord.accepted_at.is_(None),
-        and_(RiskRecord.accepted_until.isnot(None), RiskRecord.accepted_until <= today),
-    )
 
 
 def _apply_sort(
@@ -93,9 +81,9 @@ async def list_risks(
     if repo_scan_id is not None:
         base_stmt = base_stmt.where(RiskRecord.repo_scan_id == repo_scan_id)
     if accepted is True:
-        base_stmt = base_stmt.where(_accepted_expr(now.date()))
+        base_stmt = base_stmt.where(accepted_sql_expr(now.date()))
     elif accepted is False:
-        base_stmt = base_stmt.where(_not_accepted_expr(now.date()))
+        base_stmt = base_stmt.where(not_accepted_sql_expr(now.date()))
 
     count_stmt = select(func.count()).select_from(base_stmt.subquery())
     total = (await db.execute(count_stmt)).scalar_one()
@@ -126,6 +114,10 @@ async def accept_risk(
     record.accepted_at = now
     record.accepted_reason = body.reason
     record.accepted_until = body.accepted_until
+    db.add(RiskAcceptanceEvent(
+        risk_record_id=record.id, action="accepted", at=now,
+        by_user_id=user.id, reason=body.reason, accepted_until=body.accepted_until,
+    ))
     await db.commit()
     await db.refresh(record)
     scan = await db.get(RepoScan, record.repo_scan_id)
@@ -136,19 +128,22 @@ async def accept_risk(
 async def revoke_risk_accept(
     risk_id: int,
     db: DbDep,
-    _: AdminDep,
+    user: AdminDep,
 ) -> RiskRecordOut:
     record = await db.get(RiskRecord, risk_id)
     if not record:
         raise HTTPException(404, "Risk record not found")
     if record.closed_at is not None:
         raise HTTPException(409, "Cannot revoke acceptance on a closed risk")
+    now = utcnow()
+    db.add(RiskAcceptanceEvent(
+        risk_record_id=record.id, action="revoked", at=now, by_user_id=user.id,
+    ))
     record.accepted_by_id = None
     record.accepted_at = None
     record.accepted_reason = None
     record.accepted_until = None
     await db.commit()
     await db.refresh(record)
-    now = utcnow()
     scan = await db.get(RepoScan, record.repo_scan_id)
     return build_risk_out(record, now, scan_name=scan.name if scan else None)

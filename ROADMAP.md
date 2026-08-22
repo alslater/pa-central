@@ -34,29 +34,72 @@ Sequential integer PKs exposed in API responses allow enumeration attacks — an
 
 ---
 
-### Server-side pagination and sorting for GET /findings
+### GET /findings pagination is unused; the live unpaginated path is now GET /repo-scans/{id}/findings
 
-Currently `GET /findings` fetches up to 500 records and sorting/paging is done client-side in the Vulnerabilities page. This is fine at low finding volumes but will become slow and bandwidth-heavy as findings grow.
+`GET /findings` already has server-side `page`/`page_size`/`sort`/`sort_dir`
+support (`backend/app/api/findings.py`, `api.findings.list()` in
+`frontend/src/lib/api.ts`), added by an earlier pagination effort. That work
+is still correct but is now dead from the UI's perspective: the ui-overhaul
+branch removed the standalone Vulnerabilities page that called it, and
+**no frontend view calls `api.findings.list()` any more.**
 
-**Proposed solution:** Add `page`, `page_size`, `sort`, and `sort_dir` query params to `GET /findings`. Return total count alongside results (response envelope or `X-Total-Count` header). Replace client-side `useMemo` sort + pagination in `Vulnerabilities.tsx` with server-driven state that refetches on page/sort change.
+Current findings consumers, for accuracy:
+- `Scans.tsx` calls `api.findings.listAllForRepo(scanId)` →
+  `GET /repo-scans/{id}/findings` (`backend/app/api/repo_scans.py`,
+  `get_repo_scan_findings`) — this returns every open finding for one scan
+  as a plain `list[FindingRecordOut]`, with **no pagination and no row cap
+  at all** (not even a fixed limit like the old `GET /findings` had).
+- `HostDetail.tsx` reads `findings`/`risks` directly off the `Scan` object's
+  embedded JSON columns (from `GET /hosts/{id}/latest-scans`) — there is no
+  separate findings fetch on that page to paginate.
 
-**Files affected:** `backend/app/api/findings.py`, `backend/app/schemas/__init__.py` (paginated response shape), `frontend/src/lib/api.ts` (`findings.listAll` signature), `frontend/src/pages/Vulnerabilities.tsx` (remove client-side sort/page state, add server-driven refetch).
+So the original entry's proposed fix (add pagination to `GET /findings`)
+would not touch either live view — `GET /findings` isn't in their call
+path at all. The unbounded-fetch risk that actually matters today is on
+the per-repo-scan endpoint instead, and it's scoped differently: one scan's
+finding count, not the whole table.
 
-**Known interim limitation:** When `breach` or `accepted` filtering is active, the endpoint caps the SQL scan at `limit * 10` rows (oldest-first) and filters in Python. If matching rows are sparse in that window, fewer than `limit` results are returned even when more exist further in the dataset. Server-side pagination eliminates this by iterating pages until the result set is full.
+**Proposed solution:** If a repo scan's finding count becomes large enough
+to matter, add pagination to `GET /repo-scans/{id}/findings` (and the
+sibling `/risks` endpoint) and to `Scans.tsx`'s `RecordTabs`/`FindingsTable`
+consumption of it, rather than to `GET /findings`.
 
-**Secondary issue — over-broad age cutoff:** For `breach=true` with no `repo_scan_id`, the pre-filter cutoff uses the minimum effective SLA across *all* scans, not just those with open findings in scope. If any scan has a very strict SLA override (e.g. `sla_high_days=1`), the cutoff becomes 1 day, causing every open finding older than 1 day to pass into Python evaluation — widening the candidate set and increasing the likelihood of hitting the `limit * 10` cap and under-returning results. The correct fix is either (a) compute the minimum SLA only across scans that have open findings matching the current filters (joined query), or (b) move breach evaluation fully server-side as part of pagination. Both require the server-side pagination work to be worthwhile.
+**Files affected:** `backend/app/api/repo_scans.py` (`get_repo_scan_findings`,
+`get_repo_scan_risks`), `frontend/src/lib/api.ts` (`listAllForRepo`
+signature), `frontend/src/pages/Scans.tsx`.
 
-**Trigger:** When the 500-row fetch becomes visibly slow, users report the cap, or breach/accepted filters visibly under-return results.
+**GET /findings' existing pagination:** left in place rather than removed —
+it's correct, tested, and still reachable directly (e.g. for external API
+use or a future admin view), even though nothing in the current UI calls
+it. If it's confirmed to have no remaining consumer at all (internal or
+external) by the time this is revisited, removing the dead
+`api.findings.list()` client method and the unused query params would be
+the simpler cleanup.
+
+**Known limitations carried over from the original `GET /findings` design**
+(apply if that endpoint's pagination is ever exercised again): when `breach`
+or `accepted` filtering is active, the endpoint caps the SQL scan at
+`limit * 10` rows (oldest-first) and filters in Python, so sparse matches
+can under-return; and for `breach=true` with no `repo_scan_id`, the
+pre-filter age cutoff uses the minimum effective SLA across *all* scans
+rather than just those with open findings in scope, widening the candidate
+set unnecessarily when any scan has a strict SLA override.
+
+**Trigger:** When a single repo scan's finding count makes `Scans.tsx`
+visibly slow to expand, or `GET /repo-scans/{id}/findings` becomes
+expensive to fetch/render in one shot.
 
 ---
 
 ### Clickable table rows — accessibility refinement
 
-The Vulnerabilities page uses `role="button"` + `tabIndex` on `<tr>` elements to make rows open a detail drawer. This pattern is widely supported (keyboard nav, `aria-label`, Enter/Space handlers all present) but is semantically impure — some screen readers treat `<tr role="button">` inconsistently.
+`FindingsTable` in `frontend/src/components/ui.tsx` uses `role="button"` + `tabIndex` on `<tr>` elements to make rows open a detail drawer. This pattern is widely supported (keyboard nav, `aria-label`, Enter/Space handlers all present) but is semantically impure — some screen readers treat `<tr role="button">` inconsistently.
+
+**Note (2026-08-22):** originally written against the standalone Vulnerabilities page, which the ui-overhaul branch removed. The pattern itself lives on in `FindingsTable` (`ui.tsx`), consumed by `RecordTabs` on the Scans/Repo Scans/Host Detail pages — this entry now targets that shared component instead.
 
 **Preferred alternative:** Move the interactive affordance to a dedicated "View" `<button>` inside a `<td>`, keeping the row purely tabular. This is a layout change (adds a visible or visually-hidden button column) so it is deferred until there is appetite for the UI churn.
 
-**Files affected:** `frontend/src/pages/Vulnerabilities.tsx`
+**Files affected:** `frontend/src/components/ui.tsx` (`FindingsTable`)
 
 ---
 
@@ -64,9 +107,11 @@ The Vulnerabilities page uses `role="button"` + `tabIndex` on `<tr>` elements to
 
 `ui.tsx` currently imports `api` and contains network-coupled components (`FindingAcceptForm`, `FindingRevokeButton`, `FindingRecordDetail`, `FindingsTable`). This increases the load cost for every page that imports `@/components/ui` and couples the UI layer to the data layer.
 
-**Proposed solution:** Move the finding-specific components to a dedicated module (e.g. `frontend/src/components/findings.tsx` or `components/findings/index.tsx`). Update import sites in `RepoScans.tsx`, `Vulnerabilities.tsx`, `Scans.tsx`, `HostDetail.tsx`, and the test file. `ui.tsx` then has no direct `api` dependency and remains a pure presentational layer.
+**Proposed solution:** Move the finding-specific components to a dedicated module (e.g. `frontend/src/components/findings.tsx` or `components/findings/index.tsx`). Update import sites in `RepoScans.tsx`, `Scans.tsx`, `HostDetail.tsx`, and the test file. `ui.tsx` then has no direct `api` dependency and remains a pure presentational layer.
 
-**Files affected:** new `frontend/src/components/findings.tsx`, `frontend/src/components/ui.tsx` (remove finding components and `api` import), `frontend/src/pages/RepoScans.tsx`, `frontend/src/pages/Vulnerabilities.tsx`, `frontend/src/pages/Scans.tsx`, `frontend/src/pages/HostDetail.tsx`, `frontend/src/test/findingsTable.test.tsx`.
+**Note (2026-08-22):** `Vulnerabilities.tsx` (a prior import site) was removed by the ui-overhaul branch; `Scans.tsx` (new in that branch) is now an import site instead — file list below updated accordingly.
+
+**Files affected:** new `frontend/src/components/findings.tsx`, `frontend/src/components/ui.tsx` (remove finding components and `api` import), `frontend/src/pages/RepoScans.tsx`, `frontend/src/pages/Scans.tsx`, `frontend/src/pages/HostDetail.tsx`, `frontend/src/test/findingsTable.test.tsx`.
 
 **Trigger:** When the bundle size becomes a concern or when adding further feature-specific components to ui.tsx would compound the problem.
 
@@ -88,6 +133,50 @@ When a host project or repo scan produces findings or errors, it should open an 
 - Frontend: an "Open issues" view (or badge on Dashboard) showing which projects are currently failing, since when, and finding count
 
 **Files affected:** `backend/app/models/__init__.py`, new migration, `backend/app/api/ingest.py` (open/close logic on scan ingest), new `backend/app/api/issues.py` endpoint, `frontend/src/lib/api.ts`, new frontend page or dashboard widget.
+
+---
+
+### Dashboard exposure-history endpoint loads every FindingRecord unfiltered
+
+`GET /dashboard/exposure-history` fetches every `FindingRecord` row in the
+database with no scan or date bound, then (since the acceptance-history fix)
+issues a second unfiltered query for every one of those records' acceptance
+events. At current data volumes this is negligible; at large finding counts
+it becomes two full table scans and a large in-memory dict per request.
+
+**Proposed fix:** Bound the initial fetch to records relevant to the
+requested window (e.g. `first_found_at <= today` and `closed_at IS NULL OR
+closed_at >= window_start`), which also naturally bounds the acceptance-event
+fetch to the same record set.
+
+**Files affected:** `backend/app/api/dashboard.py`, `backend/app/services/finding_lifecycle.py`.
+
+**Trigger:** When finding volume makes the dashboard exposure-history request
+visibly slow.
+
+---
+
+### Test suite can silently migrate the real dev database
+
+`backend/app/main.py` auto-runs `alembic upgrade head` on startup. Any test
+that boots the actual FastAPI app (rather than a fully isolated test DB) can
+migrate/stamp `backend/pa_central.db` — the real dev database — as a side
+effect, even though nobody explicitly ran Alembic against it. This already
+caused one incident (2026-08-22, acceptance-history migration task): the dev
+DB ended up stamped to a new revision without the corresponding schema
+change actually applied, requiring manual recovery (backup, reset
+`alembic_version` to the prior revision, re-run `upgrade head` properly).
+
+**Proposed fix:** Either gate the startup auto-migration behind an explicit
+flag/env var so test runs never trigger it implicitly, or ensure every test
+that boots the app is forced onto an isolated database regardless of how it
+constructs the app instance.
+
+**Files affected:** `backend/app/main.py`, test fixtures that construct the
+FastAPI app.
+
+**Trigger:** Before the next migration-related task, to avoid repeating the
+same manual-recovery incident.
 
 ---
 

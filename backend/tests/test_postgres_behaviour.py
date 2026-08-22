@@ -18,8 +18,10 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.models import Host, RepoScan, RepoScanResult, RepoScanStatus, Scan, User
 from tests.conftest_postgres import make_async_engine
 from tests.test_postgres_migrations import HEAD_REVISION, alembic
 
@@ -685,6 +687,156 @@ class TestOpenFindingPartialIndex:
             sa.text("SELECT count(*) FROM finding_records")
         )).scalar()
         assert n == 3
+
+
+class TestRepoScanHeadlineLatestResultRanking:
+    """`list_repo_scan_headlines`'s per-scan latest-result lookup uses
+    ``row_number().over(partition_by=..., order_by=...)`` to rank results in
+    SQL rather than fetching every retained result and picking the first one
+    in Python. row_number() is ANSI-standard and not expected to diverge
+    between SQLite and PostgreSQL, but this is the first window-function
+    query in the codebase, so it's verified directly here rather than
+    assumed — enum status values must round-trip correctly through a
+    subquery column on PostgreSQL's native enum handling.
+    """
+
+    @pytest.fixture
+    async def session(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+        await engine.dispose()
+
+    async def test_ranks_results_per_scan_and_picks_latest(self, session):
+        scan_a = RepoScan(name="a", url="http://x/a", branch="main")
+        scan_b = RepoScan(name="b", url="http://x/b", branch="main")
+        session.add_all([scan_a, scan_b])
+        await session.flush()
+        session.add_all([
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.failed,
+                            started_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.success,
+                            started_at=datetime(2026, 1, 3, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.running,
+                            started_at=datetime(2026, 1, 2, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_b.id, status=RepoScanStatus.pending,
+                            started_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)),
+        ])
+        await session.commit()
+
+        result_rank = (
+            func.row_number()
+            .over(partition_by=RepoScanResult.repo_scan_id, order_by=RepoScanResult.started_at.desc())
+            .label("rank")
+        )
+        ranked = (
+            select(RepoScanResult.repo_scan_id, RepoScanResult.status, RepoScanResult.started_at, result_rank)
+            .where(RepoScanResult.repo_scan_id.in_([scan_a.id, scan_b.id]))
+            .subquery()
+        )
+        rows = await session.execute(
+            select(ranked.c.repo_scan_id, ranked.c.status, ranked.c.started_at).where(ranked.c.rank == 1)
+        )
+        latest_by_scan = {scan_id: (status, started_at) for scan_id, status, started_at in rows}
+
+        assert latest_by_scan[scan_a.id][0] == RepoScanStatus.success
+        assert latest_by_scan[scan_a.id][1] == datetime(2026, 1, 3, tzinfo=UTC)
+        assert latest_by_scan[scan_b.id][0] == RepoScanStatus.pending
+
+
+class TestHostLatestScansRanking:
+    """GET /hosts/{id}/latest-scans ranks per project_path in SQL, then
+    re-fetches full Scan ORM rows by id from the ranked-to-rank-1 subset —
+    a different shape from TestRepoScanHeadlineLatestResultRanking's ranked
+    subquery above (that one selects plain columns to avoid ORM-entity
+    round-tripping through a subquery; this one ranks only the id column,
+    then does a second select(Scan).where(Scan.id.in_(...)) to get back real
+    ORM objects for FastAPI's response_model=list[ScanOut] to serialize).
+    Verified directly against PostgreSQL since it's a new query shape.
+    """
+
+    @pytest.fixture
+    async def session(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+        await engine.dispose()
+
+    async def test_ranks_by_project_and_refetches_full_rows(self, session):
+        owner = User(email="owner@x.com", display_name="Owner", hashed_password="x")
+        session.add(owner)
+        await session.flush()
+        host = Host(name="h", hostname="h.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        session.add_all([
+            Scan(host_id=host.id, project_path="proj-a",
+                 scanned_at=datetime(2026, 1, 1, tzinfo=UTC), finding_count=3),
+            Scan(host_id=host.id, project_path="proj-a",
+                 scanned_at=datetime(2026, 1, 3, tzinfo=UTC), finding_count=0),
+            Scan(host_id=host.id, project_path="proj-b",
+                 scanned_at=datetime(2026, 1, 2, tzinfo=UTC), finding_count=1),
+        ])
+        await session.commit()
+
+        rank = (
+            func.row_number()
+            .over(
+                partition_by=Scan.project_path,
+                order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
+            )
+            .label("rank")
+        )
+        ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
+        latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
+        rows = await session.execute(
+            select(Scan).where(Scan.id.in_(latest_ids)).order_by(Scan.project_path)
+        )
+        scans = rows.scalars().all()
+
+        by_project = {s.project_path: s for s in scans}
+        assert set(by_project) == {"proj-a", "proj-b"}
+        assert by_project["proj-a"].finding_count == 0  # the later proj-a scan, not the earlier one
+
+    async def test_tied_scanned_at_breaks_tie_by_received_at(self, session):
+        """Without a secondary ORDER BY, PostgreSQL's row_number() tie-break
+        for equal scanned_at is unspecified — this pins received_at desc as
+        the deciding factor, matching the previous client-side behaviour
+        (iterate GET /scans' received_at-desc rows, keep the first match)."""
+        owner = User(email="owner2@x.com", display_name="Owner2", hashed_password="x")
+        session.add(owner)
+        await session.flush()
+        host = Host(name="h2", hostname="h2.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC)
+        session.add_all([
+            Scan(host_id=host.id, project_path="proj-retry", scanned_at=tied,
+                 received_at=tied - timedelta(minutes=5), finding_count=3),
+            Scan(host_id=host.id, project_path="proj-retry", scanned_at=tied,
+                 received_at=tied, finding_count=0),
+        ])
+        await session.commit()
+
+        rank = (
+            func.row_number()
+            .over(
+                partition_by=Scan.project_path,
+                order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
+            )
+            .label("rank")
+        )
+        ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
+        latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
+        rows = await session.execute(
+            select(Scan).where(Scan.id.in_(latest_ids))
+        )
+        scans = rows.scalars().all()
+
+        assert len(scans) == 1
+        assert scans[0].finding_count == 0  # the row with the greater received_at
 
 
 # ── Test fixture URL conversion ───────────────────────────────────────────────

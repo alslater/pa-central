@@ -99,7 +99,18 @@ export interface ApiKey {
 export interface DashboardStats {
   total_hosts: number; hosts_online: number; hosts_offline: number
   unacknowledged_alerts: number; critical_alerts: number
-  scans_with_findings: number; recent_alerts: Alert[]
+  outstanding_scans_by_severity: Record<AlertSeverity, number> | null
+  recent_alerts: Alert[]
+}
+
+export interface ExposurePoint {
+  date: string
+  exposure: number
+}
+
+export interface ExposureHistory {
+  points: ExposurePoint[]
+  window_days: number
 }
 
 export type CredentialType = 'none' | 'ssh_key' | 'https_token'
@@ -146,6 +157,15 @@ export interface RepoScanResultWithName extends RepoScanResult {
   scan_breach: boolean; scan_breach_count: number
 }
 
+export interface RepoScanHeadline {
+  id: number; name: string; url: string
+  latest_status: RepoScanStatus | null
+  latest_scanned_at: string | null
+  open_findings_by_severity: Record<AlertSeverity, number>
+  open_risks_by_level: Record<'critical' | 'warning' | 'info', number>
+  breach: boolean; breach_count: number
+}
+
 export interface FindingRecord {
   id: number
   repo_scan_id: number
@@ -182,12 +202,6 @@ export interface PaginatedFindings {
   total: number
   page: number
   page_size: number
-}
-
-export interface FindingSettings {
-  sla_high_days: number
-  sla_medium_days: number
-  finding_retention_days: number
 }
 
 export interface SystemSetting {
@@ -272,6 +286,8 @@ export const api = {
 
   dashboard: {
     get: () => request<DashboardStats>('/dashboard'),
+    exposureHistory: (days?: number) =>
+      request<ExposureHistory>(`/dashboard/exposure-history${days ? `?days=${days}` : ''}`),
   },
 
   hosts: {
@@ -280,6 +296,7 @@ export const api = {
     update: (id: number, data: Partial<Host>) =>
       request<Host>(`/hosts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: number) => request<void>(`/hosts/${id}`, { method: 'DELETE' }),
+    latestScans: (id: number) => request<Scan[]>(`/hosts/${id}/latest-scans`),
   },
 
   alerts: {
@@ -391,6 +408,9 @@ export const api = {
     results: (id: number) => request<RepoScanResult[]>(`/repo-scans/${id}/results`),
     allResults: (limit?: number) => request<RepoScanResultWithName[]>(`/repo-scans/results${limit ? `?limit=${limit}` : ''}`),
     scanOptions: () => request<ScanOptions>('/repo-scans/scan-options'),
+    headlines: () => request<RepoScanHeadline[]>('/repo-scans/headlines'),
+    exposureHistory: (id: number, days?: number) =>
+      request<ExposureHistory>(`/repo-scans/${id}/exposure-history${days ? `?days=${days}` : ''}`),
   },
 
   findings: {
@@ -451,11 +471,5 @@ export const api = {
       request<RiskRecord>(`/risks/${id}/accept`, { method: 'POST', body: JSON.stringify(body) }),
     revokeAccept: (id: number): Promise<RiskRecord> =>
       request<RiskRecord>(`/risks/${id}/accept`, { method: 'DELETE' }),
-  },
-
-  findingSettings: {
-    get: (): Promise<FindingSettings> => request<FindingSettings>('/settings/findings'),
-    update: (body: FindingSettings): Promise<FindingSettings> =>
-      request<FindingSettings>('/settings/findings', { method: 'PUT', body: JSON.stringify(body) }),
   },
 }

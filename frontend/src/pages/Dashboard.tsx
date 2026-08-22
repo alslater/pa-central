@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { api, DashboardStats } from '@/lib/api'
+import { api, DashboardStats, ExposureHistory } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, SeverityBadge, timeAgo } from '@/components/ui'
+import { ExposureChart } from '@/components/ExposureChart'
+import { useAuth } from '@/hooks/useAuth'
 import { Bell } from 'lucide-react'
 
 function StatCard({ label, value, sub, colorClass }: {
@@ -19,14 +21,26 @@ function StatCard({ label, value, sub, colorClass }: {
 }
 
 export default function Dashboard() {
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
   const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [exposureHistory, setExposureHistory] = useState<ExposureHistory | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.dashboard.get().then(setStats).catch(console.error).finally(() => setLoading(false))
-    const iv = setInterval(() => api.dashboard.get().then(setStats).catch(() => {}), 30000)
+    Promise.all([
+      api.dashboard.get(),
+      isAdmin ? api.dashboard.exposureHistory().catch(() => null) : Promise.resolve(null),
+    ])
+      .then(([s, eh]) => { setStats(s); setExposureHistory(eh) })
+      .catch(console.error)
+      .finally(() => setLoading(false))
+    const iv = setInterval(() => {
+      api.dashboard.get().then(setStats).catch(() => {})
+      if (isAdmin) api.dashboard.exposureHistory().then(setExposureHistory).catch(() => {})
+    }, 30000)
     return () => clearInterval(iv)
-  }, [])
+  }, [isAdmin])
 
   return (
     <Shell>
@@ -42,9 +56,35 @@ export default function Dashboard() {
               <StatCard label="Online" value={stats.hosts_online} colorClass="pass" />
               <StatCard label="Offline / Unknown" value={stats.hosts_offline} colorClass={stats.hosts_offline > 0 ? 'fail' : undefined} />
               <StatCard label="Unacked Alerts" value={stats.unacknowledged_alerts} colorClass={stats.unacknowledged_alerts > 0 ? 'warn' : undefined} />
-              <StatCard label="Critical" value={stats.critical_alerts} colorClass={stats.critical_alerts > 0 ? 'crit' : undefined} />
-              <StatCard label="Scans w/ Findings" value={stats.scans_with_findings} colorClass={stats.scans_with_findings > 0 ? 'warn' : undefined} />
+              <StatCard label="Critical Alerts" value={stats.critical_alerts} colorClass={stats.critical_alerts > 0 ? 'crit' : undefined} />
             </div>
+
+            {/* Repo scans with an outstanding finding, by severity */}
+            {stats.outstanding_scans_by_severity && (
+              <>
+                <div className="text-style-caption mb-2">Repo scans with outstanding findings</div>
+                <div className="severity-tiles-row">
+                  {(['critical', 'high', 'medium', 'warning', 'low', 'info'] as const).map(sev => (
+                    <Card key={sev} className="severity-tile">
+                      <div className="severity-tile-badge">
+                        <SeverityBadge severity={sev} />
+                      </div>
+                      <div className="severity-tile-count">
+                        {stats.outstanding_scans_by_severity![sev]}
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* Exposure history */}
+            {exposureHistory && exposureHistory.points.length > 0 && (
+              <>
+                <div className="text-style-caption mb-2">Exposure over time</div>
+                <ExposureChart points={exposureHistory.points} />
+              </>
+            )}
 
             {/* Recent alerts */}
             <Card>
