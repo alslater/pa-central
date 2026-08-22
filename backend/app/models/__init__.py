@@ -229,6 +229,18 @@ class Scan(Base):
 
     host: Mapped[Host] = relationship("Host", back_populates="scans")
 
+    __table_args__ = (
+        # Supports GET /hosts/{id}/latest-scans' row_number() ranking: filter
+        # by host_id, partition by project_path, order by scanned_at desc,
+        # received_at desc, id desc. That endpoint has no row cap (unlike
+        # GET /scans), so an unindexed scan+sort here means a full table scan
+        # on every host-detail page load.
+        Index(
+            "ix_scans_host_project_scanned_received_id",
+            "host_id", "project_path", "scanned_at", "received_at", "id",
+        ),
+    )
+
 
 # ── Config Template ────────────────────────────────────────────────────────────
 

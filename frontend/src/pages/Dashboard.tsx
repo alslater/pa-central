@@ -59,8 +59,8 @@ export default function Dashboard() {
               <StatCard label="Critical Alerts" value={stats.critical_alerts} colorClass={stats.critical_alerts > 0 ? 'crit' : undefined} />
             </div>
 
-            {/* Outstanding findings by severity */}
-            {stats.outstanding_findings_by_severity && (
+            {/* Repo scans with an outstanding finding, by severity */}
+            {stats.outstanding_scans_by_severity && (
               <>
                 <div className="text-style-caption mb-2">Repo scans with outstanding findings</div>
                 <div className="severity-tiles-row">
@@ -70,7 +70,7 @@ export default function Dashboard() {
                         <SeverityBadge severity={sev} />
                       </div>
                       <div className="severity-tile-count">
-                        {stats.outstanding_findings_by_severity![sev]}
+                        {stats.outstanding_scans_by_severity![sev]}
                       </div>
                     </Card>
                   ))}

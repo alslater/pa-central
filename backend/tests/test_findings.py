@@ -295,14 +295,15 @@ class TestFindingsAPI:
 
     async def test_accept_finding_sets_fields(self, client, db, admin_user, admin_token):
         _, record = await _make_scan_and_finding(db, admin_user)
+        future = (datetime.now(UTC).date() + timedelta(days=365)).isoformat()
         r = await client.post(f"/api/findings/{record.id}/accept",
-            json={"reason": "known risk", "accepted_until": "2027-01-01"},
+            json={"reason": "known risk", "accepted_until": future},
             headers=auth(admin_token))
         assert r.status_code == 200
         data = r.json()
         assert data["is_accepted"] is True
         assert data["accepted_reason"] == "known risk"
-        assert data["accepted_until"] == "2027-01-01"
+        assert data["accepted_until"] == future
 
     async def test_accept_finding_missing_reason_422(self, client, db, admin_user, admin_token):
         _, record = await _make_scan_and_finding(db, admin_user)
@@ -326,8 +327,9 @@ class TestFindingsAPI:
     async def test_accept_finding_creates_acceptance_event(self, client, db, admin_user, admin_token):
         from app.models import FindingAcceptanceEvent
         _, record = await _make_scan_and_finding(db, admin_user)
+        future = datetime.now(UTC).date() + timedelta(days=365)
         r = await client.post(f"/api/findings/{record.id}/accept",
-            json={"reason": "known risk", "accepted_until": "2027-01-01"},
+            json={"reason": "known risk", "accepted_until": future.isoformat()},
             headers=auth(admin_token))
         assert r.status_code == 200
         events = (await db.execute(
@@ -337,7 +339,7 @@ class TestFindingsAPI:
         assert events[0].action == "accepted"
         assert events[0].by_user_id == admin_user.id
         assert events[0].reason == "known risk"
-        assert events[0].accepted_until == date(2027, 1, 1)
+        assert events[0].accepted_until == future
 
     async def test_revoke_accept_creates_revoked_event(self, client, db, admin_user, admin_token):
         from app.models import FindingAcceptanceEvent

@@ -1,5 +1,5 @@
 """Tests for the RiskRecord model, schemas, and /api/risks endpoints."""
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -194,9 +194,10 @@ class TestRisksAPI:
     async def test_accept_risk_creates_acceptance_event(self, client, db, admin_user, admin_token):
         from app.models import RiskAcceptanceEvent
         _, record = await _make_scan_and_risk(db, admin_user)
+        future = datetime.now(UTC).date() + timedelta(days=365)
         r = await client.post(
             f"/api/risks/{record.id}/accept",
-            json={"reason": "internal fork, verified safe", "accepted_until": "2027-01-01"},
+            json={"reason": "internal fork, verified safe", "accepted_until": future.isoformat()},
             headers=auth(admin_token),
         )
         assert r.status_code == 200
@@ -207,7 +208,7 @@ class TestRisksAPI:
         assert events[0].action == "accepted"
         assert events[0].by_user_id == admin_user.id
         assert events[0].reason == "internal fork, verified safe"
-        assert events[0].accepted_until == date(2027, 1, 1)
+        assert events[0].accepted_until == future
 
     async def test_revoke_risk_accept_creates_revoked_event(self, client, db, admin_user, admin_token):
         from app.models import RiskAcceptanceEvent

@@ -344,7 +344,7 @@ class DashboardStats(BaseModel):
     hosts_offline: int
     unacknowledged_alerts: int
     critical_alerts: int
-    outstanding_findings_by_severity: dict[str, int] | None
+    outstanding_scans_by_severity: dict[str, int] | None
     recent_alerts: list[AlertOut]
 
 

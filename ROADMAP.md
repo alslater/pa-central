@@ -34,21 +34,60 @@ Sequential integer PKs exposed in API responses allow enumeration attacks — an
 
 ---
 
-### Server-side pagination and sorting for GET /findings
+### GET /findings pagination is unused; the live unpaginated path is now GET /repo-scans/{id}/findings
 
-Currently `GET /findings` fetches up to 500 records and sorting/paging is done client-side. This is fine at low finding volumes but will become slow and bandwidth-heavy as findings grow.
+`GET /findings` already has server-side `page`/`page_size`/`sort`/`sort_dir`
+support (`backend/app/api/findings.py`, `api.findings.list()` in
+`frontend/src/lib/api.ts`), added by an earlier pagination effort. That work
+is still correct but is now dead from the UI's perspective: the ui-overhaul
+branch removed the standalone Vulnerabilities page that called it, and
+**no frontend view calls `api.findings.list()` any more.**
 
-**Note (2026-08-22):** the dedicated Vulnerabilities page this was originally written against was removed by the ui-overhaul branch — findings are now browsed via the per-scan `RecordTabs`/`FindingsTable` views in `Scans.tsx`/`RepoScans.tsx`/`HostDetail.tsx` (see `frontend/src/components/ui.tsx`). The underlying `GET /findings` limitation is unchanged; this entry now targets whichever surface still calls `findings.listAll` client-side at the time this is picked up.
+Current findings consumers, for accuracy:
+- `Scans.tsx` calls `api.findings.listAllForRepo(scanId)` →
+  `GET /repo-scans/{id}/findings` (`backend/app/api/repo_scans.py`,
+  `get_repo_scan_findings`) — this returns every open finding for one scan
+  as a plain `list[FindingRecordOut]`, with **no pagination and no row cap
+  at all** (not even a fixed limit like the old `GET /findings` had).
+- `HostDetail.tsx` reads `findings`/`risks` directly off the `Scan` object's
+  embedded JSON columns (from `GET /hosts/{id}/latest-scans`) — there is no
+  separate findings fetch on that page to paginate.
 
-**Proposed solution:** Add `page`, `page_size`, `sort`, and `sort_dir` query params to `GET /findings`. Return total count alongside results (response envelope or `X-Total-Count` header). Replace client-side sort + pagination in the consuming frontend view(s) with server-driven state that refetches on page/sort change.
+So the original entry's proposed fix (add pagination to `GET /findings`)
+would not touch either live view — `GET /findings` isn't in their call
+path at all. The unbounded-fetch risk that actually matters today is on
+the per-repo-scan endpoint instead, and it's scoped differently: one scan's
+finding count, not the whole table.
 
-**Files affected:** `backend/app/api/findings.py`, `backend/app/schemas/__init__.py` (paginated response shape), `frontend/src/lib/api.ts` (`findings.listAll` signature), and whichever frontend view currently does client-side sort/page for findings.
+**Proposed solution:** If a repo scan's finding count becomes large enough
+to matter, add pagination to `GET /repo-scans/{id}/findings` (and the
+sibling `/risks` endpoint) and to `Scans.tsx`'s `RecordTabs`/`FindingsTable`
+consumption of it, rather than to `GET /findings`.
 
-**Known interim limitation:** When `breach` or `accepted` filtering is active, the endpoint caps the SQL scan at `limit * 10` rows (oldest-first) and filters in Python. If matching rows are sparse in that window, fewer than `limit` results are returned even when more exist further in the dataset. Server-side pagination eliminates this by iterating pages until the result set is full.
+**Files affected:** `backend/app/api/repo_scans.py` (`get_repo_scan_findings`,
+`get_repo_scan_risks`), `frontend/src/lib/api.ts` (`listAllForRepo`
+signature), `frontend/src/pages/Scans.tsx`.
 
-**Secondary issue — over-broad age cutoff:** For `breach=true` with no `repo_scan_id`, the pre-filter cutoff uses the minimum effective SLA across *all* scans, not just those with open findings in scope. If any scan has a very strict SLA override (e.g. `sla_high_days=1`), the cutoff becomes 1 day, causing every open finding older than 1 day to pass into Python evaluation — widening the candidate set and increasing the likelihood of hitting the `limit * 10` cap and under-returning results. The correct fix is either (a) compute the minimum SLA only across scans that have open findings matching the current filters (joined query), or (b) move breach evaluation fully server-side as part of pagination. Both require the server-side pagination work to be worthwhile.
+**GET /findings' existing pagination:** left in place rather than removed —
+it's correct, tested, and still reachable directly (e.g. for external API
+use or a future admin view), even though nothing in the current UI calls
+it. If it's confirmed to have no remaining consumer at all (internal or
+external) by the time this is revisited, removing the dead
+`api.findings.list()` client method and the unused query params would be
+the simpler cleanup.
 
-**Trigger:** When the 500-row fetch becomes visibly slow, users report the cap, or breach/accepted filters visibly under-return results.
+**Known limitations carried over from the original `GET /findings` design**
+(apply if that endpoint's pagination is ever exercised again): when `breach`
+or `accepted` filtering is active, the endpoint caps the SQL scan at
+`limit * 10` rows (oldest-first) and filters in Python, so sparse matches
+can under-return; and for `breach=true` with no `repo_scan_id`, the
+pre-filter age cutoff uses the minimum effective SLA across *all* scans
+rather than just those with open findings in scope, widening the candidate
+set unnecessarily when any scan has a strict SLA override.
+
+**Trigger:** When a single repo scan's finding count makes `Scans.tsx`
+visibly slow to expand, or `GET /repo-scans/{id}/findings` becomes
+expensive to fetch/render in one shot.
 
 ---
 

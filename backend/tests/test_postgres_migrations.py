@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "feb520b531fe"
+HEAD_REVISION = "0a1b037e15df"
 
 # The revision immediately before HEAD_REVISION — the point the acceptance-event
 # backfill test rewinds to so it can insert representative pre-migration data
@@ -465,6 +465,31 @@ class TestMigrationChain:
         assert indexdef is not None, "partial unique index was not created"
         assert "closed_at IS NULL" in indexdef, (
             f"index lost its WHERE clause, so it would block closed duplicates too: {indexdef}"
+        )
+
+    def test_scans_latest_scan_index_exists(self, postgres_url):
+        """`ix_scans_host_project_scanned_received_id` supports the
+        row_number() ranking query in GET /hosts/{id}/latest-scans (filter
+        by host_id, partition by project_path, order by scanned_at desc,
+        received_at desc, id desc). That endpoint has no row cap, so a
+        missing index would mean a full table scan + sort on every
+        host-detail page load. This confirms the index exists with its
+        columns in the expected order on a real PostgreSQL server.
+        """
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(postgres_url)
+        try:
+            with engine.connect() as conn:
+                indexdef = conn.execute(sa.text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE indexname = 'ix_scans_host_project_scanned_received_id'"
+                )).scalar()
+        finally:
+            engine.dispose()
+        assert indexdef is not None, "scans ranking index was not created"
+        assert "(host_id, project_path, scanned_at, received_at, id)" in indexdef, (
+            f"index column order does not match the query's filter/partition/sort "
+            f"columns: {indexdef}"
         )
 
     def test_every_altered_column_has_exactly_one_fk(self, postgres_url):

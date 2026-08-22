@@ -29,7 +29,7 @@ class TestDashboard:
         assert "hosts_offline" in data
         assert "unacknowledged_alerts" in data
         assert "critical_alerts" in data
-        assert "outstanding_findings_by_severity" in data
+        assert "outstanding_scans_by_severity" in data
         assert "recent_alerts" in data
 
     async def test_counts_hosts(self, client, admin_token, host):
@@ -91,7 +91,7 @@ class TestDashboard:
 
 
 @pytest.mark.asyncio
-class TestOutstandingFindingsBySeverity:
+class TestOutstandingScansBySeverity:
     async def test_admin_sees_per_severity_counts(self, client, admin_token, db, admin_user):
         scan_a = RepoScan(name="repo-a", url="https://x/a", branch="main", created_by_id=admin_user.id)
         scan_b = RepoScan(name="repo-b", url="https://x/b", branch="main", created_by_id=admin_user.id)
@@ -112,7 +112,7 @@ class TestOutstandingFindingsBySeverity:
 
         r = await client.get("/api/dashboard", headers=auth(admin_token))
         assert r.status_code == 200
-        counts = r.json()["outstanding_findings_by_severity"]
+        counts = r.json()["outstanding_scans_by_severity"]
         assert counts["critical"] == 2  # 2 distinct repo scans
         assert counts["high"] == 1
         assert counts["medium"] == 0
@@ -129,7 +129,7 @@ class TestOutstandingFindingsBySeverity:
         await db.commit()
 
         r = await client.get("/api/dashboard", headers=auth(admin_token))
-        assert r.json()["outstanding_findings_by_severity"]["critical"] == 0
+        assert r.json()["outstanding_scans_by_severity"]["critical"] == 0
 
     async def test_accepted_finding_not_counted(self, client, admin_token, db, admin_user):
         scan = RepoScan(name="repo-d", url="https://x/d", branch="main", created_by_id=admin_user.id)
@@ -145,12 +145,12 @@ class TestOutstandingFindingsBySeverity:
         await db.commit()
 
         r = await client.get("/api/dashboard", headers=auth(admin_token))
-        assert r.json()["outstanding_findings_by_severity"]["critical"] == 0
+        assert r.json()["outstanding_scans_by_severity"]["critical"] == 0
 
     async def test_non_admin_gets_none(self, client, operator_token):
         r = await client.get("/api/dashboard", headers=auth(operator_token))
         assert r.status_code == 200
-        assert r.json()["outstanding_findings_by_severity"] is None
+        assert r.json()["outstanding_scans_by_severity"] is None
 
 
 @pytest.mark.asyncio

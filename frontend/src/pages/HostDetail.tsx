@@ -178,26 +178,19 @@ function HostScans({ hostId }: { hostId: number }) {
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
 
-  useEffect(() => { api.scans.list({ host_id: hostId }).then(setScans).finally(() => setLoading(false)) }, [hostId])
+  // GET /hosts/{id}/latest-scans returns one row per project (already the
+  // latest scan for that project, ranked server-side) — unlike GET /scans,
+  // which caps at 100 rows by default and is the package-alert CLI's live
+  // surface, so it can't be relied on to return every project once a host
+  // has more scan history than that cap.
+  useEffect(() => { api.hosts.latestScans(hostId).then(setScans).finally(() => setLoading(false)) }, [hostId])
 
   if (loading) return <div className="loading-text">Loading…</div>
   if (!scans.length) return <Empty message="No scans from this host." />
 
-  // Group by project_path, keeping only the row with the most recent scanned_at
-  // per project — the host-agent surface has no lifecycle tracking, so we only
-  // ever want to show the latest state of each project, not every historical scan.
-  const latestByProject = new Map<string, Scan>()
-  for (const s of scans) {
-    const existing = latestByProject.get(s.project_path)
-    if (!existing || new Date(s.scanned_at).getTime() > new Date(existing.scanned_at).getTime()) {
-      latestByProject.set(s.project_path, s)
-    }
-  }
-  const projects = [...latestByProject.values()].sort((a, b) => a.project_path.localeCompare(b.project_path))
-
   return (
     <div className="host-scans-list">
-      {projects.map(s => {
+      {scans.map(s => {
         const hasFindings = !!s.findings?.length
         const hasRisks = !!s.risks?.length
         const hasRiskFailures = (s.risk_failures ?? 0) > 0

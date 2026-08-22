@@ -99,7 +99,7 @@ export interface ApiKey {
 export interface DashboardStats {
   total_hosts: number; hosts_online: number; hosts_offline: number
   unacknowledged_alerts: number; critical_alerts: number
-  outstanding_findings_by_severity: Record<AlertSeverity, number> | null
+  outstanding_scans_by_severity: Record<AlertSeverity, number> | null
   recent_alerts: Alert[]
 }
 
@@ -296,6 +296,7 @@ export const api = {
     update: (id: number, data: Partial<Host>) =>
       request<Host>(`/hosts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: number) => request<void>(`/hosts/${id}`, { method: 'DELETE' }),
+    latestScans: (id: number) => request<Scan[]>(`/hosts/${id}/latest-scans`),
   },
 
   alerts: {

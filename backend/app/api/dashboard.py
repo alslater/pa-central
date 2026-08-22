@@ -58,9 +58,12 @@ async def get_dashboard(
         await db.execute(recent_q.order_by(Alert.received_at.desc()).limit(10))
     ).scalars().all()
 
-    outstanding_by_severity: dict[str, int] | None = None
+    # Counts distinct repo scans with >=1 unaccepted open finding of that
+    # severity — NOT a count of findings. A repo scan with 5 open critical
+    # findings still contributes only 1 to the "critical" bucket.
+    outstanding_scans_by_severity: dict[str, int] | None = None
     if user.role == UserRole.admin:
-        outstanding_by_severity = {s.value: 0 for s in AlertSeverity}
+        outstanding_scans_by_severity = {s.value: 0 for s in AlertSeverity}
         rows = await db.execute(
             select(FindingRecord.severity, func.count(func.distinct(FindingRecord.repo_scan_id)))
             .where(FindingRecord.closed_at.is_(None))
@@ -68,7 +71,7 @@ async def get_dashboard(
             .group_by(FindingRecord.severity)
         )
         for severity, count in rows:
-            outstanding_by_severity[severity.value] = count
+            outstanding_scans_by_severity[severity.value] = count
 
     return DashboardStats(
         total_hosts=total_hosts or 0,
@@ -76,7 +79,7 @@ async def get_dashboard(
         hosts_offline=(total_hosts or 0) - (hosts_online or 0),
         unacknowledged_alerts=unacknowledged or 0,
         critical_alerts=critical or 0,
-        outstanding_findings_by_severity=outstanding_by_severity,
+        outstanding_scans_by_severity=outstanding_scans_by_severity,
         recent_alerts=[AlertOut.model_validate(a) for a in recent_alerts],
     )
 
