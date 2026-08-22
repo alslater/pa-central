@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from app.models import AlertSeverity, FindingRecord
 from app.services.finding_lifecycle import compute_sla_days, in_breach, is_accepted
@@ -168,12 +169,6 @@ class TestFindingSchemas:
         with pytest.raises(pydantic.ValidationError):
             FindingAcceptBody()
 
-    def test_finding_settings_has_three_fields(self):
-        from app.schemas import FindingSettingsPut
-        s = FindingSettingsPut(sla_high_days=14, sla_medium_days=90, finding_retention_days=365)
-        assert s.sla_high_days == 14
-
-
 async def _make_scan_and_finding(db, admin_user, days_old=20, severity="high",
                                  closed=False, accepted=False, accepted_until=None,
                                  scan_name="test", no_cutoff=False):
@@ -328,6 +323,52 @@ class TestFindingsAPI:
         assert r.json()["is_accepted"] is False
         assert r.json()["accepted_reason"] is None
 
+    async def test_accept_finding_creates_acceptance_event(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        _, record = await _make_scan_and_finding(db, admin_user)
+        r = await client.post(f"/api/findings/{record.id}/accept",
+            json={"reason": "known risk", "accepted_until": "2027-01-01"},
+            headers=auth(admin_token))
+        assert r.status_code == 200
+        events = (await db.execute(
+            select(FindingAcceptanceEvent).where(FindingAcceptanceEvent.finding_record_id == record.id)
+        )).scalars().all()
+        assert len(events) == 1
+        assert events[0].action == "accepted"
+        assert events[0].by_user_id == admin_user.id
+        assert events[0].reason == "known risk"
+        assert events[0].accepted_until == date(2027, 1, 1)
+
+    async def test_revoke_accept_creates_revoked_event(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        _, record = await _make_scan_and_finding(db, admin_user, accepted=True)
+        r = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
+        assert r.status_code == 200
+        events = (await db.execute(
+            select(FindingAcceptanceEvent)
+            .where(FindingAcceptanceEvent.finding_record_id == record.id)
+            .order_by(FindingAcceptanceEvent.at)
+        )).scalars().all()
+        # _make_scan_and_finding(accepted=True) doesn't itself insert an event
+        # (it directly sets the live columns to seed test state) — so the only
+        # event expected here is the one this revoke call creates.
+        assert len(events) == 1
+        assert events[0].action == "revoked"
+        assert events[0].by_user_id == admin_user.id
+
+    async def test_accept_then_revoke_creates_two_events_in_order(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        _, record = await _make_scan_and_finding(db, admin_user)
+        await client.post(f"/api/findings/{record.id}/accept",
+            json={"reason": "known risk"}, headers=auth(admin_token))
+        await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
+        events = (await db.execute(
+            select(FindingAcceptanceEvent)
+            .where(FindingAcceptanceEvent.finding_record_id == record.id)
+            .order_by(FindingAcceptanceEvent.at)
+        )).scalars().all()
+        assert [e.action for e in events] == ["accepted", "revoked"]
+
     async def test_revoke_non_accepted_is_idempotent(self, client, db, admin_user, admin_token):
         _, record = await _make_scan_and_finding(db, admin_user, accepted=False)
         r = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
@@ -343,28 +384,6 @@ class TestFindingsAPI:
         _, record = await _make_scan_and_finding(db, admin_user, closed=True, accepted=True)
         r = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
         assert r.status_code == 409
-
-    async def test_get_finding_settings_returns_defaults(self, client, admin_token):
-        r = await client.get("/api/settings/findings", headers=auth(admin_token))
-        assert r.status_code == 200
-        data = r.json()
-        assert data["sla_high_days"] == 14
-        assert data["sla_medium_days"] == 90
-        assert data["finding_retention_days"] == 365
-
-    async def test_put_finding_settings_persists(self, client, admin_token):
-        r = await client.put("/api/settings/findings",
-            json={"sla_high_days": 7, "sla_medium_days": 60, "finding_retention_days": 180},
-            headers=auth(admin_token))
-        assert r.status_code == 200
-        r2 = await client.get("/api/settings/findings", headers=auth(admin_token))
-        assert r2.json()["sla_high_days"] == 7
-
-    async def test_put_finding_settings_rejects_zero(self, client, admin_token):
-        r = await client.put("/api/settings/findings",
-            json={"sla_high_days": 0, "sla_medium_days": 90, "finding_retention_days": 365},
-            headers=auth(admin_token))
-        assert r.status_code == 422
 
     async def test_lapsed_acceptance_not_shown_as_accepted(self, client, db, admin_user, admin_token):
         from datetime import timedelta

@@ -17,3 +17,12 @@ Object.defineProperty(window, 'matchMedia', {
     dispatchEvent: () => false,
   }),
 })
+
+// jsdom doesn't implement ResizeObserver; recharts' ResponsiveContainer
+// requires it to observe its wrapper element's size.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+window.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver

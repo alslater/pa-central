@@ -18,8 +18,10 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.models import RepoScan, RepoScanResult, RepoScanStatus
 from tests.conftest_postgres import make_async_engine
 from tests.test_postgres_migrations import HEAD_REVISION, alembic
 
@@ -685,6 +687,62 @@ class TestOpenFindingPartialIndex:
             sa.text("SELECT count(*) FROM finding_records")
         )).scalar()
         assert n == 3
+
+
+class TestRepoScanHeadlineLatestResultRanking:
+    """`list_repo_scan_headlines`'s per-scan latest-result lookup uses
+    ``row_number().over(partition_by=..., order_by=...)`` to rank results in
+    SQL rather than fetching every retained result and picking the first one
+    in Python. row_number() is ANSI-standard and not expected to diverge
+    between SQLite and PostgreSQL, but this is the first window-function
+    query in the codebase, so it's verified directly here rather than
+    assumed — enum status values must round-trip correctly through a
+    subquery column on PostgreSQL's native enum handling.
+    """
+
+    @pytest.fixture
+    async def session(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+        await engine.dispose()
+
+    async def test_ranks_results_per_scan_and_picks_latest(self, session):
+        scan_a = RepoScan(name="a", url="http://x/a", branch="main")
+        scan_b = RepoScan(name="b", url="http://x/b", branch="main")
+        session.add_all([scan_a, scan_b])
+        await session.flush()
+        session.add_all([
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.failed,
+                            started_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.success,
+                            started_at=datetime(2026, 1, 3, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.running,
+                            started_at=datetime(2026, 1, 2, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_b.id, status=RepoScanStatus.pending,
+                            started_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)),
+        ])
+        await session.commit()
+
+        result_rank = (
+            func.row_number()
+            .over(partition_by=RepoScanResult.repo_scan_id, order_by=RepoScanResult.started_at.desc())
+            .label("rank")
+        )
+        ranked = (
+            select(RepoScanResult.repo_scan_id, RepoScanResult.status, RepoScanResult.started_at, result_rank)
+            .where(RepoScanResult.repo_scan_id.in_([scan_a.id, scan_b.id]))
+            .subquery()
+        )
+        rows = await session.execute(
+            select(ranked.c.repo_scan_id, ranked.c.status, ranked.c.started_at).where(ranked.c.rank == 1)
+        )
+        latest_by_scan = {scan_id: (status, started_at) for scan_id, status, started_at in rows}
+
+        assert latest_by_scan[scan_a.id][0] == RepoScanStatus.success
+        assert latest_by_scan[scan_a.id][1] == datetime(2026, 1, 3, tzinfo=UTC)
+        assert latest_by_scan[scan_b.id][0] == RepoScanStatus.pending
 
 
 # ── Test fixture URL conversion ───────────────────────────────────────────────

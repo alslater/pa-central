@@ -155,3 +155,58 @@ describe('HostDetail scan row — risks', () => {
     expect(within(row).queryByRole('button')).not.toBeInTheDocument()
   })
 })
+
+describe('HostDetail scan row — grouping by project_path', () => {
+  it('shows one card per project_path, using the latest scan only', async () => {
+    vi.mocked(api.scans.list).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/app', scan_type: 'project', status: 'findings',
+        finding_count: 2, findings: [{ package: 'flask' }], risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-19T00:00:00Z', received_at: '2026-08-19T00:00:00Z' },
+      { id: 2, host_id: 1, project_path: '/app', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: [], risks: [], risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    await openScansTab()
+
+    await screen.findAllByText('/app')
+    expect(screen.getAllByText('/app')).toHaveLength(1)
+    // latest (id: 2, clean, 0 findings) should be the one shown
+    expect(screen.getByText('0 findings')).toBeInTheDocument()
+    expect(screen.queryByText('2 findings')).not.toBeInTheDocument()
+  })
+
+  it('sorts distinct project_path cards alphabetically', async () => {
+    vi.mocked(api.scans.list).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/zeta', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+      { id: 2, host_id: 1, project_path: '/alpha', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    await openScansTab()
+
+    await screen.findByText('/alpha')
+    const paths = screen.getAllByText(/^\/(alpha|zeta)$/).map(el => el.textContent)
+    expect(paths).toEqual(['/alpha', '/zeta'])
+  })
+
+  it('expanding one project card does not expand another', async () => {
+    vi.mocked(api.scans.list).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/app/one', scan_type: 'project', status: 'findings',
+        finding_count: 1, findings: [{ package: 'flask' }], risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+      { id: 2, host_id: 1, project_path: '/app/two', scan_type: 'project', status: 'findings',
+        finding_count: 1, findings: [{ package: 'requests' }], risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    const user = await openScansTab()
+
+    const oneEl = await screen.findByText('/app/one')
+    const oneRow = oneEl.closest('.host-scan-card-row') as HTMLElement
+    await user.click(oneRow)
+
+    expect(screen.getByText('flask')).toBeInTheDocument()
+    expect(screen.queryByText('requests')).not.toBeInTheDocument()
+  })
+})

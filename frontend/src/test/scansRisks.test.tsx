@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { vi, beforeEach, describe, it, expect } from 'vitest'
@@ -9,9 +9,9 @@ vi.mock('@/hooks/useAuth', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    scans:    { list: vi.fn() },
-    hosts:    { list: vi.fn() },
-    repoScans: { allResults: vi.fn() },
+    repoScans: { headlines: vi.fn(), exposureHistory: vi.fn().mockResolvedValue({ points: [], window_days: 0 }) },
+    findings:  { listAllForRepo: vi.fn(), accept: vi.fn(), revokeAccept: vi.fn() },
+    risks:     { listAllForRepo: vi.fn(), accept: vi.fn(), revokeAccept: vi.fn() },
   },
 }))
 
@@ -21,35 +21,25 @@ import { Scans } from '@/pages/Scans'
 
 const mockUser = { id: 1, email: 'u@example.com', display_name: 'U', role: 'viewer' as const }
 
-const baseScan = {
+const baseHeadline = {
   id: 1,
-  host_id: 10,
-  project_path: '/app',
-  scan_type: 'npm',
-  status: 'pass' as const,
-  finding_count: 0,
-  scanned_at: new Date().toISOString(),
-  sources: [],
+  name: 'repo-a',
+  url: 'https://github.com/example/repo-a',
+  latest_status: 'success' as const,
+  latest_scanned_at: new Date().toISOString(),
+  open_findings_by_severity: { critical: 0, high: 0, medium: 0, warning: 0, low: 0, info: 0 },
+  open_risks_by_level: { critical: 0, warning: 0, info: 0 },
+  breach: false,
+  breach_count: 0,
 }
 
-const baseRepoResult = {
-  id: 1,
-  repo_scan_id: 1,
-  status: 'success' as const,
-  triggered_by: 'manual' as const,
-  pa_version: '0.7.0',
-  finding_count: 0,
-  findings: null,
-  sources: null,
-  error_message: null,
-  ecs_task_arn: null,
-  notified: false,
-  started_at: new Date().toISOString(),
-  completed_at: new Date().toISOString(),
-  scan_name: 'my-repo',
-  scan_url: 'https://github.com/example/my-repo',
-  scan_breach: false,
-  scan_breach_count: 0,
+const mockRisk = {
+  id: 1, repo_scan_id: 1, package: 'reqeusts', ecosystem: 'pypi', package_version: null,
+  score: 46, level: 'warning' as const,
+  signals: [{ name: 'typosquat', score: 15, reason: "resembles 'requests'" }],
+  first_found_at: new Date().toISOString(), closed_at: null, closed_reason: null,
+  reopen_count: 0, accepted_by_id: null, accepted_at: null, accepted_reason: null,
+  accepted_until: null, is_accepted: false, days_open: 3, scan_name: 'repo-a',
 }
 
 function renderScans() {
@@ -58,205 +48,176 @@ function renderScans() {
 
 beforeEach(() => {
   vi.mocked(useAuth).mockReturnValue({ user: mockUser } as any)
-  vi.mocked(api.hosts.list).mockResolvedValue([{ id: 10, name: 'host-a' }] as any)
 })
 
-const mockRisk = { package: 'reqeusts', ecosystem: 'pypi', score: 46, level: 'warning',
-  signals: [{ name: 'typosquat', score: 15, reason: "resembles 'requests'" }] }
+describe('Scans page — project-grouped repo scans', () => {
+  it('lists one row per repo scan with headline counts, and no Host Scans tab', async () => {
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([{
+      ...baseHeadline,
+      open_findings_by_severity: { critical: 1, high: 0, medium: 0, warning: 0, low: 0, info: 0 },
+    }])
 
-describe('Scans page — host scans table risk column', () => {
-  beforeEach(() => {
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([])
-  })
-
-  it('shows the Risks column header', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([{ ...baseScan, findings: [], risks: [] }] as any)
-    renderScans()
-    expect(await screen.findByRole('columnheader', { name: 'Risks' })).toBeInTheDocument()
-  })
-
-  it('shows the risk count for a scan with risks but no findings', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: [mockRisk] },
-    ] as any)
     renderScans()
 
-    const path = await screen.findByText('/app')
-    const row = path.closest('tr') as HTMLElement
-    expect(row).toHaveAttribute('role', 'button')
-    const risksCell = within(row).getAllByRole('cell')[4]
-    expect(within(risksCell).getByText('1')).toBeInTheDocument()
+    await screen.findByText('repo-a')
+    expect(screen.queryByText('Host scans')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /host/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
   })
 
-  it('a scan with risks but no findings is expandable and reveals the risks table', async () => {
+  it('shows the risk count badge for a headline with open risks', async () => {
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([{
+      ...baseHeadline,
+      open_risks_by_level: { critical: 0, warning: 1, info: 0 },
+    }])
+    renderScans()
+
+    const name = await screen.findByText('repo-a')
+    const row = name.closest('[role="button"]') as HTMLElement
+    expect(within(row).getByText('warning')).toBeInTheDocument()
+    expect(within(row).getByText('1')).toBeInTheDocument()
+  })
+
+  it('a headline with no open findings or risks is still expandable and loads accepted-only records', async () => {
     const user = userEvent.setup()
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: [mockRisk] },
-    ] as any)
-    renderScans()
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([baseHeadline])
+    vi.mocked(api.findings.listAllForRepo).mockResolvedValue([])
+    vi.mocked(api.risks.listAllForRepo).mockResolvedValue([{ ...mockRisk, is_accepted: true }])
 
-    const row = await screen.findByRole('button', { name: /\/app/i })
+    renderScans()
+    const row = await screen.findByRole('button', { name: /repo-a/i })
     await user.click(row)
-    expect(screen.getByText('reqeusts')).toBeInTheDocument()
+
+    expect(await screen.findByText('reqeusts')).toBeInTheDocument()
+    expect(api.findings.listAllForRepo).toHaveBeenCalledWith(1)
+    expect(api.risks.listAllForRepo).toHaveBeenCalledWith(1)
   })
 
-  it('a scan with neither findings nor risks is not a button', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: [] },
-    ] as any)
-    renderScans()
-
-    await screen.findByText('/app')
-    expect(screen.queryByRole('button', { name: /\/app/i })).toBeNull()
-  })
-
-  it('shows an unscored warning when risk_failures > 0 even though risks is empty', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: [], risk_failures: 2 },
-    ] as any)
-    renderScans()
-
-    await screen.findByText('/app')
-    // The warning must be visible text, not only a `title` tooltip — those
-    // are unreachable to keyboard and touch users.
-    expect(screen.getByText(/⚠ 2 unscored/)).toBeInTheDocument()
-  })
-
-  it('does not show an unscored warning when risk_failures is 0', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: [], risk_failures: 0 },
-    ] as any)
-    renderScans()
-
-    await screen.findByText('/app')
-    expect(screen.queryByText(/⚠/)).not.toBeInTheDocument()
-  })
-
-  it('shows an unavailable marker, not 0, when risks is null (no risk pass reported)', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: null },
-    ] as any)
-    renderScans()
-
-    const path = await screen.findByText('/app')
-    const row = path.closest('tr') as HTMLElement
-    const risksCell = within(row).getAllByRole('cell')[4]
-    expect(within(risksCell).getByText('—')).toBeInTheDocument()
-    expect(within(risksCell).queryByText('0')).not.toBeInTheDocument()
-  })
-
-  it('shows 0, not an unavailable marker, when risks is an explicit empty list', async () => {
-    vi.mocked(api.scans.list).mockResolvedValue([
-      { ...baseScan, finding_count: 0, findings: [], risks: [] },
-    ] as any)
-    renderScans()
-
-    const path = await screen.findByText('/app')
-    const row = path.closest('tr') as HTMLElement
-    const risksCell = within(row).getAllByRole('cell')[4]
-    expect(within(risksCell).getByText('0')).toBeInTheDocument()
-    expect(within(risksCell).queryByText('—')).not.toBeInTheDocument()
-  })
-})
-
-describe('Scans page — repo scans table risk column', () => {
-  beforeEach(() => {
-    vi.mocked(api.scans.list).mockResolvedValue([])
-  })
-
-  it('shows the Risks column header and risk count', async () => {
+  it('expands a project row to show Findings/Risks tabs backed by listAllForRepo', async () => {
     const user = userEvent.setup()
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([
-      { ...baseRepoResult, finding_count: 0, findings: [], risks: [mockRisk] },
-    ] as any)
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([{
+      ...baseHeadline,
+      open_risks_by_level: { critical: 0, warning: 1, info: 0 },
+    }])
+    vi.mocked(api.findings.listAllForRepo).mockResolvedValue([])
+    vi.mocked(api.risks.listAllForRepo).mockResolvedValue([mockRisk])
+
     renderScans()
-
-    const repoTab = await screen.findByRole('tab', { name: /repo scans/i })
-    await user.click(repoTab)
-
-    expect(screen.getByRole('columnheader', { name: 'Risks' })).toBeInTheDocument()
-    const name = screen.getByText('my-repo')
-    const row = name.closest('tr') as HTMLElement
-    expect(row).toHaveAttribute('role', 'button')
-    const risksCell = within(row).getAllByRole('cell')[4]
-    expect(within(risksCell).getByText('1')).toBeInTheDocument()
-
+    const row = await screen.findByRole('button', { name: /repo-a/i })
     await user.click(row)
-    expect(screen.getByText('reqeusts')).toBeInTheDocument()
+
+    expect(await screen.findByText('reqeusts')).toBeInTheDocument()
+    expect(api.findings.listAllForRepo).toHaveBeenCalledWith(1)
+    expect(api.risks.listAllForRepo).toHaveBeenCalledWith(1)
   })
 
-  it('a repo result with neither findings nor risks is not a button', async () => {
+  it('shows an SLA breach badge with the breach count', async () => {
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([{
+      ...baseHeadline,
+      breach: true,
+      breach_count: 3,
+    }])
+    renderScans()
+
+    await screen.findByText('repo-a')
+    expect(screen.getByText(/SLA breach ×3/)).toBeInTheDocument()
+  })
+
+  it('shows an empty state when there are no repo scans', async () => {
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([])
+    renderScans()
+
+    expect(await screen.findByText(/no repo scans/i)).toBeInTheDocument()
+  })
+
+  it('shows a distinct error state (not the empty state) when headlines() rejects', async () => {
+    vi.mocked(api.repoScans.headlines).mockRejectedValue(new Error('network down'))
+    renderScans()
+
+    expect(await screen.findByText(/failed to load scans/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no repo scans/i)).not.toBeInTheDocument()
+  })
+
+  it('Retry after a failed headlines() fetch re-fetches and renders rows on success', async () => {
     const user = userEvent.setup()
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([
-      { ...baseRepoResult, finding_count: 0, findings: [], risks: [] },
-    ] as any)
+    vi.mocked(api.repoScans.headlines)
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce([baseHeadline])
+
     renderScans()
+    await screen.findByText(/failed to load scans/i)
 
-    const repoTab = await screen.findByRole('tab', { name: /repo scans/i })
-    await user.click(repoTab)
+    await user.click(screen.getByRole('button', { name: /retry/i }))
 
-    await screen.findByText('my-repo')
-    expect(screen.queryByRole('button', { name: /my-repo/i })).toBeNull()
+    await screen.findByText('repo-a')
+    expect(screen.queryByText(/failed to load scans/i)).not.toBeInTheDocument()
   })
 
-  it('shows an unscored warning when risk_failures > 0 even though risks is empty', async () => {
+  it('accepting a risk through RecordTabs refreshes in the background without a full-page loading flash or collapsing the row', async () => {
     const user = userEvent.setup()
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([
-      { ...baseRepoResult, finding_count: 0, findings: [], risks: [], risk_failures: 2 },
-    ] as any)
+    vi.mocked(api.repoScans.headlines).mockClear()
+    vi.mocked(api.risks.listAllForRepo).mockClear()
+    vi.mocked(api.findings.listAllForRepo).mockClear()
+    vi.mocked(api.risks.accept).mockClear()
+
+    // The second headlines() call (the one triggered by the accept) is held
+    // open with a manually-resolved promise instead of mockResolvedValueOnce.
+    // This matters: with a normal fast-resolving mock, a real `loading=true`
+    // regression resolves within a microtask and settles before any assertion
+    // can query for it, so the test would pass whether or not the bug is
+    // present — the exact trap this fix's brief warns about (React 19's
+    // remount/batching behaviour cannot be verified by reasoning, only by
+    // observation). Deferring the second call lets the test inspect the DOM
+    // while that request is genuinely in flight.
+    let resolveSecondHeadlines: (v: typeof baseHeadline[]) => void = () => {}
+    let headlinesCallCount = 0
+    vi.mocked(api.repoScans.headlines).mockImplementation(() => {
+      headlinesCallCount += 1
+      if (headlinesCallCount === 1) {
+        return Promise.resolve([{
+          ...baseHeadline,
+          open_risks_by_level: { critical: 0, warning: 1, info: 0 },
+        }])
+      }
+      return new Promise(res => { resolveSecondHeadlines = res })
+    })
+    vi.mocked(api.risks.listAllForRepo)
+      .mockResolvedValueOnce([mockRisk])
+      .mockResolvedValueOnce([{ ...mockRisk, is_accepted: true, accepted_reason: 'fine for now' }])
+    vi.mocked(api.findings.listAllForRepo).mockResolvedValue([])
+    vi.mocked(api.risks.accept).mockResolvedValue({ ...mockRisk, is_accepted: true })
+
     renderScans()
 
-    const repoTab = await screen.findByRole('tab', { name: /repo scans/i })
-    await user.click(repoTab)
+    const row = await screen.findByRole('button', { name: /repo-a/i })
+    await user.click(row)
+    expect(row).toHaveAttribute('aria-expanded', 'true')
 
-    // The warning must be visible text, not only a `title` tooltip — those
-    // are unreachable to keyboard and touch users.
-    expect(await screen.findByText(/⚠ 2 unscored/)).toBeInTheDocument()
-  })
+    // Open the risk's detail drawer and accept it.
+    const riskRow = await screen.findByRole('button', { name: /reqeusts — view details/i })
+    await user.click(riskRow)
+    await user.click(await screen.findByRole('button', { name: /accept risk/i }))
+    await user.type(screen.getByLabelText(/reason/i), 'fine for now')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+    await screen.findByText('Risk accepted')
 
-  it('does not show an unscored warning when risk_failures is 0', async () => {
-    const user = userEvent.setup()
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([
-      { ...baseRepoResult, finding_count: 0, findings: [], risks: [], risk_failures: 0 },
-    ] as any)
-    renderScans()
+    // The second headlines() call (from the background refresh) is now
+    // genuinely in flight, deliberately held open above. Assert on the DOM
+    // while it is pending — this is the moment a full-page flash would show.
+    await waitFor(() => expect(headlinesCallCount).toBe(2))
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    expect(document.body.contains(row)).toBe(true)
+    expect(row).toHaveAttribute('aria-expanded', 'true')
 
-    const repoTab = await screen.findByRole('tab', { name: /repo scans/i })
-    await user.click(repoTab)
-
-    await screen.findByText('my-repo')
-    expect(screen.queryByText(/⚠/)).not.toBeInTheDocument()
-  })
-
-  it('shows an unavailable marker, not 0, when risks is null (no risk pass reported)', async () => {
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([
-      { ...baseRepoResult, finding_count: 0, findings: [], risks: null },
-    ] as any)
-    renderScans()
-
-    const repoTab = await screen.findByRole('tab', { name: /repo scans/i })
-    await userEvent.setup().click(repoTab)
-
-    const name = await screen.findByText('my-repo')
-    const row = name.closest('tr') as HTMLElement
-    const risksCell = within(row).getAllByRole('cell')[4]
-    expect(within(risksCell).getByText('—')).toBeInTheDocument()
-    expect(within(risksCell).queryByText('0')).not.toBeInTheDocument()
-  })
-
-  it('shows 0, not an unavailable marker, when risks is an explicit empty list', async () => {
-    vi.mocked(api.repoScans.allResults).mockResolvedValue([
-      { ...baseRepoResult, finding_count: 0, findings: [], risks: [] },
-    ] as any)
-    renderScans()
-
-    const repoTab = await screen.findByRole('tab', { name: /repo scans/i })
-    await userEvent.setup().click(repoTab)
-
-    const name = await screen.findByText('my-repo')
-    const row = name.closest('tr') as HTMLElement
-    const risksCell = within(row).getAllByRole('cell')[4]
-    expect(within(risksCell).getByText('0')).toBeInTheDocument()
-    expect(within(risksCell).queryByText('—')).not.toBeInTheDocument()
+    // Let the deferred refresh resolve and confirm the page settles normally,
+    // with the same row (not a remounted one) still expanded, and the
+    // headline's warning-risk badge cleared now that the risk is accepted.
+    resolveSecondHeadlines([{
+      ...baseHeadline,
+      open_risks_by_level: { critical: 0, warning: 0, info: 0 },
+    }])
+    await waitFor(() => expect(within(row).queryByText('warning')).not.toBeInTheDocument())
+    expect(document.body.contains(row)).toBe(true)
+    expect(row).toHaveAttribute('aria-expanded', 'true')
   })
 })

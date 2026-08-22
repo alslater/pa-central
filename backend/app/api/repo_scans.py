@@ -1,10 +1,11 @@
 """Repo scan configuration CRUD and trigger."""
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, require_operator, require_viewer
@@ -26,8 +27,11 @@ from app.models import (
     utcnow,
 )
 from app.schemas import (
+    ExposureHistoryOut,
+    ExposurePoint,
     FindingRecordOut,
     RepoScanCreate,
+    RepoScanHeadlineOut,
     RepoScanOut,
     RepoScanResultOut,
     RepoScanResultWithName,
@@ -36,13 +40,18 @@ from app.schemas import (
 )
 from app.services.finding_lifecycle import (
     build_finding_out,
+    compute_exposure_history,
     compute_scan_config_hash,
     compute_sla_days,
     get_effective_sla,
     get_global_sla,
+    load_finding_acceptance_events,
     not_accepted_sql_expr,
 )
 from app.services.risk_lifecycle import build_risk_out
+from app.services.risk_lifecycle import (
+    not_accepted_sql_expr as risk_not_accepted_sql_expr,
+)
 
 router = APIRouter(prefix="/repo-scans", tags=["repo-scans"])
 
@@ -191,6 +200,94 @@ async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -
     return _repo_scan_out(scan, False, 0)
 
 
+@router.get("/headlines")
+async def list_repo_scan_headlines(db: DbDep, _: OperatorDep) -> list[RepoScanHeadlineOut]:
+    result = await db.execute(select(RepoScan).order_by(RepoScan.name))
+    scans = result.scalars().all()
+    if not scans:
+        return []
+
+    global_high, global_medium = await _get_global_sla_for_repo(db)
+    scan_ids = [s.id for s in scans]
+    now = datetime.now(UTC)
+
+    finding_rows = await db.execute(
+        select(FindingRecord.repo_scan_id, FindingRecord.severity, func.count())
+        .where(FindingRecord.repo_scan_id.in_(scan_ids))
+        .where(FindingRecord.closed_at.is_(None))
+        .where(not_accepted_sql_expr(now.date()))
+        .group_by(FindingRecord.repo_scan_id, FindingRecord.severity)
+    )
+    findings_by_scan: dict[int, dict[str, int]] = {sid: {s.value: 0 for s in AlertSeverity} for sid in scan_ids}
+    for scan_id, severity, count in finding_rows:
+        findings_by_scan[scan_id][severity.value] = count
+
+    risk_rows = await db.execute(
+        select(RiskRecord.repo_scan_id, RiskRecord.level, func.count())
+        .where(RiskRecord.repo_scan_id.in_(scan_ids))
+        .where(RiskRecord.closed_at.is_(None))
+        .where(risk_not_accepted_sql_expr(now.date()))
+        .group_by(RiskRecord.repo_scan_id, RiskRecord.level)
+    )
+    risks_by_scan: dict[int, dict[str, int]] = {sid: {"critical": 0, "warning": 0, "info": 0} for sid in scan_ids}
+    for scan_id, level, count in risk_rows:
+        risks_by_scan[scan_id][level] = count
+
+    result_rank = (
+        func.row_number()
+        .over(
+            partition_by=RepoScanResult.repo_scan_id,
+            order_by=RepoScanResult.started_at.desc(),
+        )
+        .label("rank")
+    )
+    ranked_results = (
+        select(RepoScanResult.repo_scan_id, RepoScanResult.status, RepoScanResult.started_at, result_rank)
+        .where(RepoScanResult.repo_scan_id.in_(scan_ids))
+        .subquery()
+    )
+    latest_rows = await db.execute(
+        select(ranked_results.c.repo_scan_id, ranked_results.c.status, ranked_results.c.started_at)
+        .where(ranked_results.c.rank == 1)
+    )
+    latest_by_scan: dict[int, tuple[RepoScanStatus, datetime]] = {
+        scan_id: (status, started_at) for scan_id, status, started_at in latest_rows
+    }
+
+    # Compute the minimum effective SLA across all scans — this is the safe
+    # lower-bound cutoff regardless of whether overrides are stricter or looser.
+    eff_slas = [get_effective_sla(s, global_high, global_medium) for s in scans]
+    min_sla = min(v for h, m in eff_slas for v in (h, m)) if eff_slas else min(global_high, global_medium)
+
+    # Fetch breach candidates for all scans in one query, then group in Python.
+    open_rows = await db.execute(_breach_candidates_stmt(scan_ids, now, min_sla=min_sla))
+    candidates_by_scan: dict[int, list[tuple[AlertSeverity, datetime]]] = {sid: [] for sid in scan_ids}
+    for scan_id, severity, first_found_at in open_rows:
+        candidates_by_scan[scan_id].append((severity, first_found_at))
+
+    out = []
+    for scan in scans:
+        eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium)
+        breach_count = sum(
+            1 for severity, first_found_at in candidates_by_scan[scan.id]
+            if _age_in_breach(first_found_at, compute_sla_days(severity, eff_high, eff_medium), now)
+        )
+        has_breach = breach_count > 0
+        latest = latest_by_scan.get(scan.id)
+        out.append(RepoScanHeadlineOut(
+            id=scan.id,
+            name=scan.name,
+            url=scan.url,
+            latest_status=latest[0] if latest else None,
+            latest_scanned_at=latest[1] if latest else None,
+            open_findings_by_severity=findings_by_scan[scan.id],
+            open_risks_by_level=risks_by_scan[scan.id],
+            breach=has_breach,
+            breach_count=breach_count,
+        ))
+    return out
+
+
 ViewerDep = Annotated[User, Depends(require_viewer)]
 
 @router.get("/results")
@@ -331,6 +428,35 @@ async def get_repo_scan_findings(scan_id: int, db: DbDep, _: AdminDep) -> list[F
         )
     )
     return [build_finding_out(r, eff_high, eff_medium, now) for r in rows.scalars().all()]
+
+
+@router.get("/{scan_id}/exposure-history", response_model=ExposureHistoryOut)
+async def get_repo_scan_exposure_history(
+    scan_id: int, db: DbDep, _: AdminDep, days: int = Query(90, ge=1, le=3650),
+) -> ExposureHistoryOut:
+    scan = await db.get(RepoScan, scan_id)
+    if not scan:
+        raise HTTPException(404, "Repo scan not found")
+    _, _, retention_days = await get_global_sla(db)
+    window_days = min(days, retention_days)
+    today = utcnow().date()
+
+    rows = await db.execute(
+        select(FindingRecord.id, FindingRecord.severity, FindingRecord.first_found_at,
+               FindingRecord.closed_at)
+        .where(FindingRecord.repo_scan_id == scan_id)
+    )
+    records = [
+        SimpleNamespace(id=fid, severity=sev, first_found_at=ffa, closed_at=ca)
+        for fid, sev, ffa, ca in rows
+    ]
+    events_by_record_id = await load_finding_acceptance_events(db, [r.id for r in records])
+
+    history = compute_exposure_history(records, events_by_record_id, window_days, today)
+    return ExposureHistoryOut(
+        points=[ExposurePoint(date=d, exposure=e) for d, e in history],
+        window_days=window_days,
+    )
 
 
 @router.get("/{scan_id}/risks", response_model=list[RiskRecordOut])

@@ -26,7 +26,12 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "7ace8b60203b"
+HEAD_REVISION = "feb520b531fe"
+
+# The revision immediately before HEAD_REVISION — the point the acceptance-event
+# backfill test rewinds to so it can insert representative pre-migration data
+# and then watch the migration under test actually run against it.
+PRE_ACCEPTANCE_EVENTS_REVISION = "7ace8b60203b"
 
 # (table, column) -> expected ON DELETE action once HEAD_REVISION is applied.
 # 'c' = CASCADE, 'n' = SET NULL, 'a' = NO ACTION (pg_constraint.confdeltype)
@@ -55,15 +60,25 @@ EXPECTED_ONDELETE = {
     ("system_settings", "updated_by_id"): "n",
     ("risk_records", "repo_scan_id"): "c",
     ("risk_records", "accepted_by_id"): "n",
+    # Acceptance events die with their record, but survive the deletion of the
+    # user who made the decision — losing the attribution, never the history.
+    ("finding_acceptance_events", "finding_record_id"): "c",
+    ("finding_acceptance_events", "by_user_id"): "n",
+    ("risk_acceptance_events", "risk_record_id"): "c",
+    ("risk_acceptance_events", "by_user_id"): "n",
 }
 
 MIGRATED_TABLES = sorted({t for t, _ in EXPECTED_ONDELETE})
 
 # Downgrading to BASE_REVISION only unwinds migrations up to that point, so
 # only entries for tables/columns that already existed at BASE_REVISION can
-# be checked after a downgrade — risk_records postdates it (added by
-# HEAD_REVISION) and doesn't exist yet at that point in the chain.
-_POST_BASE_REVISION_TABLES = {"risk_records"}
+# be checked after a downgrade — risk_records and the acceptance-event tables
+# all postdate it and don't exist yet at that point in the chain.
+_POST_BASE_REVISION_TABLES = {
+    "risk_records",
+    "finding_acceptance_events",
+    "risk_acceptance_events",
+}
 DOWNGRADE_EXPECTED_ONDELETE = {
     k: v for k, v in EXPECTED_ONDELETE.items() if k[0] not in _POST_BASE_REVISION_TABLES
 }
@@ -737,6 +752,178 @@ class TestDowngradeRepairsOrphanedAudit:
 
         assert owner == 2, "orphan should be reassigned to the admin, not the lowest id"
         assert nullable == "NO", "downgrade should restore NOT NULL"
+
+
+class TestAcceptanceEventBackfill:
+    """The acceptance-events migration backfills history for already-accepted
+    records.
+
+    Without the backfill the exposure-history chart would show every currently
+    accepted finding as un-accepted for its entire life up to migration day,
+    since the event log would only start recording from then on. The backfill
+    therefore has to run against *existing* rows — which means this test must
+    create those rows before the migration under test runs, not after. Rewinding
+    to PRE_ACCEPTANCE_EVENTS_REVISION first is the whole point: an upgrade
+    against an empty database backfills nothing and would pass no matter how
+    broken the logic is.
+    """
+
+    @staticmethod
+    def _seed_pre_migration_rows(url: str) -> None:
+        """Insert a repo_scan plus accepted and un-accepted finding/risk records.
+
+        The un-accepted rows are load-bearing: they prove the backfill filters on
+        ``accepted_at IS NOT NULL`` rather than emitting an event for everything.
+        """
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,role,"
+                    "is_active,totp_enabled,created_at) "
+                    "VALUES (1,'a@x','A','h','admin',true,false,now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,"
+                    "is_enabled,created_by_id,created_at,updated_at) "
+                    "VALUES (1,'r','https://example.invalid/r','main','high',true,1,"
+                    "now(),now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO finding_records (id,repo_scan_id,advisory_id,package,"
+                    "ecosystem,severity,first_found_at,reopen_count,accepted_by_id,"
+                    "accepted_at,accepted_reason,accepted_until) VALUES "
+                    "(1,1,'GHSA-1','pkg1','pypi','high',now(),0,1,"
+                    "'2026-03-05 12:30:00+00','accepted by security','2026-12-31')"
+                ))
+                # Not accepted: must produce no event.
+                conn.execute(sa.text(
+                    "INSERT INTO finding_records (id,repo_scan_id,advisory_id,package,"
+                    "ecosystem,severity,first_found_at,reopen_count) "
+                    "VALUES (2,1,'GHSA-2','pkg2','pypi','high',now(),0)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO risk_records (id,repo_scan_id,package,ecosystem,score,"
+                    "level,signals,first_found_at,reopen_count,accepted_by_id,"
+                    "accepted_at,accepted_reason,accepted_until) VALUES "
+                    "(1,1,'rp','pypi',80,'high','[]',now(),0,1,"
+                    "'2026-04-06 09:00:00+00','risk understood',NULL)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO risk_records (id,repo_scan_id,package,ecosystem,score,"
+                    "level,signals,first_found_at,reopen_count) "
+                    "VALUES (2,1,'rp2','pypi',10,'low','[]',now(),0)"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def backfilled(self, postgres_url):
+        """Seed representative data at the revision *before* the migration
+        under test, then upgrade so the backfill actually has rows to act on."""
+        assert alembic(postgres_url, "upgrade", PRE_ACCEPTANCE_EVENTS_REVISION).returncode == 0
+        self._seed_pre_migration_rows(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_backfills_one_event_per_currently_accepted_finding(self, backfilled):
+        with backfilled.connect() as conn:
+            rows = conn.execute(sa.text(
+                "SELECT finding_record_id, action, at, by_user_id, reason, "
+                "accepted_until FROM finding_acceptance_events"
+            )).all()
+
+        assert len(rows) == 1, (
+            "expected exactly one event, for the single accepted finding — the "
+            f"un-accepted one must be skipped: {rows}"
+        )
+        row = rows[0]
+        assert row.finding_record_id == 1
+        assert row.action == "accepted"
+        assert row.by_user_id == 1
+        assert row.reason == "accepted by security"
+        assert str(row.accepted_until) == "2026-12-31"
+        # The record's real acceptance date, not migration day — the entire
+        # reason the backfill exists rather than just starting the log now.
+        assert row.at.strftime("%Y-%m-%d %H:%M") == "2026-03-05 12:30"
+
+    def test_backfills_one_event_per_currently_accepted_risk(self, backfilled):
+        with backfilled.connect() as conn:
+            rows = conn.execute(sa.text(
+                "SELECT risk_record_id, action, at, by_user_id, reason, "
+                "accepted_until FROM risk_acceptance_events"
+            )).all()
+
+        assert len(rows) == 1, f"expected exactly one event: {rows}"
+        row = rows[0]
+        assert row.risk_record_id == 1
+        assert row.action == "accepted"
+        assert row.by_user_id == 1
+        assert row.reason == "risk understood"
+        assert row.accepted_until is None
+        assert row.at.strftime("%Y-%m-%d %H:%M") == "2026-04-06 09:00"
+
+    def test_deleting_the_deciding_user_keeps_the_event(self, backfilled):
+        """SET NULL, not CASCADE: who accepted it can be forgotten, but that it
+        was accepted must not be — the exposure history depends on the event."""
+        with backfilled.connect() as conn:
+            conn.execute(sa.text("DELETE FROM users WHERE id = 1"))
+            rows = conn.execute(sa.text(
+                "SELECT by_user_id FROM finding_acceptance_events"
+            )).all()
+        assert len(rows) == 1
+        assert rows[0].by_user_id is None
+
+    def test_rerunning_the_migration_does_not_duplicate_events(
+        self, backfilled, postgres_url
+    ):
+        """The DDL is idempotent (every create_* uses if_not_exists=True), so the
+        backfill must be too.
+
+        This is not a hypothetical: CLAUDE.md documents resetting
+        ``alembic_version`` to the prior revision and re-running ``upgrade head``
+        as the recovery procedure for a stranded database, and that procedure has
+        already been needed on this project's dev database. If the backfill is
+        unguarded it inserts a second copy of every event and the exposure chart
+        silently double-counts.
+        """
+        # A no-op upgrade first: already at head, so Alembic runs nothing.
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        # Then the real hazard the recovery procedure creates: rewind only the
+        # *stamp*, leaving both tables and their backfilled rows in place, and
+        # run the upgrade again. if_not_exists=True makes the DDL a no-op, so
+        # the backfill is the only thing that actually executes.
+        assert alembic(
+            postgres_url, "stamp", PRE_ACCEPTANCE_EVENTS_REVISION
+        ).returncode == 0
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        with backfilled.connect() as conn:
+            findings = conn.execute(
+                sa.text("SELECT count(*) FROM finding_acceptance_events")
+            ).scalar()
+            risks = conn.execute(
+                sa.text("SELECT count(*) FROM risk_acceptance_events")
+            ).scalar()
+
+        assert findings == 1, (
+            f"re-running the upgrade duplicated finding events: {findings} != 1"
+        )
+        assert risks == 1, (
+            f"re-running the upgrade duplicated risk events: {risks} != 1"
+        )
+
+    def test_deleting_the_record_removes_its_events(self, backfilled):
+        with backfilled.connect() as conn:
+            conn.execute(sa.text("DELETE FROM finding_records WHERE id = 1"))
+            count = conn.execute(
+                sa.text("SELECT count(*) FROM finding_acceptance_events")
+            ).scalar()
+        assert count == 0
 
 
 class TestDeleteCascadeBehaviour:

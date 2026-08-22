@@ -176,29 +176,42 @@ function HostAlerts({ hostId, isOperator, show }: { hostId: number; isOperator: 
 function HostScans({ hostId }: { hostId: number }) {
   const [scans, setScans] = useState<Scan[]>([])
   const [loading, setLoading] = useState(true)
-  const [expanded, setExpanded] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   useEffect(() => { api.scans.list({ host_id: hostId }).then(setScans).finally(() => setLoading(false)) }, [hostId])
 
   if (loading) return <div className="loading-text">Loading…</div>
   if (!scans.length) return <Empty message="No scans from this host." />
 
+  // Group by project_path, keeping only the row with the most recent scanned_at
+  // per project — the host-agent surface has no lifecycle tracking, so we only
+  // ever want to show the latest state of each project, not every historical scan.
+  const latestByProject = new Map<string, Scan>()
+  for (const s of scans) {
+    const existing = latestByProject.get(s.project_path)
+    if (!existing || new Date(s.scanned_at).getTime() > new Date(existing.scanned_at).getTime()) {
+      latestByProject.set(s.project_path, s)
+    }
+  }
+  const projects = [...latestByProject.values()].sort((a, b) => a.project_path.localeCompare(b.project_path))
+
   return (
     <div className="host-scans-list">
-      {scans.map(s => {
+      {projects.map(s => {
         const hasFindings = !!s.findings?.length
         const hasRisks = !!s.risks?.length
         const hasRiskFailures = (s.risk_failures ?? 0) > 0
         const hasDetail = hasFindings || hasRisks
+        const isExpanded = expanded === s.project_path
         return (
-        <Card key={s.id}>
+        <Card key={s.project_path}>
           <div
             className={`host-scan-card-row ${hasDetail ? 'data-tr-clickable' : 'data-tr-static'}`}
-            onClick={hasDetail ? () => setExpanded(expanded === s.id ? null : s.id) : undefined}
-            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(expanded === s.id ? null : s.id) } }) : undefined}
+            onClick={hasDetail ? () => setExpanded(isExpanded ? null : s.project_path) : undefined}
+            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(isExpanded ? null : s.project_path) } }) : undefined}
             role={hasDetail ? 'button' : undefined}
             tabIndex={hasDetail ? 0 : undefined}
-            aria-expanded={hasDetail ? expanded === s.id : undefined}
+            aria-expanded={hasDetail ? isExpanded : undefined}
           >
             <ScanBadge status={s.status} />
             <div className="host-scan-info">
@@ -237,7 +250,7 @@ function HostScans({ hostId }: { hostId: number }) {
             )}
             <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>
           </div>
-          {expanded === s.id && hasDetail && (
+          {isExpanded && hasDetail && (
             <div className="host-scan-findings-panel">
               <ScanDetailTabs findings={s.findings} risks={s.risks} />
             </div>
