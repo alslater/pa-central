@@ -104,9 +104,14 @@ def could_contribute_to_exposure_window_sql_expr(window_start: date) -> ColumnEl
     or closed_at.date() > day). A record closed on or before window_start is
     therefore closed on or before every day in the window and can never
     contribute — filtering those out here (rather than loading every
-    FindingRecord ever created and discarding most of them in Python) is
-    what keeps the exposure-history endpoints' hot-path query bounded by the
-    window size instead of by total historical finding count.
+    FindingRecord ever created and discarding most of them in Python) bounds
+    the query to open-or-recently-closed records that can overlap the
+    window, instead of every record in total historical finding count.
+
+    This is not a window-sized bound: every currently-open finding
+    (closed_at IS NULL) still passes regardless of `window_days` — a
+    finding open for years is loaded even for a one-day request. The query
+    cost tracks open-finding volume, not the requested window.
 
     closed_at is a UtcDateTime, so window_start (a date) is compared as
     midnight UTC on that day — closed_at.date() > window_start is equivalent
@@ -233,12 +238,15 @@ async def load_finding_acceptance_events(
     selects with no date filtering in SQL — the day-by-day replay happens in
     Python (see compute_exposure_history), keeping this dialect-neutral.
 
-    The dashboard-wide exposure-history endpoint passes every retained
-    FindingRecord id with no scan/date bound, so `record_ids` can be large
-    enough to exceed a single statement's bind-parameter limit (SQLite and
-    PostgreSQL both cap this — a query that size would fail outright, not
-    just run slowly). IDs are therefore batched into fixed-size `IN (...)`
-    queries rather than issued as one.
+    Both exposure-history endpoints pre-filter their FindingRecord query with
+    could_contribute_to_exposure_window_sql_expr(window_start) before calling
+    this, so `record_ids` is no longer every retained record with no date
+    bound — it's the (still potentially large) set of records open or
+    recently closed enough to overlap the requested window. That set can
+    still be large enough to exceed a single statement's bind-parameter
+    limit (SQLite and PostgreSQL both cap this — a query that size would
+    fail outright, not just run slowly), so IDs are batched into fixed-size
+    `IN (...)` queries rather than issued as one.
 
     Shared by both exposure-history endpoints (dashboard-wide and per-scan)
     so the two cannot drift apart.
