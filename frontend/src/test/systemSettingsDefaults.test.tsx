@@ -72,6 +72,32 @@ describe('SystemSettings — synthesized runtime defaults', () => {
     expect(updates).not.toHaveProperty('sla_high_days')
   })
 
+  it('shows the synthesized default immediately after clearing a saved value, without a reload', async () => {
+    // Bug: clearing a saved sla_high_days sends {sla_high_days: null}. The
+    // backend deletes the row and its PATCH response reports the field back
+    // as is_default: true with the runtime default value — but save() used
+    // to discard that response entirely, so the field stayed blank with no
+    // "using default" marker until the next unrelated load().
+    const user = userEvent.setup()
+    vi.mocked(api.systemSettings.list).mockResolvedValue([
+      { key: 'sla_high_days', value: '21', value_type: 'int', updated_at: '2026-08-20T00:00:00Z', updated_by_id: 1, is_default: false },
+    ] as any)
+    vi.mocked(api.systemSettings.update).mockResolvedValue([
+      { key: 'sla_high_days', value: '14', value_type: 'int', updated_at: null, updated_by_id: null, is_default: true },
+    ] as any)
+
+    renderPage()
+
+    const input = await screen.findByLabelText(/^SLA: High\/Critical \(days\)$/i)
+    await user.clear(input)
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(api.systemSettings.update).toHaveBeenCalledWith({ sla_high_days: null })
+
+    const updatedInput = await screen.findByLabelText(/SLA: High\/Critical \(days\).*using default/i)
+    expect(updatedInput).toHaveValue(14)
+  })
+
   it('persists a default field once the admin explicitly edits it', async () => {
     const user = userEvent.setup()
     vi.mocked(api.systemSettings.list).mockResolvedValue([

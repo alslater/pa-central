@@ -28,9 +28,11 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 BASE_REVISION = "cd36263592ce"
 HEAD_REVISION = "dc0f75bde427"
 
-# The revision immediately before HEAD_REVISION — the point the acceptance-event
-# backfill test rewinds to so it can insert representative pre-migration data
-# and then watch the migration under test actually run against it.
+# The revision immediately before the acceptance-events migration (two index
+# migrations still sit between this and HEAD_REVISION) — the point the
+# acceptance-event backfill test rewinds to so it can insert representative
+# pre-migration data and then watch the migration under test actually run
+# against it.
 PRE_ACCEPTANCE_EVENTS_REVISION = "7ace8b60203b"
 
 # (table, column) -> expected ON DELETE action once HEAD_REVISION is applied.

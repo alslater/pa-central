@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '@/lib/api'
+import { api, type SystemSetting } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Select, useToast } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
@@ -41,17 +41,19 @@ export default function SystemSettings() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
+  const applyRows = (rows: SystemSetting[]) => {
+    const m: Record<string, string> = {}
+    const defaults = new Set<string>()
+    for (const r of rows) {
+      m[r.key] = r.value ?? ''
+      if (r.is_default) defaults.add(r.key)
+    }
+    setSettings(m)
+    setDefaultKeys(defaults)
+  }
+
   const load = useCallback(() => {
-    api.systemSettings.list().then(rows => {
-      const m: Record<string, string> = {}
-      const defaults = new Set<string>()
-      for (const r of rows) {
-        m[r.key] = r.value ?? ''
-        if (r.is_default) defaults.add(r.key)
-      }
-      setSettings(m)
-      setDefaultKeys(defaults)
-    }).catch(e => show(e.message, 'err'))
+    api.systemSettings.list().then(applyRows).catch(e => show(e.message, 'err'))
   }, [show])
   useEffect(() => { load() }, [load])
 
@@ -78,7 +80,8 @@ export default function SystemSettings() {
       updates[key] = settings[key] === '' ? null : settings[key]
     }
     try {
-      await api.systemSettings.update(updates)
+      const rows = await api.systemSettings.update(updates)
+      applyRows(rows)
       show('Settings saved')
       setDirtySecrets(new Set())
     } catch (e: any) {
