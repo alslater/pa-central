@@ -243,3 +243,19 @@ This table is already the one place in the codebase that needed a dedicated comp
 **Files affected:** `backend/app/scheduler/scheduler.py` (new purge step), `backend/app/api/system_settings.py` (new setting keys, if not reusing `scan_result_retention_*`), `backend/app/api/scans.py` (new `DELETE /scans/{id}`), `backend/tests/test_scheduler.py`, `backend/tests/test_scans.py`, `backend/tests/test_auth_gaps.py`, `frontend/src/lib/api.ts` (delete method), `frontend/src/pages/HostDetail.tsx` (delete action on a scan row).
 
 **Trigger:** When host-agent scan history volume becomes a storage or query-performance concern, or when an admin/owner first needs to remove an individual bad scan submission without deleting the whole host.
+
+---
+
+### Self-service password reset flow
+
+Users currently have no way to reset their own password if they forget it — the only path is an admin resetting it for them via `POST /users/{id}/reset-password` (`backend/app/api/users.py`), which requires an admin to be available and willing to relay a generated password out-of-band.
+
+**Proposed solution:** An email-a-reset-link flow — `POST /auth/forgot-password` (accepts an email, always returns 200 regardless of whether the address exists, to avoid account enumeration) generates a short-lived random token, stores it (e.g. in Redis alongside/reusing the token-store pattern from the "Short-lived public ID tokens" roadmap item, or a dedicated DB table with an expiry column if Redis isn't yet a hard dependency), and emails a reset link via the existing `EmailService` (`backend/app/core/email.py`). A new `POST /auth/reset-password` endpoint accepts the token + new password, validates and consumes it, and sets `hashed_password`.
+
+**Gating:** This flow only makes sense when an SMTP server is configured (`smtp_host` in `SystemSetting`, see `backend/app/api/system_settings.py`) — with no SMTP configured there's no way to deliver the link. The UI's "Forgot password?" entry point on the login page should only appear (or should degrade to "contact your admin") when SMTP is configured; the backend endpoint should similarly no-op or 503 if `smtp_host` is unset, mirroring how `EmailService.send` is already a no-op without config today.
+
+**Open design question:** whether resetting a password (self-service or admin-initiated) should set a `must_change_password` flag checked at next login, forcing the user to pick their own password rather than continuing to use a generated/temp one. Deferred from the admin-reset endpoint above to keep that change minimal; worth resolving once for both flows rather than twice.
+
+**Files affected:** new `backend/app/api/auth.py` endpoints (`forgot-password`, `reset-password`), `backend/app/core/email.py` (new email template, following `build_findings_email`/`build_failure_email`), a new token store (Redis or DB table + migration), `frontend/src/pages/Login.tsx` (or wherever the login form lives) for the "Forgot password?" entry point and reset-token landing page, `frontend/src/lib/api.ts`.
+
+**Trigger:** When SMTP configuration is in place for at least one deployment and a user without admin access has actually been locked out.

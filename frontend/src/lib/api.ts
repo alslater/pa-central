@@ -377,6 +377,8 @@ export const api = {
       request<void>(`/users/${id}`, { method: 'DELETE' }),
     resetTotp: (id: number) =>
       request<User>(`/users/${id}/reset-totp`, { method: 'POST' }),
+    resetPassword: (id: number) =>
+      request<{ password: string }>(`/users/${id}/reset-password`, { method: 'POST' }),
   },
 
   systemSettings: {

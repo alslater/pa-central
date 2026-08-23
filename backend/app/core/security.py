@@ -47,6 +47,11 @@ def generate_api_key() -> tuple[str, str]:
     return raw, hashed
 
 
+def generate_password() -> str:
+    """Random password meeting the 12-char minimum enforced elsewhere. Shown once; only the hash is stored."""
+    return secrets.token_urlsafe(16)
+
+
 def hash_api_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 

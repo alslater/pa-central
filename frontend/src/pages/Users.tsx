@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import { api, User, UserRole } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, Select, useToast, Empty, timeAgo } from '@/components/ui'
-import { Plus, Trash2 } from 'lucide-react'
+import { Plus, Trash2, Copy, AlertCircle } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 
 const COLUMNS = ['Name', 'Email', 'Role', 'Status', 'Joined'] as const
@@ -150,6 +150,8 @@ function UserEditPanel({
   const [draftActive, setDraftActive] = useState(user.is_active)
   const [saving, setSaving] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
+  const [confirmPasswordReset, setConfirmPasswordReset] = useState(false)
+  const [newPassword, setNewPassword] = useState<string | null>(null)
 
   // Re-sync drafts when the target user's server state changes underneath an
   // open panel. React 19 batches load()'s setLoading(true) with the updates
@@ -167,6 +169,8 @@ function UserEditPanel({
     setDraftRole(user.role)
     setDraftActive(user.is_active)
     setConfirmReset(false)
+    setConfirmPasswordReset(false)
+    setNewPassword(null)
   }
 
   const save = async () => {
@@ -195,45 +199,87 @@ function UserEditPanel({
     }
   }
 
+  const doResetPassword = async () => {
+    setSaving(true)
+    try {
+      const { password } = await api.users.resetPassword(user.id)
+      setConfirmPasswordReset(false)
+      setNewPassword(password)
+    } catch (e: any) {
+      show(e.message, 'err')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const dirty = draftRole !== user.role || draftActive !== user.is_active
 
   return (
-    <div className="flex flex-wrap items-end gap-3">
-      <Select
-        label="Role"
-        value={draftRole}
-        onChange={e => setDraftRole(e.target.value as UserRole)}
-      >
-        <option value="viewer">Viewer</option>
-        <option value="developer">Developer</option>
-        <option value="operator">Operator</option>
-        <option value="admin">Admin</option>
-      </Select>
-      <Select
-        label="Status"
-        value={draftActive ? 'active' : 'disabled'}
-        onChange={e => setDraftActive(e.target.value === 'active')}
-      >
-        <option value="active">Active</option>
-        <option value="disabled">Disabled</option>
-      </Select>
-      <div className="flex gap-2 items-center">
-        <Button variant="primary" onClick={save} disabled={!dirty || saving}>
-          {saving ? 'Saving…' : 'Save'}
-        </Button>
-        <Button onClick={onDiscard} disabled={saving}>Discard</Button>
-      </div>
-      <div className="flex gap-2 items-center ml-auto">
-        {user.totp_enabled && !confirmReset && (
-          <Button onClick={() => setConfirmReset(true)} disabled={saving}>Reset TOTP</Button>
-        )}
-        {confirmReset && (
-          <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-            <span>Reset TOTP?</span>
-            <Button variant="primary" onClick={doResetTotp} disabled={saving}>Confirm</Button>
-            <Button onClick={() => setConfirmReset(false)} disabled={saving}>Cancel</Button>
+    <div className="flex flex-col gap-3">
+      {newPassword && (
+        <div className="bg-status-pass/8 border border-status-pass/30 rounded-[var(--radius-lg)] px-5 py-4">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertCircle size={14} className="text-status-pass" />
+            <span className="text-[13px] font-semibold text-status-pass">Copy this password now — it won't be shown again</span>
           </div>
-        )}
+          <div className="flex items-center gap-2">
+            <code className="font-mono text-xs bg-muted px-3 py-1.5 rounded-[var(--radius-sm)] flex-1 break-all">
+              {newPassword}
+            </code>
+            <Button variant="secondary" onClick={async () => { try { await navigator.clipboard.writeText(newPassword); show('Copied') } catch { show('Copy failed — select and copy manually', 'err') } }}>
+              <Copy size={13} />Copy
+            </Button>
+            <Button variant="ghost" onClick={() => setNewPassword(null)}>Dismiss</Button>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap items-end gap-3">
+        <Select
+          label="Role"
+          value={draftRole}
+          onChange={e => setDraftRole(e.target.value as UserRole)}
+        >
+          <option value="viewer">Viewer</option>
+          <option value="developer">Developer</option>
+          <option value="operator">Operator</option>
+          <option value="admin">Admin</option>
+        </Select>
+        <Select
+          label="Status"
+          value={draftActive ? 'active' : 'disabled'}
+          onChange={e => setDraftActive(e.target.value === 'active')}
+        >
+          <option value="active">Active</option>
+          <option value="disabled">Disabled</option>
+        </Select>
+        <div className="flex gap-2 items-center">
+          <Button variant="primary" onClick={save} disabled={!dirty || saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+          <Button onClick={onDiscard} disabled={saving}>Discard</Button>
+        </div>
+        <div className="flex gap-2 items-center ml-auto">
+          {user.totp_enabled && !confirmReset && (
+            <Button onClick={() => setConfirmReset(true)} disabled={saving}>Reset TOTP</Button>
+          )}
+          {confirmReset && (
+            <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+              <span>Reset TOTP?</span>
+              <Button variant="primary" onClick={doResetTotp} disabled={saving}>Confirm</Button>
+              <Button onClick={() => setConfirmReset(false)} disabled={saving}>Cancel</Button>
+            </div>
+          )}
+          {!confirmPasswordReset && (
+            <Button onClick={() => setConfirmPasswordReset(true)} disabled={saving}>Reset password</Button>
+          )}
+          {confirmPasswordReset && (
+            <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+              <span>Reset password?</span>
+              <Button variant="primary" onClick={doResetPassword} disabled={saving}>Confirm</Button>
+              <Button onClick={() => setConfirmPasswordReset(false)} disabled={saving}>Cancel</Button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
