@@ -25,6 +25,7 @@ from app.core.database import get_db
 from app.core.security import create_access_token, hash_password
 from app.main import app
 from app.models import (
+    FindingRecord,
     Host,
     RepoScan,
     RepoScanResult,
@@ -1602,3 +1603,98 @@ class TestPreferConnectsToAPlaintextServer:
                 assert (await conn.execute(sa.text("SELECT 1"))).scalar() == 1
         finally:
             await engine.dispose()
+
+
+class TestAcceptRevokeRowLocking:
+    """accept_finding/revoke_accept (and the risks equivalents) use
+    ``db.get(..., with_for_update=True)`` to serialise concurrent accept/
+    revoke requests on the same record.
+
+    Without it, two overlapping requests can both read the row before
+    either commits, then commit their live-column writes in whichever order
+    the database happens to schedule them — independent of the order their
+    FindingAcceptanceEvent rows' `at` timestamps say the actions happened
+    in. is_accepted_as_of replays by `at`, so the live columns and the
+    event-derived history could permanently disagree about current state.
+    A second, distinct failure mode: two concurrent revokes can each read
+    accepted_at as non-NULL and both append their own "revoked" event.
+
+    SQLite ignores FOR UPDATE entirely (confirmed by reading its rows with
+    no error, but no actual blocking), so this can only be verified against
+    real PostgreSQL.
+    """
+
+    @pytest.fixture
+    async def session_factory(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
+        await engine.dispose()
+
+    @pytest.fixture
+    async def finding_id(self, session_factory):
+        async with session_factory() as s:
+            scan = RepoScan(name="lock-test", url="http://x/lock", branch="main")
+            s.add(scan)
+            await s.flush()
+            record = FindingRecord(
+                repo_scan_id=scan.id, advisory_id="GHSA-lock", package="pkg",
+                ecosystem="pypi", severity="high", first_found_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            s.add(record)
+            await s.commit()
+            return record.id
+
+    async def test_select_for_update_blocks_a_second_session(self, session_factory, finding_id):
+        """The mechanism the fix relies on: a row locked FOR UPDATE by one
+        transaction is not readable-for-update by a second, concurrent one
+        until the first commits or rolls back."""
+        async with session_factory() as first:
+            await first.execute(
+                sa.text("SELECT id FROM finding_records WHERE id = :id FOR UPDATE"),
+                {"id": finding_id},
+            )
+            # first now holds the row lock, uncommitted.
+
+            async with session_factory() as second:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        second.execute(
+                            sa.text("SELECT id FROM finding_records WHERE id = :id FOR UPDATE"),
+                            {"id": finding_id},
+                        ),
+                        timeout=2.0,
+                    )
+                await second.rollback()
+
+            await first.commit()
+
+            # Released: a fresh session can now acquire it without blocking.
+            async with session_factory() as third:
+                row = await asyncio.wait_for(
+                    third.execute(
+                        sa.text("SELECT id FROM finding_records WHERE id = :id FOR UPDATE"),
+                        {"id": finding_id},
+                    ),
+                    timeout=2.0,
+                )
+                assert row.scalar() == finding_id
+                await third.commit()
+
+    async def test_db_get_with_for_update_blocks_a_second_session(self, session_factory, finding_id):
+        """Same guarantee, exercised through the exact ORM call the fix
+        actually uses (db.get(..., with_for_update=True)) rather than raw
+        SQL, so a change to how that option is passed would be caught here
+        too."""
+        async with session_factory() as first:
+            await first.get(FindingRecord, finding_id, with_for_update=True)
+
+            async with session_factory() as second:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        second.get(FindingRecord, finding_id, with_for_update=True),
+                        timeout=2.0,
+                    )
+                await second.rollback()
+
+            await first.commit()

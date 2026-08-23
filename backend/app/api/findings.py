@@ -142,7 +142,13 @@ async def accept_finding(
     db: DbDep,
     user: AdminDep,
 ) -> FindingRecordOut:
-    record = await db.get(FindingRecord, finding_id)
+    # FOR UPDATE: without it, two concurrent accept/revoke requests can both
+    # read the row before either commits, then commit their live-column
+    # writes in an order that disagrees with their event .at timestamps —
+    # is_accepted_as_of's replay would then diverge from the live columns.
+    # Serializes accept/revoke on the same finding; a no-op on SQLite (which
+    # ignores FOR UPDATE), so this only actually locks under PostgreSQL.
+    record = await db.get(FindingRecord, finding_id, with_for_update=True)
     if not record:
         raise HTTPException(404, "Finding record not found")
     if record.closed_at is not None:
@@ -170,7 +176,10 @@ async def revoke_accept(
     db: DbDep,
     user: AdminDep,
 ) -> FindingRecordOut:
-    record = await db.get(FindingRecord, finding_id)
+    # FOR UPDATE — see accept_finding. Also prevents two concurrent revokes
+    # from both reading accepted_at as non-NULL and each appending its own
+    # "revoked" event.
+    record = await db.get(FindingRecord, finding_id, with_for_update=True)
     if not record:
         raise HTTPException(404, "Finding record not found")
     if record.closed_at is not None:
