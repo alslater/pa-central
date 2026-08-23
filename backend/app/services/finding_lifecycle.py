@@ -184,16 +184,28 @@ def is_accepted_as_of(events: Sequence[Any], day: date) -> bool:
     return latest.accepted_until is None or latest.accepted_until > day
 
 
+# Conservative bind-parameter batch size for load_finding_acceptance_events'
+# IN (...) queries — comfortably under both SQLite's (older builds default
+# to 999; modern ones 32766) and PostgreSQL's (65535) per-statement limits.
+_ACCEPTANCE_EVENT_ID_BATCH_SIZE = 500
+
+
 async def load_finding_acceptance_events(
     db: AsyncSession, record_ids: Sequence[int]
 ) -> dict[int, list[Any]]:
     """Fetch the acceptance events for `record_ids`, grouped by record id.
 
     Every id in `record_ids` gets an entry (empty list if it has no events),
-    so callers can index the result directly. Deliberately one plain
-    `IN (...)` select with no date filtering in SQL — the day-by-day replay
-    happens in Python (see compute_exposure_history), keeping this
-    dialect-neutral.
+    so callers can index the result directly. Deliberately plain `IN (...)`
+    selects with no date filtering in SQL — the day-by-day replay happens in
+    Python (see compute_exposure_history), keeping this dialect-neutral.
+
+    The dashboard-wide exposure-history endpoint passes every retained
+    FindingRecord id with no scan/date bound, so `record_ids` can be large
+    enough to exceed a single statement's bind-parameter limit (SQLite and
+    PostgreSQL both cap this — a query that size would fail outright, not
+    just run slowly). IDs are therefore batched into fixed-size `IN (...)`
+    queries rather than issued as one.
 
     Shared by both exposure-history endpoints (dashboard-wide and per-scan)
     so the two cannot drift apart.
@@ -201,18 +213,21 @@ async def load_finding_acceptance_events(
     events_by_record_id: dict[int, list[Any]] = {rid: [] for rid in record_ids}
     if not events_by_record_id:
         return events_by_record_id
-    event_rows = await db.execute(
-        select(
-            FindingAcceptanceEvent.finding_record_id,
-            FindingAcceptanceEvent.action,
-            FindingAcceptanceEvent.at,
-            FindingAcceptanceEvent.accepted_until,
-        ).where(FindingAcceptanceEvent.finding_record_id.in_(list(events_by_record_id)))
-    )
-    for record_id, action, at, accepted_until in event_rows:
-        events_by_record_id[record_id].append(
-            SimpleNamespace(action=action, at=at, accepted_until=accepted_until)
+    ids = list(events_by_record_id)
+    for batch_start in range(0, len(ids), _ACCEPTANCE_EVENT_ID_BATCH_SIZE):
+        batch = ids[batch_start:batch_start + _ACCEPTANCE_EVENT_ID_BATCH_SIZE]
+        event_rows = await db.execute(
+            select(
+                FindingAcceptanceEvent.finding_record_id,
+                FindingAcceptanceEvent.action,
+                FindingAcceptanceEvent.at,
+                FindingAcceptanceEvent.accepted_until,
+            ).where(FindingAcceptanceEvent.finding_record_id.in_(batch))
         )
+        for record_id, action, at, accepted_until in event_rows:
+            events_by_record_id[record_id].append(
+                SimpleNamespace(action=action, at=at, accepted_until=accepted_until)
+            )
     return events_by_record_id
 
 

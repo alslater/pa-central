@@ -221,3 +221,43 @@ describe('Scans page — project-grouped repo scans', () => {
     expect(row).toHaveAttribute('aria-expanded', 'true')
   })
 })
+
+describe('Scans page — project filter', () => {
+  it('narrows the list to projects whose name matches the filter text', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([
+      { ...baseHeadline, id: 1, name: 'payments-service' },
+      { ...baseHeadline, id: 2, name: 'auth-service' },
+      { ...baseHeadline, id: 3, name: 'billing-worker' },
+    ])
+
+    renderScans()
+    await screen.findByText('payments-service')
+    expect(screen.getByText('auth-service')).toBeInTheDocument()
+    expect(screen.getByText('billing-worker')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/filter projects/i), 'service')
+
+    expect(screen.getByText('payments-service')).toBeInTheDocument()
+    expect(screen.getByText('auth-service')).toBeInTheDocument()
+    expect(screen.queryByText('billing-worker')).not.toBeInTheDocument()
+  })
+
+  it('is case-insensitive and shows an empty state when nothing matches', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.repoScans.headlines).mockResolvedValue([
+      { ...baseHeadline, id: 1, name: 'payments-service' },
+    ])
+
+    renderScans()
+    await screen.findByText('payments-service')
+
+    await user.type(screen.getByLabelText(/filter projects/i), 'PAYMENTS')
+    expect(screen.getByText('payments-service')).toBeInTheDocument()
+
+    await user.clear(screen.getByLabelText(/filter projects/i))
+    await user.type(screen.getByLabelText(/filter projects/i), 'nonexistent')
+    expect(screen.queryByText('payments-service')).not.toBeInTheDocument()
+    expect(screen.getByText(/no projects match this filter/i)).toBeInTheDocument()
+  })
+})

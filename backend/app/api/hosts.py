@@ -57,6 +57,13 @@ async def get_host_latest_scans(
     preserves the previous client-side behaviour, which iterated GET /scans'
     received_at-desc-ordered rows and kept the first (i.e. most recently
     received) match per project.
+
+    The returned rows are ordered by scanned_at desc — most recently scanned
+    project first, not alphabetically by project_path — with the same
+    received_at desc, id desc tie-breakers as the ranking above, since
+    different projects commonly share a scan timestamp (e.g. scans triggered
+    together) and scanned_at alone would leave their relative order
+    unspecified, varying between requests.
     """
     host = await db.get(Host, host_id)
     if not host:
@@ -79,7 +86,8 @@ async def get_host_latest_scans(
     )
     latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
     result = await db.execute(
-        select(Scan).where(Scan.id.in_(latest_ids)).order_by(Scan.project_path)
+        select(Scan).where(Scan.id.in_(latest_ids))
+        .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
     )
     return result.scalars().all()
 

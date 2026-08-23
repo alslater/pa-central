@@ -791,14 +791,71 @@ class TestHostLatestScansRanking:
         )
         ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
         latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
+        # Matches production's final ORDER BY (get_host_latest_scans) rather
+        # than alphabetical by project_path — most-recently-scanned first,
+        # with the same tie-breakers as the ranking above.
         rows = await session.execute(
-            select(Scan).where(Scan.id.in_(latest_ids)).order_by(Scan.project_path)
+            select(Scan).where(Scan.id.in_(latest_ids))
+            .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
         )
         scans = rows.scalars().all()
 
         by_project = {s.project_path: s for s in scans}
         assert set(by_project) == {"proj-a", "proj-b"}
         assert by_project["proj-a"].finding_count == 0  # the later proj-a scan, not the earlier one
+        # proj-a's latest scan (Jan 3) is more recent than proj-b's (Jan 2).
+        assert [s.project_path for s in scans] == ["proj-a", "proj-b"]
+
+    async def test_tied_scanned_at_final_order_breaks_tie_by_received_at(self, session):
+        """Different projects commonly share a scan timestamp (e.g. scans
+        triggered together) — without received_at/id as secondary ORDER BY
+        keys on the final row fetch, their relative order in the response is
+        unspecified and can vary between requests, even though the ranking
+        subquery itself already has the correct per-project tie-break.
+
+        Note: dropping the secondary keys does not reliably fail this test —
+        PostgreSQL's query planner happens to return this small, unindexed
+        result set in insertion order regardless, so the "wrong" order isn't
+        forced by any input this test can construct. That's the nature of
+        the bug: SQL gives no ordering guarantee without an explicit ORDER
+        BY on every tie-breaking column, so relying on incidental planner
+        behaviour is exactly what this fix removes, even though a passing
+        test can't distinguish "guaranteed correct" from "happened to be
+        correct this time" for this specific case.
+        """
+        owner = User(email="owner3@x.com", display_name="Owner3", hashed_password="x")
+        session.add(owner)
+        await session.flush()
+        host = Host(name="h3", hostname="h3.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC)
+        session.add_all([
+            Scan(host_id=host.id, project_path="proj-later-received", scanned_at=tied,
+                 received_at=tied, finding_count=0),
+            Scan(host_id=host.id, project_path="proj-earlier-received", scanned_at=tied,
+                 received_at=tied - timedelta(minutes=5), finding_count=0),
+        ])
+        await session.commit()
+
+        rank = (
+            func.row_number()
+            .over(
+                partition_by=Scan.project_path,
+                order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
+            )
+            .label("rank")
+        )
+        ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
+        latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
+        rows = await session.execute(
+            select(Scan).where(Scan.id.in_(latest_ids))
+            .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
+        )
+        scans = rows.scalars().all()
+
+        # Both projects tie on scanned_at; received_at desc breaks it.
+        assert [s.project_path for s in scans] == ["proj-later-received", "proj-earlier-received"]
 
     async def test_tied_scanned_at_breaks_tie_by_received_at(self, session):
         """Without a secondary ORDER BY, PostgreSQL's row_number() tie-break

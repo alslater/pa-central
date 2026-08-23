@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, RepoScanHeadline, FindingRecord, RiskRecord, ExposureHistory } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
-import { Card, RepoScanStatusBadge, SeverityBadge, RiskLevelBadge, RecordTabs, Empty, timeAgo, useToast } from '@/components/ui'
+import { Card, RepoScanStatusBadge, SeverityBadge, RiskLevelBadge, RecordTabs, Empty, Input, timeAgo, useToast } from '@/components/ui'
 import { ExposureChart } from '@/components/ExposureChart'
 import { useAuth } from '@/hooks/useAuth'
 import { ChevronDown, ChevronUp } from 'lucide-react'
@@ -96,7 +96,11 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
           ) : (
             <>
               {exposureHistory && exposureHistory.points.length > 0 && (
-                <ExposureChart points={exposureHistory.points} />
+                <ExposureChart
+                  points={exposureHistory.points}
+                  title={`Exposure over time for ${headline.name}`}
+                  desc="Weighted severity of open, unaccepted findings for this repo scan, by day."
+                />
               )}
               <RecordTabs findings={findings} risks={risks} show={show} onChanged={() => { loadDetail(true); onChanged() }} />
             </>
@@ -112,6 +116,7 @@ export function Scans() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [expandedId, setExpandedId] = useState<number | null>(null)
+  const [filter, setFilter] = useState('')
   const { show, Toast } = useToast()
 
   const load = useCallback((background = false) => {
@@ -125,9 +130,24 @@ export function Scans() {
 
   const loadHeadlinesBackground = useCallback(() => { load(true) }, [load])
 
+  const filtered = headlines.filter(h => h.name.toLowerCase().includes(filter.trim().toLowerCase()))
+
   return (
     <Shell>
-      <PageHeader title="Scans" subtitle="Repo scan results — current findings and risks by project" />
+      <PageHeader
+        title="Scans"
+        subtitle="Repo scan results — current findings and risks by project"
+        action={
+          <Input
+            type="search"
+            placeholder="Filter projects…"
+            value={filter}
+            onChange={e => setFilter(e.target.value)}
+            aria-label="Filter projects"
+            className="w-64"
+          />
+        }
+      />
       <div className="page-content-flex">
         {loading ? (
           <div className="loading-text">Loading…</div>
@@ -138,8 +158,10 @@ export function Scans() {
           </div>
         ) : headlines.length === 0 ? (
           <Empty message="No repo scans configured." />
+        ) : filtered.length === 0 ? (
+          <Empty message="No projects match this filter." />
         ) : (
-          headlines.map(h => (
+          filtered.map(h => (
             <ProjectRow
               key={h.id}
               headline={h}

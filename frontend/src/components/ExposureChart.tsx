@@ -2,7 +2,16 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { Card, Empty } from '@/components/ui'
 import type { ExposurePoint } from '@/lib/api'
 
-export function ExposureChart({ points }: { points: ExposurePoint[] }) {
+export function ExposureChart({ points, title, desc }: {
+  points: ExposurePoint[]
+  /** Accessible name for the chart. Required: accessibilityLayer makes the
+   * chart a focusable role="application" region, and without an explicit
+   * name a screen reader announces it unnamed — visible page captions are
+   * not enough, since they aren't programmatically associated with the SVG. */
+  title: string
+  /** Optional accessible description, supplementing `title`. */
+  desc?: string
+}) {
   if (points.length === 0) {
     return (
       <Card className="exposure-chart-card">
@@ -15,7 +24,13 @@ export function ExposureChart({ points }: { points: ExposurePoint[] }) {
     <Card className="exposure-chart-card">
       <div data-testid="exposure-chart">
         <ResponsiveContainer width="100%" height={180}>
-          <LineChart data={points} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+          <LineChart
+            data={points}
+            margin={{ top: 8, right: 12, bottom: 0, left: 0 }}
+            accessibilityLayer
+            title={title}
+            desc={desc}
+          >
             <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" vertical={false} />
             <XAxis
               dataKey="date"

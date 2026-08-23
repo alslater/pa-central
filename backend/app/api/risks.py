@@ -136,9 +136,10 @@ async def revoke_risk_accept(
     if record.closed_at is not None:
         raise HTTPException(409, "Cannot revoke acceptance on a closed risk")
     now = utcnow()
-    db.add(RiskAcceptanceEvent(
-        risk_record_id=record.id, action="revoked", at=now, by_user_id=user.id,
-    ))
+    if record.accepted_at is not None:
+        db.add(RiskAcceptanceEvent(
+            risk_record_id=record.id, action="revoked", at=now, by_user_id=user.id,
+        ))
     record.accepted_by_id = None
     record.accepted_at = None
     record.accepted_reason = None

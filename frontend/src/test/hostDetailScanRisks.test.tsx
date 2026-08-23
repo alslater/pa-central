@@ -197,3 +197,45 @@ describe('HostDetail scan row — rendering GET /hosts/{id}/latest-scans results
     expect(screen.queryByText('requests')).not.toBeInTheDocument()
   })
 })
+
+describe('HostDetail scan row — project filter', () => {
+  it('narrows the list to projects whose path matches the filter text', async () => {
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/app/payments-service', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+      { id: 2, host_id: 1, project_path: '/app/auth-service', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+      { id: 3, host_id: 1, project_path: '/app/billing-worker', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    const user = await openScansTab()
+
+    await screen.findByText('/app/payments-service')
+    expect(screen.getByText('/app/auth-service')).toBeInTheDocument()
+    expect(screen.getByText('/app/billing-worker')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText(/filter projects/i), 'service')
+
+    expect(screen.getByText('/app/payments-service')).toBeInTheDocument()
+    expect(screen.getByText('/app/auth-service')).toBeInTheDocument()
+    expect(screen.queryByText('/app/billing-worker')).not.toBeInTheDocument()
+  })
+
+  it('shows an empty state when nothing matches the filter', async () => {
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([
+      { id: 1, host_id: 1, project_path: '/app/payments-service', scan_type: 'project', status: 'clean',
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+    ] as any)
+    const user = await openScansTab()
+
+    await screen.findByText('/app/payments-service')
+    await user.type(screen.getByLabelText(/filter projects/i), 'nonexistent')
+
+    expect(screen.queryByText('/app/payments-service')).not.toBeInTheDocument()
+    expect(screen.getByText(/no projects match this filter/i)).toBeInTheDocument()
+  })
+})

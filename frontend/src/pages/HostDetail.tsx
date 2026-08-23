@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { api, Host, Alert, Scan, ConfigTemplate } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
-import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, useToast, Empty, ScanDetailTabs, timeAgo } from '@/components/ui'
+import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, Input, useToast, Empty, ScanDetailTabs, timeAgo } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useRovingTabs } from '@/lib/hooks'
 import { ArrowLeft, Bell, ScanSearch, Settings2 } from 'lucide-react'
@@ -177,6 +177,7 @@ function HostScans({ hostId }: { hostId: number }) {
   const [scans, setScans] = useState<Scan[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [filter, setFilter] = useState('')
 
   // GET /hosts/{id}/latest-scans returns one row per project (already the
   // latest scan for that project, ranked server-side) — unlike GET /scans,
@@ -188,9 +189,21 @@ function HostScans({ hostId }: { hostId: number }) {
   if (loading) return <div className="loading-text">Loading…</div>
   if (!scans.length) return <Empty message="No scans from this host." />
 
+  const filtered = scans.filter(s => s.project_path.toLowerCase().includes(filter.trim().toLowerCase()))
+
   return (
     <div className="host-scans-list">
-      {scans.map(s => {
+      <Input
+        type="search"
+        placeholder="Filter projects…"
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        aria-label="Filter projects"
+        className="mb-3"
+      />
+      {filtered.length === 0 ? (
+        <Empty message="No projects match this filter." />
+      ) : filtered.map(s => {
         const hasFindings = !!s.findings?.length
         const hasRisks = !!s.risks?.length
         const hasRiskFailures = (s.risk_failures ?? 0) > 0

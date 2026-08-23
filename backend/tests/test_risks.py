@@ -191,6 +191,30 @@ class TestRisksAPI:
         assert r.status_code == 200
         assert r.json()["is_accepted"] is False
 
+    async def test_revoke_non_accepted_risk_is_idempotent(self, client, db, admin_user, admin_token):
+        from app.models import RiskAcceptanceEvent
+        _, record = await _make_scan_and_risk(db, admin_user, accepted=False)
+        r = await client.delete(f"/api/risks/{record.id}/accept", headers=auth(admin_token))
+        assert r.status_code == 200
+        # Revoking a risk that was never accepted must not fabricate a
+        # "revoked" audit event — there was no acceptance episode to revoke.
+        events = (await db.execute(
+            select(RiskAcceptanceEvent).where(RiskAcceptanceEvent.risk_record_id == record.id)
+        )).scalars().all()
+        assert events == []
+
+    async def test_revoke_already_revoked_risk_does_not_create_another_event(self, client, db, admin_user, admin_token):
+        from app.models import RiskAcceptanceEvent
+        _, record = await _make_scan_and_risk(db, admin_user, accepted=True)
+        first = await client.delete(f"/api/risks/{record.id}/accept", headers=auth(admin_token))
+        assert first.status_code == 200
+        second = await client.delete(f"/api/risks/{record.id}/accept", headers=auth(admin_token))
+        assert second.status_code == 200
+        events = (await db.execute(
+            select(RiskAcceptanceEvent).where(RiskAcceptanceEvent.risk_record_id == record.id)
+        )).scalars().all()
+        assert [e.action for e in events] == ["revoked"]
+
     async def test_accept_risk_creates_acceptance_event(self, client, db, admin_user, admin_token):
         from app.models import RiskAcceptanceEvent
         _, record = await _make_scan_and_risk(db, admin_user)

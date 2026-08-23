@@ -82,7 +82,11 @@ export default function Dashboard() {
             {exposureHistory && exposureHistory.points.length > 0 && (
               <>
                 <div className="text-style-caption mb-2">Exposure over time</div>
-                <ExposureChart points={exposureHistory.points} />
+                <ExposureChart
+                  points={exposureHistory.points}
+                  title="Exposure over time"
+                  desc="Weighted severity of open, unaccepted findings across all repo scans, by day."
+                />
               </>
             )}
 
