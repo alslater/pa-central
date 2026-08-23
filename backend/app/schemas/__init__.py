@@ -257,16 +257,35 @@ class ScanOut(OrmBase):
 
 # ── Config Template ────────────────────────────────────────────────────────────
 
+def _normalize_line_endings(v: str) -> str:
+    """CRLF/lone-CR in stored TOML makes the frontend editor (CodeMirror,
+    which always normalizes to \\n internally) treat the very first load of
+    that content as an external edit and mark the page dirty before the
+    user has touched anything. Normalizing at the write boundary means
+    every template saved through this API is LF-only from here on."""
+    return v.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class ConfigTemplateCreate(BaseModel):
     name: str
     description: str | None = None
     toml_content: str
+
+    @field_validator("toml_content")
+    @classmethod
+    def normalize_toml_line_endings(cls, v: str) -> str:
+        return _normalize_line_endings(v)
 
 
 class ConfigTemplateUpdate(BaseModel):
     description: str | None = None
     toml_content: str | None = None
     is_default: bool | None = None
+
+    @field_validator("toml_content")
+    @classmethod
+    def normalize_toml_line_endings(cls, v: str | None) -> str | None:
+        return _normalize_line_endings(v) if v is not None else v
 
 
 class ConfigTemplateOut(OrmBase):
@@ -364,8 +383,13 @@ class SystemSettingOut(OrmBase):
     key: str
     value: str | None  # secret values are redacted to None in responses
     value_type: SettingValueType
-    updated_at: datetime
+    updated_at: datetime | None  # None for a synthesized default row (is_default=True) never actually saved
     updated_by_id: int | None
+    # True when this key has no row in system_settings and `value` is the
+    # runtime default the application falls back to (get_global_sla, etc.),
+    # not a value an admin has ever saved. Lets the UI show what's actually
+    # in effect without it looking like a persisted choice.
+    is_default: bool = False
 
 
 class SystemSettingPatch(BaseModel):

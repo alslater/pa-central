@@ -391,6 +391,19 @@ class RepoScanResult(Base):
 
     repo_scan: Mapped[RepoScan] = relationship("RepoScan", back_populates="results")
 
+    __table_args__ = (
+        # Supports GET /repo-scans/headlines' row_number() ranking: filter
+        # by repo_scan_id, partition by repo_scan_id, order by started_at
+        # desc, id desc. That query has no row cap and runs on every
+        # Scans-page load (and again after each accept/revoke), so an
+        # unindexed scan+sort here means a full table scan across all
+        # historical results on every request.
+        Index(
+            "ix_repo_scan_results_scan_started_id",
+            "repo_scan_id", "started_at", "id",
+        ),
+    )
+
 
 # ── Finding Record ────────────────────────────────────────────────────────────
 

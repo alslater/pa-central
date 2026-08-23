@@ -93,13 +93,13 @@ expensive to fetch/render in one shot.
 
 ### Clickable table rows — accessibility refinement
 
-`FindingsTable` in `frontend/src/components/ui.tsx` uses `role="button"` + `tabIndex` on `<tr>` elements to make rows open a detail drawer. This pattern is widely supported (keyboard nav, `aria-label`, Enter/Space handlers all present) but is semantically impure — some screen readers treat `<tr role="button">` inconsistently.
+Four table components in `frontend/src/components/ui.tsx` — `FindingsTable`, `RisksTable`, `FindingRecordsTable`, `RiskRecordsTable` — use `role="button"` + `tabIndex` on `<tr>` elements to make rows open a detail drawer. This pattern is widely supported (keyboard nav, `aria-label`, Enter/Space handlers all present) but is semantically impure — some screen readers treat `<tr role="button">` inconsistently.
 
-**Note (2026-08-22):** originally written against the standalone Vulnerabilities page, which the ui-overhaul branch removed. The pattern itself lives on in `FindingsTable` (`ui.tsx`), consumed by `RecordTabs` on the Scans/Repo Scans/Host Detail pages — this entry now targets that shared component instead.
+**Note (2026-08-23):** originally written against the standalone Vulnerabilities page (removed by the ui-overhaul branch) and later narrowed to just `FindingsTable`/`RisksTable`, consumed by `ScanDetailTabs` on the Repo Scans/Host Detail pages. That missed `FindingRecordsTable`/`RiskRecordsTable`, a second, separate pair of table components with the identical `<tr role="button">` pattern, consumed by `RecordTabs` on the Scans page only. All four need the same fix — narrowing to one pair would leave the other unchanged.
 
 **Preferred alternative:** Move the interactive affordance to a dedicated "View" `<button>` inside a `<td>`, keeping the row purely tabular. This is a layout change (adds a visible or visually-hidden button column) so it is deferred until there is appetite for the UI churn.
 
-**Files affected:** `frontend/src/components/ui.tsx` (`FindingsTable`)
+**Files affected:** `frontend/src/components/ui.tsx` (`FindingsTable`, `RisksTable`, `FindingRecordsTable`, `RiskRecordsTable`)
 
 ---
 
@@ -226,3 +226,20 @@ same manual-recovery incident.
 **Files affected:** `frontend/src/components/ui.tsx` (`useDialogAccessibility`, `Modal`, `Drawer`). No backend changes.
 
 **Trigger:** When the first nested dialog pattern is introduced (e.g., a confirmation Modal inside a Drawer).
+
+---
+
+### Host scans (`Scan`) have no retention and no delete endpoint
+
+Unlike `RepoScanResult` (governed by `scan_result_retention_days`/`scan_result_retention_count`, purged in `prune_old_results`) and `FindingRecord`/`RiskRecord` (governed by `finding_retention_days`), the `Scan` model — host-agent-submitted scan history, one row per `pa` CLI submission — has no retention mechanism at all. The only way a `Scan` row is ever deleted today is `ondelete="CASCADE"` on `host_id` when the owning `Host` itself is deleted (`DELETE /hosts/{id}`); short of deleting the whole host, scan history accumulates forever. There's also no way to delete an individual scan — no `DELETE /scans/{id}` exists, so an admin or the host's owner has no way to remove a single bad/duplicate/test submission without deleting the entire host.
+
+This table is already the one place in the codebase that needed a dedicated composite index (`ix_scans_host_project_scanned_received_id`) and a SQL-side `row_number()` ranking just to answer "what's this host's latest scan per project" — see `GET /hosts/{id}/latest-scans`. Unbounded growth here is a real, already-demonstrated cost, not a hypothetical one.
+
+**Proposed solution:**
+- **Retention:** add `scan_retention_days`/`scan_retention_count` settings (or reuse the existing `scan_result_retention_*` keys/semantics, since the age/count-based purge logic in `prune_old_results` for `RepoScanResult` is directly analogous) and a new purge step for `Scan`, most naturally per `(host_id, project_path)` for the count-based variant, mirroring `RepoScanResult`'s per-`repo_scan_id` count purge.
+- **Delete endpoint:** `DELETE /scans/{id}`, following the exact ownership pattern already used by `GET /hosts/{id}/latest-scans` and `PATCH /hosts/{id}` — allowed for `UserRole.admin` or the scan's host's `owner_user_id == user.id`, 404 (not 403) otherwise to avoid confirming the scan's existence to a non-owner. Needs its own authorization tests per this project's standing rule (401/403/200 cases) — see `backend/tests/test_auth_gaps.py` or a dedicated test file.
+- Confirm neither change touches `backend/app/api/scans.py`'s existing `GET /scans`/`GET /scans/{id}` shape — those are the package-alert CLI's protected, must-not-change surface. A new `DELETE /scans/{id}` on the same router is additive and should be safe, but verify against the `pa` CLI source before shipping, per this project's standing package-alert-API-care rule.
+
+**Files affected:** `backend/app/scheduler/scheduler.py` (new purge step), `backend/app/api/system_settings.py` (new setting keys, if not reusing `scan_result_retention_*`), `backend/app/api/scans.py` (new `DELETE /scans/{id}`), `backend/tests/test_scheduler.py`, `backend/tests/test_scans.py`, `backend/tests/test_auth_gaps.py`, `frontend/src/lib/api.ts` (delete method), `frontend/src/pages/HostDetail.tsx` (delete action on a scan row).
+
+**Trigger:** When host-agent scan history volume becomes a storage or query-performance concern, or when an admin/owner first needs to remove an individual bad scan submission without deleting the whole host.

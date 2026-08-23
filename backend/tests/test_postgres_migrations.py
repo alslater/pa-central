@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "0a1b037e15df"
+HEAD_REVISION = "dc0f75bde427"
 
 # The revision immediately before HEAD_REVISION — the point the acceptance-event
 # backfill test rewinds to so it can insert representative pre-migration data
@@ -488,6 +488,32 @@ class TestMigrationChain:
             engine.dispose()
         assert indexdef is not None, "scans ranking index was not created"
         assert "(host_id, project_path, scanned_at, received_at, id)" in indexdef, (
+            f"index column order does not match the query's filter/partition/sort "
+            f"columns: {indexdef}"
+        )
+
+    def test_repo_scan_results_latest_result_index_exists(self, postgres_url):
+        """`ix_repo_scan_results_scan_started_id` supports the row_number()
+        ranking query in GET /repo-scans/headlines (filter and partition by
+        repo_scan_id, order by started_at desc, id desc). That query has no
+        row cap and runs on every Scans-page load (and again after each
+        accept/revoke), so a missing index would mean PostgreSQL scans and
+        sorts the entire repo_scan_results table on every request. This
+        confirms the index exists with its columns in the expected order on
+        a real PostgreSQL server.
+        """
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(postgres_url)
+        try:
+            with engine.connect() as conn:
+                indexdef = conn.execute(sa.text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE indexname = 'ix_repo_scan_results_scan_started_id'"
+                )).scalar()
+        finally:
+            engine.dispose()
+        assert indexdef is not None, "repo scan results ranking index was not created"
+        assert "(repo_scan_id, started_at, id)" in indexdef, (
             f"index column order does not match the query's filter/partition/sort "
             f"columns: {indexdef}"
         )

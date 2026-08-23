@@ -757,12 +757,15 @@ class TestListRepoScanResults:
 @pytest.mark.asyncio
 class TestLoadFindingAcceptanceEventsBatching:
     """load_finding_acceptance_events batches its IN (...) query rather than
-    binding every id in one statement — the dashboard-wide exposure-history
-    endpoint passes every retained FindingRecord id with no scan/date bound,
-    so an unbatched query could exceed SQLite/PostgreSQL's per-statement
-    bind-parameter limit and fail outright on a large database. This forces
-    a small batch size so the test can cross a batch boundary without
-    creating thousands of rows."""
+    binding every id in one statement. Both exposure-history endpoints
+    prefilter with could_contribute_to_exposure_window_sql_expr before
+    calling this, so record_ids is the (still potentially large) set of
+    open-or-recently-closed records that can overlap the window — not every
+    retained record with no date bound. That set can still be large enough
+    to exceed SQLite/PostgreSQL's per-statement bind-parameter limit and
+    fail outright on a fleet with many open findings. This forces a small
+    batch size so the test can cross a batch boundary without creating
+    thousands of rows."""
 
     async def test_events_grouped_correctly_across_a_batch_boundary(
         self, db, admin_user, monkeypatch
