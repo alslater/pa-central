@@ -85,3 +85,29 @@ class TestUpdateUser:
         # Non-admin must not learn whether user 999999 exists — always 403
         r = await client.patch("/api/users/999999", json={"display_name": "x"}, headers=auth(viewer_token))
         assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+class TestResetPassword:
+    async def test_requires_auth(self, client, viewer_user):
+        r = await client.post(f"/api/users/{viewer_user.id}/reset-password")
+        assert r.status_code == 401
+
+    async def test_non_admin_forbidden(self, client, viewer_token, admin_user):
+        r = await client.post(f"/api/users/{admin_user.id}/reset-password", headers=auth(viewer_token))
+        assert r.status_code == 403
+
+    async def test_admin_can_reset(self, client, admin_token, viewer_user):
+        r = await client.post(f"/api/users/{viewer_user.id}/reset-password", headers=auth(admin_token))
+        assert r.status_code == 200
+        new_password = r.json()["password"]
+        assert len(new_password) >= 12
+
+        login = await client.post("/api/auth/login", json={
+            "email": viewer_user.email, "password": new_password,
+        })
+        assert login.status_code == 200
+
+    async def test_returns_404_for_unknown(self, client, admin_token):
+        r = await client.post("/api/users/999999/reset-password", headers=auth(admin_token))
+        assert r.status_code == 404

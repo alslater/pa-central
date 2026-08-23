@@ -71,10 +71,11 @@ function useLiveAlerts() {
   return { count, clear: () => setCount(0) }
 }
 
-function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose }: {
+function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show }: {
   userId: number
   totpEnabled: boolean
   onClose: () => void
+  show: (msg: string, kind?: 'ok' | 'err') => void
 }) {
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -86,8 +87,6 @@ function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose }: {
   const [totpSaving, setTotpSaving] = useState(false)
   const [totpError, setTotpError] = useState<string | null>(null)
 
-  const { show } = useToast()
-
   const savePassword = async () => {
     if (next.length < 12) { setPwError('Password must be at least 12 characters'); return }
     const complexity = [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(r => r.test(next)).length
@@ -98,6 +97,7 @@ function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose }: {
       await api.users.update(userId, { password: next } as any)
       show('Password changed')
       setNext(''); setConfirm('')
+      onClose()
     } catch (e: any) { setPwError(e.message) }
     finally { setPwSaving(false) }
   }
@@ -181,6 +181,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const { count, clear } = useLiveAlerts()
   const [showSecurity, setShowSecurity] = useState(false)
   const { mode, setMode } = useTheme()
+  const { show, Toast } = useToast()
 
   const cycleTheme = () => {
     const next = THEME_CYCLE[(THEME_CYCLE.indexOf(mode) + 1) % THEME_CYCLE.length]
@@ -254,8 +255,9 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       {showSecurity && user && (
-        <SecurityModal userId={user.id} totpEnabled={user.totp_enabled} onClose={() => setShowSecurity(false)} />
+        <SecurityModal userId={user.id} totpEnabled={user.totp_enabled} onClose={() => setShowSecurity(false)} show={show} />
       )}
+      {Toast}
 
       {/* Main */}
       <main className="flex-1 overflow-auto flex flex-col">

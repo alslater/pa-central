@@ -4,9 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin
 from app.core.database import get_db
-from app.core.security import hash_password
+from app.core.security import generate_password, hash_password
 from app.models import User
-from app.schemas import UserOut, UserUpdate
+from app.schemas import PasswordResetOut, UserOut, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -91,3 +91,18 @@ async def reset_totp(
     await db.commit()
     await db.refresh(user)
     return user
+
+
+@router.post("/{user_id}/reset-password", response_model=PasswordResetOut)
+async def reset_password(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> PasswordResetOut:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    password = generate_password()
+    user.hashed_password = hash_password(password)
+    await db.commit()
+    return PasswordResetOut(password=password)

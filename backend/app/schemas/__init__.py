@@ -87,6 +87,11 @@ class UserOut(OrmBase):
     created_at: datetime
 
 
+class PasswordResetOut(BaseModel):
+    """Returned once only — the generated password is never stored in plaintext."""
+    password: str
+
+
 # ── API Key ───────────────────────────────────────────────────────────────────
 
 class ApiKeyCreate(BaseModel):
