@@ -176,6 +176,55 @@ class TestExposureHistory:
         assert exposures[-1] == 81
         assert exposures[0] == 0  # 5th day back predates first_found_at
 
+    async def test_closed_before_window_excluded_but_not_undercounted(
+        self, client, admin_token, db, admin_user
+    ):
+        """could_contribute_to_exposure_window_sql_expr filters out records
+        that can never contribute to the requested window before they're
+        even loaded from the DB — this pins the exact boundary against
+        compute_exposure_history's own day-by-day semantics (closed_day <=
+        day means "not open that day"), so the SQL cutoff can't silently
+        drift from the Python one and start dropping records the window
+        should still count."""
+        scan = RepoScan(name="window-boundary-repo", url="https://x/wb", branch="main", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.flush()
+        today = datetime.now(UTC)
+        window_start_day = (today - timedelta(days=4)).date()  # days=5 window: today and the 4 preceding days
+        window_start_midnight = datetime(
+            window_start_day.year, window_start_day.month, window_start_day.day, tzinfo=UTC
+        )
+
+        # Closed at the very end of window_start's calendar day (23:59:59) —
+        # the tightest possible case that is still "closed on window_start's
+        # day", so it must be excluded (closed_day <= day for every day in
+        # the window means never open). Using midnight-of-window_start here
+        # instead would also happen to get excluded by an off-by-one-day-
+        # too-strict boundary, silently passing a broken fix — this exact
+        # timestamp is what actually pins the boundary.
+        db.add(FindingRecord(
+            repo_scan_id=scan.id, advisory_id="GHSA-wb-excluded", package="excluded-pkg",
+            ecosystem="pypi", severity=AlertSeverity.critical,
+            first_found_at=today - timedelta(days=20),
+            closed_at=window_start_midnight + timedelta(hours=23, minutes=59, seconds=59),
+        ))
+        # Closed at the first instant of the *next* day — open for all of
+        # window_start's day, so it must still be counted there.
+        db.add(FindingRecord(
+            repo_scan_id=scan.id, advisory_id="GHSA-wb-included", package="included-pkg",
+            ecosystem="pypi", severity=AlertSeverity.high,
+            first_found_at=today - timedelta(days=20),
+            closed_at=window_start_midnight + timedelta(days=1),
+        ))
+        await db.commit()
+
+        r = await client.get("/api/dashboard/exposure-history?days=5", headers=auth(admin_token))
+        assert r.status_code == 200
+        points = r.json()["points"]
+        by_date = {p["date"]: p["exposure"] for p in points}
+        oldest_day = min(by_date)
+        assert by_date[oldest_day] == 27  # only included-pkg (high=27), not excluded-pkg (critical=81)
+
     async def test_days_param_clamps_to_finding_retention_days(self, client, admin_token, db):
         setting = await db.get(SystemSetting, "finding_retention_days")
         if setting:

@@ -43,6 +43,7 @@ from app.services.finding_lifecycle import (
     compute_exposure_history,
     compute_scan_config_hash,
     compute_sla_days,
+    could_contribute_to_exposure_window_sql_expr,
     get_effective_sla,
     get_global_sla,
     load_finding_acceptance_events,
@@ -440,11 +441,13 @@ async def get_repo_scan_exposure_history(
     _, _, retention_days = await get_global_sla(db)
     window_days = min(days, retention_days)
     today = utcnow().date()
+    window_start = today - timedelta(days=window_days - 1)
 
     rows = await db.execute(
         select(FindingRecord.id, FindingRecord.severity, FindingRecord.first_found_at,
                FindingRecord.closed_at)
         .where(FindingRecord.repo_scan_id == scan_id)
+        .where(could_contribute_to_exposure_window_sql_expr(window_start))
     )
     records = [
         SimpleNamespace(id=fid, severity=sev, first_found_at=ffa, closed_at=ca)

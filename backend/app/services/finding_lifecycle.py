@@ -95,6 +95,39 @@ def not_accepted_sql_expr(today: date) -> ColumnElement[bool]:
     )
 
 
+def could_contribute_to_exposure_window_sql_expr(window_start: date) -> ColumnElement[bool]:
+    """SQL expression: this finding could contribute to at least one day in
+    an exposure-history window starting on `window_start`.
+
+    compute_exposure_history only ever counts a record on a given day if it
+    was open that day: first_found_at.date() <= day and (closed_at is None
+    or closed_at.date() > day). A record closed on or before window_start is
+    therefore closed on or before every day in the window and can never
+    contribute — filtering those out here (rather than loading every
+    FindingRecord ever created and discarding most of them in Python) is
+    what keeps the exposure-history endpoints' hot-path query bounded by the
+    window size instead of by total historical finding count.
+
+    closed_at is a UtcDateTime, so window_start (a date) is compared as
+    midnight UTC on that day — closed_at.date() > window_start is equivalent
+    to closed_at >= the start of the *next* day, i.e. closed_at > the end of
+    window_start's day, which >= (window_start + 1 day) at midnight captures
+    correctly without needing closed_at.date() in SQL (dialect-neutral: no
+    date-truncation function required).
+
+    Deliberately no comparison against `today`/the window's upper bound:
+    first_found_at can't be in the future relative to the query, so every
+    open-or-recently-closed record already satisfies the lower bound the
+    day-by-day loop checks. Only the closed-before-the-window case excludes
+    a row outright.
+    """
+    window_start_next_day = datetime.combine(window_start, datetime.min.time(), tzinfo=UTC) + timedelta(days=1)
+    return or_(
+        FindingRecord.closed_at.is_(None),
+        FindingRecord.closed_at >= window_start_next_day,
+    )
+
+
 DEFAULT_SLA_HIGH = 14
 DEFAULT_SLA_MEDIUM = 90
 DEFAULT_FINDING_RETENTION = 365

@@ -12,6 +12,7 @@ from app.models import Alert, AlertSeverity, FindingRecord, Host, User, UserRole
 from app.schemas import AlertOut, DashboardStats, ExposureHistoryOut, ExposurePoint
 from app.services.finding_lifecycle import (
     compute_exposure_history,
+    could_contribute_to_exposure_window_sql_expr,
     get_global_sla,
     load_finding_acceptance_events,
     not_accepted_sql_expr,
@@ -93,10 +94,12 @@ async def get_exposure_history(
     _, _, retention_days = await get_global_sla(db)
     window_days = min(days, retention_days)
     today = utcnow().date()
+    window_start = today - timedelta(days=window_days - 1)
 
     rows = await db.execute(
         select(FindingRecord.id, FindingRecord.severity, FindingRecord.first_found_at,
                FindingRecord.closed_at)
+        .where(could_contribute_to_exposure_window_sql_expr(window_start))
     )
     records = [
         SimpleNamespace(id=fid, severity=sev, first_found_at=ffa, closed_at=ca)

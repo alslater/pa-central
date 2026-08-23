@@ -18,10 +18,22 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import func, select
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.models import Host, RepoScan, RepoScanResult, RepoScanStatus, Scan, User
+from app.core.database import get_db
+from app.core.security import create_access_token, hash_password
+from app.main import app
+from app.models import (
+    Host,
+    RepoScan,
+    RepoScanResult,
+    RepoScanStatus,
+    Scan,
+    User,
+    UserRole,
+)
+from tests.conftest import auth
 from tests.conftest_postgres import make_async_engine
 from tests.test_postgres_migrations import HEAD_REVISION, alembic
 
@@ -698,6 +710,11 @@ class TestRepoScanHeadlineLatestResultRanking:
     query in the codebase, so it's verified directly here rather than
     assumed — enum status values must round-trip correctly through a
     subquery column on PostgreSQL's native enum handling.
+
+    Exercises the real GET /repo-scans/headlines endpoint (not a
+    hand-reconstructed copy of its SQL) so a regression to the handler's own
+    partition/order/status selection is actually caught here, rather than
+    leaving this test green regardless of what the handler does.
     """
 
     @pytest.fixture
@@ -708,7 +725,25 @@ class TestRepoScanHeadlineLatestResultRanking:
             yield s
         await engine.dispose()
 
-    async def test_ranks_results_per_scan_and_picks_latest(self, session):
+    @pytest.fixture
+    async def client(self, session):
+        async def override_db():
+            yield session
+
+        app.dependency_overrides[get_db] = override_db
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+        app.dependency_overrides.pop(get_db, None)
+
+    async def test_ranks_results_per_scan_and_picks_latest(self, session, client):
+        admin = User(
+            email="admin@x.com", display_name="Admin", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(admin)
+        await session.flush()
+        token = create_access_token(admin.id)
+
         scan_a = RepoScan(name="a", url="http://x/a", branch="main")
         scan_b = RepoScan(name="b", url="http://x/b", branch="main")
         session.add_all([scan_a, scan_b])
@@ -725,24 +760,13 @@ class TestRepoScanHeadlineLatestResultRanking:
         ])
         await session.commit()
 
-        result_rank = (
-            func.row_number()
-            .over(partition_by=RepoScanResult.repo_scan_id, order_by=RepoScanResult.started_at.desc())
-            .label("rank")
-        )
-        ranked = (
-            select(RepoScanResult.repo_scan_id, RepoScanResult.status, RepoScanResult.started_at, result_rank)
-            .where(RepoScanResult.repo_scan_id.in_([scan_a.id, scan_b.id]))
-            .subquery()
-        )
-        rows = await session.execute(
-            select(ranked.c.repo_scan_id, ranked.c.status, ranked.c.started_at).where(ranked.c.rank == 1)
-        )
-        latest_by_scan = {scan_id: (status, started_at) for scan_id, status, started_at in rows}
+        r = await client.get("/api/repo-scans/headlines", headers=auth(token))
+        assert r.status_code == 200
+        by_name = {h["name"]: h for h in r.json()}
 
-        assert latest_by_scan[scan_a.id][0] == RepoScanStatus.success
-        assert latest_by_scan[scan_a.id][1] == datetime(2026, 1, 3, tzinfo=UTC)
-        assert latest_by_scan[scan_b.id][0] == RepoScanStatus.pending
+        assert by_name["a"]["latest_status"] == "success"
+        assert by_name["a"]["latest_scanned_at"] == "2026-01-03T00:00:00Z"
+        assert by_name["b"]["latest_status"] == "pending"
 
 
 class TestHostLatestScansRanking:
@@ -753,7 +777,11 @@ class TestHostLatestScansRanking:
     round-tripping through a subquery; this one ranks only the id column,
     then does a second select(Scan).where(Scan.id.in_(...)) to get back real
     ORM objects for FastAPI's response_model=list[ScanOut] to serialize).
-    Verified directly against PostgreSQL since it's a new query shape.
+
+    Exercises the real GET /hosts/{id}/latest-scans endpoint (not a
+    hand-reconstructed copy of its SQL) so a regression to the handler's own
+    partition/order/tie-break columns is actually caught here, rather than
+    leaving these tests green regardless of what the handler does.
     """
 
     @pytest.fixture
@@ -764,10 +792,25 @@ class TestHostLatestScansRanking:
             yield s
         await engine.dispose()
 
-    async def test_ranks_by_project_and_refetches_full_rows(self, session):
-        owner = User(email="owner@x.com", display_name="Owner", hashed_password="x")
+    @pytest.fixture
+    async def client(self, session):
+        async def override_db():
+            yield session
+
+        app.dependency_overrides[get_db] = override_db
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+        app.dependency_overrides.pop(get_db, None)
+
+    async def test_ranks_by_project_and_refetches_full_rows(self, session, client):
+        owner = User(
+            email="owner@x.com", display_name="Owner", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
         session.add(owner)
         await session.flush()
+        token = create_access_token(owner.id)
+
         host = Host(name="h", hostname="h.local", owner_user_id=owner.id)
         session.add(host)
         await session.flush()
@@ -781,32 +824,17 @@ class TestHostLatestScansRanking:
         ])
         await session.commit()
 
-        rank = (
-            func.row_number()
-            .over(
-                partition_by=Scan.project_path,
-                order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
-            )
-            .label("rank")
-        )
-        ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
-        latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
-        # Matches production's final ORDER BY (get_host_latest_scans) rather
-        # than alphabetical by project_path — most-recently-scanned first,
-        # with the same tie-breakers as the ranking above.
-        rows = await session.execute(
-            select(Scan).where(Scan.id.in_(latest_ids))
-            .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
-        )
-        scans = rows.scalars().all()
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        scans = r.json()
 
-        by_project = {s.project_path: s for s in scans}
+        by_project = {s["project_path"]: s for s in scans}
         assert set(by_project) == {"proj-a", "proj-b"}
-        assert by_project["proj-a"].finding_count == 0  # the later proj-a scan, not the earlier one
+        assert by_project["proj-a"]["finding_count"] == 0  # the later proj-a scan, not the earlier one
         # proj-a's latest scan (Jan 3) is more recent than proj-b's (Jan 2).
-        assert [s.project_path for s in scans] == ["proj-a", "proj-b"]
+        assert [s["project_path"] for s in scans] == ["proj-a", "proj-b"]
 
-    async def test_tied_scanned_at_final_order_breaks_tie_by_received_at(self, session):
+    async def test_tied_scanned_at_final_order_breaks_tie_by_received_at(self, session, client):
         """Different projects commonly share a scan timestamp (e.g. scans
         triggered together) — without received_at/id as secondary ORDER BY
         keys on the final row fetch, their relative order in the response is
@@ -823,9 +851,14 @@ class TestHostLatestScansRanking:
         test can't distinguish "guaranteed correct" from "happened to be
         correct this time" for this specific case.
         """
-        owner = User(email="owner3@x.com", display_name="Owner3", hashed_password="x")
+        owner = User(
+            email="owner3@x.com", display_name="Owner3", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
         session.add(owner)
         await session.flush()
+        token = create_access_token(owner.id)
+
         host = Host(name="h3", hostname="h3.local", owner_user_id=owner.id)
         session.add(host)
         await session.flush()
@@ -838,33 +871,26 @@ class TestHostLatestScansRanking:
         ])
         await session.commit()
 
-        rank = (
-            func.row_number()
-            .over(
-                partition_by=Scan.project_path,
-                order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
-            )
-            .label("rank")
-        )
-        ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
-        latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
-        rows = await session.execute(
-            select(Scan).where(Scan.id.in_(latest_ids))
-            .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
-        )
-        scans = rows.scalars().all()
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        scans = r.json()
 
         # Both projects tie on scanned_at; received_at desc breaks it.
-        assert [s.project_path for s in scans] == ["proj-later-received", "proj-earlier-received"]
+        assert [s["project_path"] for s in scans] == ["proj-later-received", "proj-earlier-received"]
 
-    async def test_tied_scanned_at_breaks_tie_by_received_at(self, session):
+    async def test_tied_scanned_at_breaks_tie_by_received_at(self, session, client):
         """Without a secondary ORDER BY, PostgreSQL's row_number() tie-break
         for equal scanned_at is unspecified — this pins received_at desc as
         the deciding factor, matching the previous client-side behaviour
         (iterate GET /scans' received_at-desc rows, keep the first match)."""
-        owner = User(email="owner2@x.com", display_name="Owner2", hashed_password="x")
+        owner = User(
+            email="owner2@x.com", display_name="Owner2", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
         session.add(owner)
         await session.flush()
+        token = create_access_token(owner.id)
+
         host = Host(name="h2", hostname="h2.local", owner_user_id=owner.id)
         session.add(host)
         await session.flush()
@@ -877,23 +903,12 @@ class TestHostLatestScansRanking:
         ])
         await session.commit()
 
-        rank = (
-            func.row_number()
-            .over(
-                partition_by=Scan.project_path,
-                order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
-            )
-            .label("rank")
-        )
-        ranked = select(Scan.id, rank).where(Scan.host_id == host.id).subquery()
-        latest_ids = select(ranked.c.id).where(ranked.c.rank == 1)
-        rows = await session.execute(
-            select(Scan).where(Scan.id.in_(latest_ids))
-        )
-        scans = rows.scalars().all()
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        scans = r.json()
 
         assert len(scans) == 1
-        assert scans[0].finding_count == 0  # the row with the greater received_at
+        assert scans[0]["finding_count"] == 0  # the row with the greater received_at
 
 
 # ── Test fixture URL conversion ───────────────────────────────────────────────
