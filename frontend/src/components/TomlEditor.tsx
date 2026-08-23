@@ -110,6 +110,25 @@ function buildThemeExt(id: string): Extension {
   return t.ext
 }
 
+// Shared by both the initial mount and the external-value-sync effect, so
+// that replacing the whole EditorState (see below) doesn't drop any
+// behaviour the mount originally wired up.
+function buildExtensions(themeId: string, onChangeRef: { current: (value: string) => void }): Extension[] {
+  return [
+    history(),
+    lineNumbers(),
+    drawSelection(),
+    highlightActiveLine(),
+    StreamLanguage.define(toml),
+    themeCompartment.of(buildThemeExt(themeId)),
+    keymap.of([...defaultKeymap, ...historyKeymap]),
+    EditorView.updateListener.of(update => {
+      if (update.docChanged) onChangeRef.current(update.state.doc.toString())
+    }),
+    EditorView.lineWrapping,
+  ]
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 interface Props {
@@ -136,19 +155,7 @@ export function TomlEditor({ value, onChange, minHeight = 300, showError = true 
     const view = new EditorView({
       state: EditorState.create({
         doc: value,
-        extensions: [
-          history(),
-          lineNumbers(),
-          drawSelection(),
-          highlightActiveLine(),
-          StreamLanguage.define(toml),
-          themeCompartment.of(buildThemeExt(themeId)),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          EditorView.updateListener.of(update => {
-            if (update.docChanged) onChangeRef.current(update.state.doc.toString())
-          }),
-          EditorView.lineWrapping,
-        ],
+        extensions: buildExtensions(themeId, onChangeRef),
       }),
       parent: containerRef.current,
     })
@@ -158,14 +165,42 @@ export function TomlEditor({ value, onChange, minHeight = 300, showError = true 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Sync external value changes
+  // Sync external value changes. CodeMirror's document always normalizes
+  // \r\n to \n internally (EditorState.create splits on /\r\n?|\n/ and
+  // reassembles with \n), so view.state.doc.toString() can never contain a
+  // literal \r even when `value` does — comparing raw strings here would
+  // treat the very first mount of any CRLF-containing content as an
+  // external edit, dispatch a "correcting" change, and fire onChange before
+  // the user has touched anything (the actual cause of templates showing
+  // "Unsaved" immediately on selection when their stored content happens to
+  // use Windows line endings). Normalize both sides the same way CodeMirror
+  // already normalizes its own document before comparing.
+  //
+  // This replaces the whole EditorState (view.setState) rather than
+  // dispatching a change into the existing one. historyField_ is a
+  // module-level singleton inside @codemirror/commands, so reconfiguring its
+  // owning compartment with a fresh history() extension is a no-op — the
+  // field's `reconfigure` slot sees the same field instance at the same
+  // address and just copies the old value across instead of recreating it.
+  // A genuinely new EditorState is the only way to get an empty undo/redo
+  // branch, which matters here: without it, Ctrl+Z after switching from one
+  // template to another restores the previous template's TOML into the
+  // buffer now labelled as the new one. setState also never runs through
+  // updateListener, so this doesn't need the externalSync annotation dance
+  // dispatch() did — it can't be mistaken for a user edit in the first place.
   useEffect(() => {
     const view = viewRef.current
     if (!view) return
     const current = view.state.doc.toString()
-    if (current !== value) {
-      view.dispatch({ changes: { from: 0, to: current.length, insert: value } })
+    const normalizedValue = value.replace(/\r\n?/g, '\n')
+    if (current !== normalizedValue) {
+      view.setState(EditorState.create({
+        doc: normalizedValue,
+        selection: { anchor: Math.min(view.state.selection.main.anchor, normalizedValue.length) },
+        extensions: buildExtensions(themeId, onChangeRef),
+      }))
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value])
 
   // Swap theme without rebuilding

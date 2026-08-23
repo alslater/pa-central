@@ -309,6 +309,7 @@ export default function Configs() {
               {/* Editor */}
               <div className="config-editor-section">
                 <TomlEditor
+                  key={selected.id}
                   value={currentToml}
                   onChange={isOperator ? (v) => { setEditToml(v); runLint(v) } : () => {}}
                   minHeight={400}

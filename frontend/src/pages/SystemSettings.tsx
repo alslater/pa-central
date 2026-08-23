@@ -28,6 +28,10 @@ const SECRET_KEYS = new Set(KNOWN_SETTINGS.filter(s => s.type === 'secret').map(
 
 export default function SystemSettings() {
   const [settings, setSettings] = useState<Record<string, string>>({})
+  // Keys the backend reported as is_default: true — the field shows the
+  // runtime value the app is actually using (e.g. sla_high_days=14), but
+  // nobody has saved it, so it isn't a persisted admin choice.
+  const [defaultKeys, setDefaultKeys] = useState<Set<string>>(new Set())
   // Tracks which secret fields the user has actually typed into this session.
   // Secret fields not in this set are excluded from the PATCH so we never
   // overwrite a stored secret with an empty string.
@@ -40,8 +44,13 @@ export default function SystemSettings() {
   const load = useCallback(() => {
     api.systemSettings.list().then(rows => {
       const m: Record<string, string> = {}
-      for (const r of rows) m[r.key] = r.value ?? ''
+      const defaults = new Set<string>()
+      for (const r of rows) {
+        m[r.key] = r.value ?? ''
+        if (r.is_default) defaults.add(r.key)
+      }
       setSettings(m)
+      setDefaultKeys(defaults)
     }).catch(e => show(e.message, 'err'))
   }, [show])
   useEffect(() => { load() }, [load])
@@ -49,6 +58,9 @@ export default function SystemSettings() {
   const set = (key: string, val: string) => {
     setSettings(prev => ({ ...prev, [key]: val }))
     if (SECRET_KEYS.has(key)) setDirtySecrets(prev => new Set(prev).add(key))
+    // Editing a field is a deliberate choice, even if the typed value
+    // happens to match the default — it stops being an unsaved fallback.
+    setDefaultKeys(prev => { if (!prev.has(key)) return prev; const n = new Set(prev); n.delete(key); return n })
   }
 
   const save = async () => {
@@ -59,6 +71,10 @@ export default function SystemSettings() {
       // Only patch keys the user has actually loaded or edited; skip keys that
       // were never populated so we don't overwrite DB values with null.
       if (!(key in settings)) continue
+      // Still showing a synthesized runtime default the admin hasn't
+      // touched — must not be persisted as a side effect of an unrelated
+      // save, or "using default" silently becomes "explicitly saved".
+      if (defaultKeys.has(key)) continue
       updates[key] = settings[key] === '' ? null : settings[key]
     }
     try {
@@ -135,7 +151,7 @@ export default function SystemSettings() {
                 {KNOWN_SETTINGS.filter(s => s.key === 'sla_high_days' || s.key === 'sla_medium_days' || s.key === 'finding_retention_days').map(({ key, label, hint }) => (
                   <Input
                     key={key}
-                    label={label}
+                    label={defaultKeys.has(key) ? `${label} (using default — not saved)` : label}
                     type="number"
                     inputMode="numeric"
                     min={1}

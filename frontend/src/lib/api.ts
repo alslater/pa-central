@@ -206,7 +206,10 @@ export interface PaginatedFindings {
 
 export interface SystemSetting {
   key: string; value: string | null; value_type: SettingValueType
-  updated_at: string; updated_by_id: number | null
+  updated_at: string | null; updated_by_id: number | null
+  // True when this key has no saved row and `value` is the runtime default
+  // the app falls back to, not a value an admin has ever saved.
+  is_default: boolean
 }
 
 export interface LintResult {
