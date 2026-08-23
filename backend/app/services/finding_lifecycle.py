@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +14,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import (
     AlertSeverity,
+    FindingAcceptanceEvent,
     FindingRecord,
     RepoScan,
     RepoScanResult,
@@ -91,6 +95,44 @@ def not_accepted_sql_expr(today: date) -> ColumnElement[bool]:
     )
 
 
+def could_contribute_to_exposure_window_sql_expr(window_start: date) -> ColumnElement[bool]:
+    """SQL expression: this finding could contribute to at least one day in
+    an exposure-history window starting on `window_start`.
+
+    compute_exposure_history only ever counts a record on a given day if it
+    was open that day: first_found_at.date() <= day and (closed_at is None
+    or closed_at.date() > day). A record closed on or before window_start is
+    therefore closed on or before every day in the window and can never
+    contribute — filtering those out here (rather than loading every
+    FindingRecord ever created and discarding most of them in Python) bounds
+    the query to open-or-recently-closed records that can overlap the
+    window, instead of every record in total historical finding count.
+
+    This is not a window-sized bound: every currently-open finding
+    (closed_at IS NULL) still passes regardless of `window_days` — a
+    finding open for years is loaded even for a one-day request. The query
+    cost tracks open-finding volume, not the requested window.
+
+    closed_at is a UtcDateTime, so window_start (a date) is compared as
+    midnight UTC on that day — closed_at.date() > window_start is equivalent
+    to closed_at >= the start of the *next* day, i.e. closed_at > the end of
+    window_start's day, which >= (window_start + 1 day) at midnight captures
+    correctly without needing closed_at.date() in SQL (dialect-neutral: no
+    date-truncation function required).
+
+    Deliberately no comparison against `today`/the window's upper bound:
+    first_found_at can't be in the future relative to the query, so every
+    open-or-recently-closed record already satisfies the lower bound the
+    day-by-day loop checks. Only the closed-before-the-window case excludes
+    a row outright.
+    """
+    window_start_next_day = datetime.combine(window_start, datetime.min.time(), tzinfo=UTC) + timedelta(days=1)
+    return or_(
+        FindingRecord.closed_at.is_(None),
+        FindingRecord.closed_at >= window_start_next_day,
+    )
+
+
 DEFAULT_SLA_HIGH = 14
 DEFAULT_SLA_MEDIUM = 90
 DEFAULT_FINDING_RETENTION = 365
@@ -145,6 +187,123 @@ def is_accepted(record: FindingRecord, now: datetime | None = None) -> bool:
         if record.accepted_until <= today:
             return False
     return True
+
+
+EXPOSURE_WEIGHTS: dict[AlertSeverity, int] = {
+    AlertSeverity.critical: 81,
+    AlertSeverity.high: 27,
+    AlertSeverity.medium: 9,
+    AlertSeverity.warning: 5,
+    AlertSeverity.low: 3,
+    AlertSeverity.info: 1,
+}
+
+
+def is_accepted_as_of(events: Sequence[Any], day: date) -> bool:
+    """Replay a record's acceptance events up to and including `day` and
+    return whether it was accepted as of that day.
+
+    `events` must be that record's own FindingAcceptanceEvent/
+    RiskAcceptanceEvent rows (or any object exposing the same `.action`,
+    `.at`, `.accepted_until` attributes), in any order — this function sorts
+    them itself. Replacing the old "read accepted_at/accepted_until off the
+    record directly" approach: those columns only ever reflect *current*
+    state, and revoking nulls them out, destroying any evidence of a past
+    acceptance episode. The event log is append-only, so replaying it
+    correctly reconstructs "was this accepted on day X" for any past day,
+    including days during an acceptance that has since been revoked.
+    """
+    relevant = [e for e in events if e.at.date() <= day]
+    if not relevant:
+        return False
+    latest = max(relevant, key=lambda e: e.at)
+    if latest.action != "accepted":
+        return False
+    return latest.accepted_until is None or latest.accepted_until > day
+
+
+# Conservative bind-parameter batch size for load_finding_acceptance_events'
+# IN (...) queries — comfortably under both SQLite's (older builds default
+# to 999; modern ones 32766) and PostgreSQL's (65535) per-statement limits.
+_ACCEPTANCE_EVENT_ID_BATCH_SIZE = 500
+
+
+async def load_finding_acceptance_events(
+    db: AsyncSession, record_ids: Sequence[int]
+) -> dict[int, list[Any]]:
+    """Fetch the acceptance events for `record_ids`, grouped by record id.
+
+    Every id in `record_ids` gets an entry (empty list if it has no events),
+    so callers can index the result directly. Deliberately plain `IN (...)`
+    selects with no date filtering in SQL — the day-by-day replay happens in
+    Python (see compute_exposure_history), keeping this dialect-neutral.
+
+    Both exposure-history endpoints pre-filter their FindingRecord query with
+    could_contribute_to_exposure_window_sql_expr(window_start) before calling
+    this, so `record_ids` is no longer every retained record with no date
+    bound — it's the (still potentially large) set of records open or
+    recently closed enough to overlap the requested window. That set can
+    still be large enough to exceed a single statement's bind-parameter
+    limit (SQLite and PostgreSQL both cap this — a query that size would
+    fail outright, not just run slowly), so IDs are batched into fixed-size
+    `IN (...)` queries rather than issued as one.
+
+    Shared by both exposure-history endpoints (dashboard-wide and per-scan)
+    so the two cannot drift apart.
+    """
+    events_by_record_id: dict[int, list[Any]] = {rid: [] for rid in record_ids}
+    if not events_by_record_id:
+        return events_by_record_id
+    ids = list(events_by_record_id)
+    for batch_start in range(0, len(ids), _ACCEPTANCE_EVENT_ID_BATCH_SIZE):
+        batch = ids[batch_start:batch_start + _ACCEPTANCE_EVENT_ID_BATCH_SIZE]
+        event_rows = await db.execute(
+            select(
+                FindingAcceptanceEvent.finding_record_id,
+                FindingAcceptanceEvent.action,
+                FindingAcceptanceEvent.at,
+                FindingAcceptanceEvent.accepted_until,
+            ).where(FindingAcceptanceEvent.finding_record_id.in_(batch))
+        )
+        for record_id, action, at, accepted_until in event_rows:
+            events_by_record_id[record_id].append(
+                SimpleNamespace(action=action, at=at, accepted_until=accepted_until)
+            )
+    return events_by_record_id
+
+
+def compute_exposure_history(
+    records: Sequence[FindingRecord],
+    events_by_record_id: dict[int, list],
+    window_days: int,
+    today: date,
+) -> list[tuple[date, int]]:
+    """Return [(day, weighted_exposure_sum), ...] for the last window_days
+    days ending at (and including) today, oldest first.
+
+    A record contributes EXPOSURE_WEIGHTS[record.severity] to a given day if
+    it was open (first_found_at.date() <= day and (closed_at is None or
+    closed_at.date() > day)) and not accepted as of that day, per that
+    record's own acceptance event history (events_by_record_id[record.id]).
+    Pure Python — deliberately no SQL date-series logic, per this project's
+    dialect-neutrality requirement for this feature (see design spec).
+    """
+    days = [today - timedelta(days=i) for i in range(window_days - 1, -1, -1)]
+    totals = {day: 0 for day in days}
+    for record in records:
+        weight = EXPOSURE_WEIGHTS.get(record.severity, 0)
+        first_found_day = record.first_found_at.date()
+        closed_day = record.closed_at.date() if record.closed_at is not None else None
+        record_events = events_by_record_id.get(record.id, [])
+        for day in days:
+            if first_found_day > day:
+                continue
+            if closed_day is not None and closed_day <= day:
+                continue
+            if is_accepted_as_of(record_events, day):
+                continue
+            totals[day] += weight
+    return [(day, totals[day]) for day in days]
 
 
 def in_breach(record: FindingRecord, now: datetime) -> bool:

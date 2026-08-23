@@ -867,7 +867,7 @@ export function FindingsTable({ findings }: { findings: Record<string, unknown>[
   // findings resolved) — otherwise a user left on a now-out-of-range page
   // sees an empty pageItems slice with no way back, since the pager itself
   // may disappear if totalPages also drops to 1 or 0.
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern, matches Vulnerabilities.tsx / RisksTable
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern, also used by RisksTable below
   useEffect(() => { setPage(p => totalPages > 0 ? Math.min(p, totalPages - 1) : 0) }, [totalPages])
 
   if (!items.length) return null
@@ -1043,7 +1043,7 @@ export function RisksTable({ risks }: { risks: Record<string, unknown>[] }) {
   // resolved) — otherwise a user left on a now-out-of-range page sees an
   // empty pageItems slice with no way back, since the pager itself may
   // disappear if totalPages also drops to 1 or 0.
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern, matches Vulnerabilities.tsx
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- clamps page to valid range when data shrinks; derived-state reset pattern, matches the paginated-table reset above
   useEffect(() => { setPage(p => totalPages > 0 ? Math.min(p, totalPages - 1) : 0) }, [totalPages])
 
   if (!items.length) return null
@@ -1182,6 +1182,272 @@ export function ScanDetailTabs({
       </div>
       <div id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`} hidden={tab !== 'risks'}>
         <RisksTable risks={risks!} />
+      </div>
+    </div>
+  )
+}
+
+// ── Record tabs (lifecycle findings vs. risks, with accept/revoke) ─────────────
+//
+// Sibling to ScanDetailTabs: same ARIA/roving-tabindex structure, but over
+// FindingRecord/RiskRecord lifecycle rows (with accept/revoke actions)
+// instead of raw per-scan JSON snapshots. Unlike FindingsPanel/RisksPanel in
+// RepoScans.tsx (the pre-extraction originals), these take already-loaded
+// records as props and never fetch internally — the caller owns loading and
+// re-fetching via onChanged.
+
+function FindingDetailDrawer({ f, onClose, onAccepted, show }: { f: FindingRecord; onClose: () => void; onAccepted: () => void; show: (msg: string, kind: 'ok' | 'err') => void }) {
+  const [accepting, setAccepting] = useState(false)
+
+  return (
+    <Drawer title={`${f.package} — ${f.advisory_id}`} onClose={onClose}>
+      <FindingRecordDetail f={f}>
+        <div className="mt-4 pt-4 border-t border-border">
+          {f.is_accepted ? (
+            <FindingRevokeButton finding={f} onDone={onAccepted} show={show} />
+          ) : accepting ? (
+            <FindingAcceptForm
+              finding={f}
+              onDone={() => { setAccepting(false); onAccepted() }}
+              onCancel={() => setAccepting(false)}
+              show={show}
+            />
+          ) : (
+            <Button variant="secondary" onClick={() => setAccepting(true)} className="text-[12px] px-3 h-8">Accept finding</Button>
+          )}
+        </div>
+      </FindingRecordDetail>
+    </Drawer>
+  )
+}
+
+export function FindingRecordsTable({
+  findings, show, onChanged,
+}: {
+  findings: FindingRecord[]
+  show: (msg: string, kind: 'ok' | 'err') => void
+  onChanged?: () => void
+}) {
+  const [selected, setSelected] = useState<FindingRecord | null>(null)
+
+  if (findings.length === 0) return <div className="px-4 py-2"><Empty message="No open findings." /></div>
+
+  return (
+    <>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="text-left border-b border-border">
+              <th scope="col" className="px-4 py-2 text-style-caption">Severity</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Package</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Ecosystem</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Advisory</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Open since</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">SLA</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {findings.map(f => (
+              <tr
+                key={f.id}
+                className="border-b border-border/50 hover:bg-muted/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
+                tabIndex={0}
+                role="button"
+                aria-label={`${f.package} ${f.advisory_id} — view details`}
+                onClick={() => setSelected(f)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(f) } }}
+              >
+                <td className="px-4 py-2"><SeverityBadge severity={f.severity} /></td>
+                <td className="px-4 py-2 font-mono">
+                  {f.package}
+                  {f.reopen_count > 0 && (
+                    <span className="ml-1.5 text-[11px] text-status-review-text">↩×{f.reopen_count}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-muted-foreground">{f.ecosystem}</td>
+                <td className="px-4 py-2 font-mono text-muted-foreground">{f.advisory_id}</td>
+                <td className={`px-4 py-2 font-medium ${f.in_breach ? 'text-status-fail-text' : 'text-muted-foreground'}`}>{f.days_open}d</td>
+                <td className="px-4 py-2 text-muted-foreground">{f.sla_days ? `${f.sla_days}d` : '—'}</td>
+                <td className="px-4 py-2">
+                  {f.is_accepted ? (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-info/12 text-status-info-text" title={f.accepted_reason ?? undefined}>Accepted</span>
+                  ) : f.in_breach ? (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-fail/12 text-status-fail-text">Breaching</span>
+                  ) : (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Open</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <FindingDetailDrawer
+          f={selected}
+          onClose={() => setSelected(null)}
+          onAccepted={() => { onChanged?.(); setSelected(null) }}
+          show={show}
+        />
+      )}
+    </>
+  )
+}
+
+function RiskDetailDrawer({ r, onClose, onAccepted, show }: { r: RiskRecord; onClose: () => void; onAccepted: () => void; show: (msg: string, kind: 'ok' | 'err') => void }) {
+  const [accepting, setAccepting] = useState(false)
+
+  return (
+    <Drawer title={r.package} onClose={onClose}>
+      <RiskRecordDetail r={r}>
+        <div className="mt-4 pt-4 border-t border-border">
+          {r.is_accepted ? (
+            <RiskRevokeButton risk={r} onDone={onAccepted} show={show} />
+          ) : accepting ? (
+            <RiskAcceptForm
+              risk={r}
+              onDone={() => { setAccepting(false); onAccepted() }}
+              onCancel={() => setAccepting(false)}
+              show={show}
+            />
+          ) : (
+            <Button variant="secondary" onClick={() => setAccepting(true)} className="text-[12px] px-3 h-8">Accept risk</Button>
+          )}
+        </div>
+      </RiskRecordDetail>
+    </Drawer>
+  )
+}
+
+export function RiskRecordsTable({
+  risks, show, onChanged,
+}: {
+  risks: RiskRecord[]
+  show: (msg: string, kind: 'ok' | 'err') => void
+  onChanged?: () => void
+}) {
+  const [selected, setSelected] = useState<RiskRecord | null>(null)
+
+  if (risks.length === 0) return <div className="px-4 py-2"><Empty message="No open risks." /></div>
+
+  return (
+    <>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="text-left border-b border-border">
+              <th scope="col" className="px-4 py-2 text-style-caption">Level</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Package</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Ecosystem</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Score</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Open since</th>
+              <th scope="col" className="px-4 py-2 text-style-caption">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {risks.map(r => (
+              <tr
+                key={r.id}
+                className="border-b border-border/50 hover:bg-muted/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
+                tabIndex={0}
+                role="button"
+                aria-label={`${r.package} — view details`}
+                onClick={() => setSelected(r)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(r) } }}
+              >
+                <td className="px-4 py-2"><RiskLevelBadge level={r.level} /></td>
+                <td className="px-4 py-2 font-mono">
+                  {r.package}
+                  {r.reopen_count > 0 && (
+                    <span className="ml-1.5 text-[11px] text-status-review-text">↩×{r.reopen_count}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-muted-foreground">{r.ecosystem}</td>
+                <td className="px-4 py-2 font-mono text-muted-foreground">{r.score}</td>
+                <td className="px-4 py-2 font-medium text-muted-foreground">{r.days_open}d</td>
+                <td className="px-4 py-2">
+                  {r.is_accepted ? (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-info/12 text-status-info-text" title={r.accepted_reason ?? undefined}>Accepted</span>
+                  ) : (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Open</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <RiskDetailDrawer
+          r={selected}
+          onClose={() => setSelected(null)}
+          onAccepted={() => { onChanged?.(); setSelected(null) }}
+          show={show}
+        />
+      )}
+    </>
+  )
+}
+
+type RecordTab = 'findings' | 'risks'
+
+export function RecordTabs({
+  findings, risks, show, onChanged,
+}: {
+  findings: FindingRecord[]
+  risks: RiskRecord[]
+  show: (msg: string, kind: 'ok' | 'err') => void
+  onChanged?: () => void
+}) {
+  const hasFindings = findings.length > 0
+  const hasRisks = risks.length > 0
+  const [tab, setTab] = useState<RecordTab>(hasFindings ? 'findings' : 'risks')
+  const uid = useId()
+  const TAB_IDS: readonly RecordTab[] = ['findings', 'risks']
+  const { tabRef, onKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
+
+  if (hasFindings && !hasRisks) return <FindingRecordsTable findings={findings} show={show} onChanged={onChanged} />
+  if (hasRisks && !hasFindings) return <RiskRecordsTable risks={risks} show={show} onChanged={onChanged} />
+  if (!hasFindings && !hasRisks) return <div className="px-4 py-2"><Empty message="No open or accepted findings or risks." /></div>
+
+  return (
+    <div>
+      <div className="scan-card-inner-tab-bar" role="tablist">
+        <button
+          ref={tabRef('findings')}
+          type="button"
+          role="tab"
+          aria-selected={tab === 'findings'}
+          aria-controls={`${uid}-panel-findings`}
+          id={`${uid}-tab-findings`}
+          tabIndex={tab === 'findings' ? 0 : -1}
+          onClick={() => setTab('findings')}
+          onKeyDown={onKeyDown}
+          className={tab === 'findings' ? 'tab-btn-inner active' : 'tab-btn-inner'}
+        >
+          Findings ({findings.length})
+        </button>
+        <button
+          ref={tabRef('risks')}
+          type="button"
+          role="tab"
+          aria-selected={tab === 'risks'}
+          aria-controls={`${uid}-panel-risks`}
+          id={`${uid}-tab-risks`}
+          tabIndex={tab === 'risks' ? 0 : -1}
+          onClick={() => setTab('risks')}
+          onKeyDown={onKeyDown}
+          className={tab === 'risks' ? 'tab-btn-inner active' : 'tab-btn-inner'}
+        >
+          Risks ({risks.length})
+        </button>
+      </div>
+      <div id={`${uid}-panel-findings`} role="tabpanel" aria-labelledby={`${uid}-tab-findings`} hidden={tab !== 'findings'}>
+        <FindingRecordsTable findings={findings} show={show} onChanged={onChanged} />
+      </div>
+      <div id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`} hidden={tab !== 'risks'}>
+        <RiskRecordsTable risks={risks} show={show} onChanged={onChanged} />
       </div>
     </div>
   )

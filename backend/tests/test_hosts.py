@@ -1,6 +1,9 @@
 """Tests for /api/hosts endpoints."""
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
+from app.models import Host, Scan
 from tests.conftest import auth
 
 
@@ -46,6 +49,153 @@ class TestGetHost:
 
     async def test_requires_auth(self, client, host):
         r = await client.get(f"/api/hosts/{host.id}")
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+class TestHostLatestScans:
+    """GET /hosts/{id}/latest-scans — one row per project_path, ranked in
+    SQL, with no row cap. Regression coverage for grouping previously being
+    done client-side against GET /scans, which caps at 100 rows by default
+    and silently dropped projects once a host had more total scan rows than
+    that cap. GET /scans itself must not change — it's the package-alert
+    CLI's live surface — so this is a dedicated endpoint instead."""
+
+    async def test_returns_latest_scan_per_project(self, client, admin_token, host, db):
+        now = datetime.now(UTC)
+        db.add_all([
+            Scan(host_id=host.id, project_path="proj-a", scanned_at=now - timedelta(days=2), finding_count=3),
+            Scan(host_id=host.id, project_path="proj-a", scanned_at=now, finding_count=0),
+            Scan(host_id=host.id, project_path="proj-b", scanned_at=now - timedelta(days=1), finding_count=1),
+        ])
+        await db.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 200
+        rows = {s["project_path"]: s for s in r.json()}
+        assert set(rows) == {"proj-a", "proj-b"}
+        assert rows["proj-a"]["finding_count"] == 0  # the more recent proj-a scan, not the older one
+
+    async def test_orders_projects_by_most_recently_scanned_first(self, client, admin_token, host, db):
+        now = datetime.now(UTC)
+        db.add_all([
+            Scan(host_id=host.id, project_path="zeta-project", scanned_at=now, finding_count=0),
+            Scan(host_id=host.id, project_path="alpha-project", scanned_at=now - timedelta(days=5), finding_count=0),
+            Scan(host_id=host.id, project_path="mid-project", scanned_at=now - timedelta(days=1), finding_count=0),
+        ])
+        await db.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 200
+        paths = [s["project_path"] for s in r.json()]
+        # Most recently scanned first — not alphabetical by project_path.
+        assert paths == ["zeta-project", "mid-project", "alpha-project"]
+
+    async def test_final_order_breaks_scanned_at_tie_across_projects(self, client, admin_token, host, db):
+        """Different projects commonly share a scan timestamp (e.g. scans
+        triggered together) — ordering the final rows by scanned_at alone
+        leaves their relative order unspecified, so it could vary between
+        requests. received_at desc (then id desc) must break the tie
+        deterministically, matching the ranking subquery's own tie-break."""
+        tied = datetime.now(UTC).replace(microsecond=0)
+        db.add_all([
+            Scan(host_id=host.id, project_path="proj-later-received", scanned_at=tied,
+                 received_at=tied, finding_count=0),
+            Scan(host_id=host.id, project_path="proj-earlier-received", scanned_at=tied,
+                 received_at=tied - timedelta(minutes=5), finding_count=0),
+        ])
+        await db.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 200
+        paths = [s["project_path"] for s in r.json()]
+        assert paths == ["proj-later-received", "proj-earlier-received"]
+
+    async def test_tied_scanned_at_prefers_latest_received_at(self, client, admin_token, host, db):
+        """A retried/resubmitted scan can share the same scanned_at as an
+        earlier attempt for the same project. The previous client-side
+        behaviour iterated GET /scans' received_at-desc-ordered rows and kept
+        the first match per project — i.e. among equal scanned_at, the one
+        with the greatest received_at won. Ranking by scanned_at alone would
+        let the database pick either row nondeterministically."""
+        tied = datetime.now(UTC).replace(microsecond=0)
+        db.add_all([
+            Scan(host_id=host.id, project_path="proj-retry", scanned_at=tied,
+                 received_at=tied - timedelta(minutes=5), finding_count=3),
+            Scan(host_id=host.id, project_path="proj-retry", scanned_at=tied,
+                 received_at=tied, finding_count=0),
+        ])
+        await db.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 200
+        rows = {s["project_path"]: s for s in r.json()}
+        assert rows["proj-retry"]["finding_count"] == 0  # the row with the greater received_at
+
+    async def test_project_not_dropped_when_host_has_over_100_scans(self, client, admin_token, host, db):
+        """The bug this endpoint exists to fix: with a 100-row default cap on
+        GET /scans ordered by received_at desc, a project scanned only once
+        long ago could fall outside that window once another project on the
+        same host accumulates 100+ more-recent scans. This endpoint must
+        still surface it."""
+        now = datetime.now(UTC)
+        db.add(Scan(
+            host_id=host.id, project_path="rarely-scanned",
+            scanned_at=now - timedelta(days=200), received_at=now - timedelta(days=200),
+        ))
+        db.add_all([
+            Scan(
+                host_id=host.id, project_path="frequently-scanned",
+                scanned_at=now - timedelta(hours=i), received_at=now - timedelta(hours=i),
+            )
+            for i in range(120)
+        ])
+        await db.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 200
+        rows = {s["project_path"] for s in r.json()}
+        assert "rarely-scanned" in rows
+        assert "frequently-scanned" in rows
+
+    async def test_returns_empty_list_when_no_scans(self, client, admin_token, host):
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_returns_404_for_unknown_host(self, client, admin_token):
+        r = await client.get("/api/hosts/999999/latest-scans", headers=auth(admin_token))
+        assert r.status_code == 404
+
+    async def test_non_owner_gets_404(self, client, operator_token, host):
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(operator_token))
+        assert r.status_code == 404
+
+    async def test_non_admin_owner_gets_200_with_expected_rows(self, client, operator_token, operator_user, db):
+        """The ownership branch (host.owner_user_id == user.id) has no
+        success-path coverage elsewhere in this class — test_non_owner_gets_404
+        proves denial for a non-owning operator, and every other test here
+        uses the admin-owned `host` fixture, so admin success goes through
+        the `user.role == UserRole.admin` branch instead. HostDetail calls
+        this endpoint for any signed-in owner, not just admins."""
+        own_host = Host(
+            owner_user_id=operator_user.id,
+            name="operator-owned-host",
+            hostname="operator-owned-host.local",
+        )
+        db.add(own_host)
+        await db.flush()
+        db.add(Scan(host_id=own_host.id, project_path="proj-owned", scanned_at=datetime.now(UTC), finding_count=2))
+        await db.commit()
+
+        r = await client.get(f"/api/hosts/{own_host.id}/latest-scans", headers=auth(operator_token))
+        assert r.status_code == 200
+        rows = {s["project_path"]: s for s in r.json()}
+        assert set(rows) == {"proj-owned"}
+        assert rows["proj-owned"]["finding_count"] == 2
+
+    async def test_requires_auth(self, client, host):
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans")
         assert r.status_code == 401
 
 

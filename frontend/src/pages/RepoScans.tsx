@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from 'react'
 import {
-  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions, FindingRecord, RiskRecord,
+  api, RepoScan, RepoScanResult, RepoCredential, ConfigTemplate, AlertSeverity, CredentialType, ScanFlag, ScanOptions,
 } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { useAuth } from '@/hooks/useAuth'
-import { Card, Button, Drawer, FindingAcceptForm, FindingRecordDetail, FindingRevokeButton, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, ScanDetailTabs, SeverityBadge, timeAgo, RiskRecordDetail, RiskAcceptForm, RiskRevokeButton, RiskLevelBadge } from '@/components/ui'
+import { Card, Button, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, ScanDetailTabs, timeAgo } from '@/components/ui'
 import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settings2 } from 'lucide-react'
 import { CronField } from '@/components/CronField'
 import { TimezoneField } from '@/components/TimezoneField'
@@ -293,264 +293,6 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
   )
 }
 
-// ── Findings panel ─────────────────────────────────────────────────────────────
-
-function FindingDetailDrawer({ f, onClose, onAccepted, show }: { f: FindingRecord; onClose: () => void; onAccepted: () => void; show: (msg: string, kind: 'ok' | 'err') => void }) {
-  const [accepting, setAccepting] = React.useState(false)
-
-  return (
-    <Drawer title={`${f.package} — ${f.advisory_id}`} onClose={onClose}>
-      <FindingRecordDetail f={f}>
-        <div className="mt-4 pt-4 border-t border-border">
-          {f.is_accepted ? (
-            <FindingRevokeButton finding={f} onDone={onAccepted} show={show} />
-          ) : accepting ? (
-            <FindingAcceptForm
-              finding={f}
-              onDone={() => { setAccepting(false); onAccepted() }}
-              onCancel={() => setAccepting(false)}
-              show={show}
-            />
-          ) : (
-            <Button variant="secondary" onClick={() => setAccepting(true)} className="text-[12px] px-3 h-8">Accept finding</Button>
-          )}
-        </div>
-      </FindingRecordDetail>
-    </Drawer>
-  )
-}
-
-function FindingsPanel({ scanId, show }: { scanId: number; show: (msg: string, kind: 'ok' | 'err') => void }) {
-  const [findings, setFindings] = React.useState<FindingRecord[] | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [loadError, setLoadError] = React.useState(false)
-  const [selected, setSelected] = React.useState<FindingRecord | null>(null)
-
-  const reqSeq = React.useRef(0)
-
-  const reload = React.useCallback((background = false) => {
-    const seq = ++reqSeq.current
-    setLoadError(false)
-    if (!background) { setLoading(true); setFindings(null) }
-    api.findings.listAllForRepo(scanId).then(data => {
-      if (seq !== reqSeq.current) return
-      setFindings(data)
-      setLoading(false)
-      setSelected(prev => prev ? data.find(f => f.id === prev.id) ?? null : null)
-    }).catch((e: Error) => {
-      if (seq !== reqSeq.current) return
-      setLoading(false)
-      if (!background) setLoadError(true)
-      show(e.message ?? 'Failed to load findings', 'err')
-    })
-  }, [scanId, show])
-
-  React.useEffect(() => {
-    reload() // eslint-disable-line react-hooks/set-state-in-effect
-    // reqSeq is an abort counter: incrementing it in cleanup is intentional — it invalidates
-    // any in-flight response from the previous render so stale data is never committed.
-    return () => { reqSeq.current++ } // eslint-disable-line react-hooks/exhaustive-deps
-  }, [reload])
-
-  if (loading && !findings) return <div className="p-3 text-[13px] text-muted-foreground">Loading findings…</div>
-  if (loadError) return (
-    <div className="p-3 text-[13px] text-status-fail-text flex items-center gap-2">
-      Failed to load findings.
-      <button type="button" onClick={() => reload()} className="underline hover:no-underline">Retry</button>
-    </div>
-  )
-  const rows = findings ?? []
-  if (rows.length === 0) return <div className="px-4 py-2"><Empty message="No open findings." /></div>
-
-  return (
-    <>
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-[12px]">
-          <thead>
-            <tr className="text-left border-b border-border">
-              <th scope="col" className="px-4 py-2 text-style-caption">Severity</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Package</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Ecosystem</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Advisory</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Open since</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">SLA</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(f => (
-              <tr
-                key={f.id}
-                className="border-b border-border/50 hover:bg-muted/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
-                tabIndex={0}
-                role="button"
-                aria-label={`${f.package} ${f.advisory_id} — view details`}
-                onClick={() => setSelected(f)}
-                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(f) } }}
-              >
-                <td className="px-4 py-2"><SeverityBadge severity={f.severity} /></td>
-                <td className="px-4 py-2 font-mono">
-                  {f.package}
-                  {f.reopen_count > 0 && (
-                    <span className="ml-1.5 text-[11px] text-status-review-text">↩×{f.reopen_count}</span>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-muted-foreground">{f.ecosystem}</td>
-                <td className="px-4 py-2 font-mono text-muted-foreground">{f.advisory_id}</td>
-                <td className={`px-4 py-2 font-medium ${f.in_breach ? 'text-status-fail-text' : 'text-muted-foreground'}`}>{f.days_open}d</td>
-                <td className="px-4 py-2 text-muted-foreground">{f.sla_days ? `${f.sla_days}d` : '—'}</td>
-                <td className="px-4 py-2">
-                  {f.is_accepted ? (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-info/12 text-status-info-text" title={f.accepted_reason ?? undefined}>Accepted</span>
-                  ) : f.in_breach ? (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-fail/12 text-status-fail-text">Breaching</span>
-                  ) : (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Open</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {selected && (
-        <FindingDetailDrawer
-          f={selected}
-          onClose={() => setSelected(null)}
-          onAccepted={() => { reload(true); setSelected(null) }}
-          show={show}
-        />
-      )}
-    </>
-  )
-}
-
-function RiskDetailDrawer({ r, onClose, onAccepted, show }: { r: RiskRecord; onClose: () => void; onAccepted: () => void; show: (msg: string, kind: 'ok' | 'err') => void }) {
-  const [accepting, setAccepting] = React.useState(false)
-
-  return (
-    <Drawer title={r.package} onClose={onClose}>
-      <RiskRecordDetail r={r}>
-        <div className="mt-4 pt-4 border-t border-border">
-          {r.is_accepted ? (
-            <RiskRevokeButton risk={r} onDone={onAccepted} show={show} />
-          ) : accepting ? (
-            <RiskAcceptForm
-              risk={r}
-              onDone={() => { setAccepting(false); onAccepted() }}
-              onCancel={() => setAccepting(false)}
-              show={show}
-            />
-          ) : (
-            <Button variant="secondary" onClick={() => setAccepting(true)} className="text-[12px] px-3 h-8">Accept risk</Button>
-          )}
-        </div>
-      </RiskRecordDetail>
-    </Drawer>
-  )
-}
-
-function RisksPanel({ scanId, show }: { scanId: number; show: (msg: string, kind: 'ok' | 'err') => void }) {
-  const [risks, setRisks] = React.useState<RiskRecord[] | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [loadError, setLoadError] = React.useState(false)
-  const [selected, setSelected] = React.useState<RiskRecord | null>(null)
-
-  const reqSeq = React.useRef(0)
-
-  const reload = React.useCallback((background = false) => {
-    const seq = ++reqSeq.current
-    setLoadError(false)
-    if (!background) { setLoading(true); setRisks(null) }
-    api.risks.listAllForRepo(scanId).then(data => {
-      if (seq !== reqSeq.current) return
-      setRisks(data)
-      setLoading(false)
-      setSelected(prev => prev ? data.find(r => r.id === prev.id) ?? null : null)
-    }).catch((e: Error) => {
-      if (seq !== reqSeq.current) return
-      setLoading(false)
-      if (!background) setLoadError(true)
-      show(e.message ?? 'Failed to load risks', 'err')
-    })
-  }, [scanId, show])
-
-  React.useEffect(() => {
-    reload() // eslint-disable-line react-hooks/set-state-in-effect
-    // reqSeq is an abort counter: incrementing it in cleanup is intentional — it invalidates
-    // any in-flight response from the previous render so stale data is never committed.
-    return () => { reqSeq.current++ } // eslint-disable-line react-hooks/exhaustive-deps
-  }, [reload])
-
-  if (loading && !risks) return <div className="p-3 text-[13px] text-muted-foreground">Loading risks…</div>
-  if (loadError) return (
-    <div className="p-3 text-[13px] text-status-fail-text flex items-center gap-2">
-      Failed to load risks.
-      <button type="button" onClick={() => reload()} className="underline hover:no-underline">Retry</button>
-    </div>
-  )
-  const rows = risks ?? []
-  if (rows.length === 0) return <div className="px-4 py-2"><Empty message="No open risks." /></div>
-
-  return (
-    <>
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-[12px]">
-          <thead>
-            <tr className="text-left border-b border-border">
-              <th scope="col" className="px-4 py-2 text-style-caption">Level</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Package</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Ecosystem</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Score</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Open since</th>
-              <th scope="col" className="px-4 py-2 text-style-caption">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(r => (
-              <tr
-                key={r.id}
-                className="border-b border-border/50 hover:bg-muted/40 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
-                tabIndex={0}
-                role="button"
-                aria-label={`${r.package} — view details`}
-                onClick={() => setSelected(r)}
-                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(r) } }}
-              >
-                <td className="px-4 py-2"><RiskLevelBadge level={r.level} /></td>
-                <td className="px-4 py-2 font-mono">
-                  {r.package}
-                  {r.reopen_count > 0 && (
-                    <span className="ml-1.5 text-[11px] text-status-review-text">↩×{r.reopen_count}</span>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-muted-foreground">{r.ecosystem}</td>
-                <td className="px-4 py-2 font-mono text-muted-foreground">{r.score}</td>
-                <td className="px-4 py-2 font-medium text-muted-foreground">{r.days_open}d</td>
-                <td className="px-4 py-2">
-                  {r.is_accepted ? (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-status-info/12 text-status-info-text" title={r.accepted_reason ?? undefined}>Accepted</span>
-                  ) : (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-style-tag bg-muted text-muted-foreground">Open</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {selected && (
-        <RiskDetailDrawer
-          r={selected}
-          onClose={() => setSelected(null)}
-          onAccepted={() => { reload(true); setSelected(null) }}
-          show={show}
-        />
-      )}
-    </>
-  )
-}
-
 // ── Structured scan args field ────────────────────────────────────────────────
 //
 // UNCONTROLLED after mount: defaultScanFlags seeds state once via the lazy
@@ -665,7 +407,7 @@ function ScanArgsField({
 // ── Scan card / edit form ──────────────────────────────────────────────────────
 
 function ScanCard({
-  scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, isOperator, isAdmin, onUpdate, onDelete, onTrigger, show,
+  scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, isOperator, isAdmin, onUpdate, onDelete, onTrigger,
 }: {
   scan: RepoScan
   credentials: RepoCredential[]
@@ -678,10 +420,8 @@ function ScanCard({
   onUpdate: (id: number, patch: Partial<RepoScan>) => void
   onDelete: (scan: RepoScan) => void
   onTrigger: (scan: RepoScan) => Promise<void>
-  show: (msg: string, kind: 'ok' | 'err') => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const [expandedTab, setExpandedTab] = useState<'results' | 'findings' | 'risks'>('results')
   const [editing, setEditing] = useState(false)
   const [latestStatus, setLatestStatus] = useState<RepoScanResult['status'] | null>(null)
   const [resultsRefreshKey, setResultsRefreshKey] = useState(0)
@@ -740,9 +480,9 @@ function ScanCard({
               <button
                 type="button"
                 className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-status-fail/12 text-status-fail-text cursor-pointer shrink-0 border-none"
-                onClick={() => { setExpanded(true); setExpandedTab('findings') }}
+                onClick={() => setExpanded(true)}
                 title={`${scan.breach_count} finding${scan.breach_count !== 1 ? 's' : ''} breaching SLA`}
-                aria-label={`${scan.breach_count} finding${scan.breach_count !== 1 ? 's' : ''} breaching SLA — view findings`}
+                aria-label={`${scan.breach_count} finding${scan.breach_count !== 1 ? 's' : ''} breaching SLA — expand results`}
               >
                 SLA breach ×{scan.breach_count}
               </button>
@@ -787,28 +527,7 @@ function ScanCard({
 
       {expanded && (
         <div className="form-section-border">
-          <div className="scan-card-inner-tab-bar">
-            {(['results', 'findings', 'risks'] as const).map(t => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setExpandedTab(t)}
-                className={expandedTab === t ? 'tab-btn-inner active' : 'tab-btn-inner'}
-              >
-                {t === 'results' ? 'Results' : t === 'findings' ? 'Findings' : 'Risks'}
-                {t === 'findings' && scan.breach_count > 0 && (
-                  <span className="inner-tab-breach-badge">{scan.breach_count}</span>
-                )}
-              </button>
-            ))}
-          </div>
-          {expandedTab === 'results' ? (
-            <ResultsPanel scan={scan} refreshKey={resultsRefreshKey} />
-          ) : expandedTab === 'findings' ? (
-            <FindingsPanel scanId={scan.id} show={show} />
-          ) : (
-            <RisksPanel scanId={scan.id} show={show} />
-          )}
+          <ResultsPanel scan={scan} refreshKey={resultsRefreshKey} />
         </div>
       )}
     </Card>
@@ -1212,7 +931,6 @@ export default function RepoScans() {
               onUpdate={handleUpdate}
               onDelete={handleDelete}
               onTrigger={handleTrigger}
-              show={show}
             />
           ))
         )}

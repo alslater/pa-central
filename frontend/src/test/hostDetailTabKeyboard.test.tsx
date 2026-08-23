@@ -9,9 +9,8 @@ vi.mock('@/hooks/useAuth', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    hosts:   { get: vi.fn() },
+    hosts:   { get: vi.fn(), latestScans: vi.fn() },
     alerts:  { list: vi.fn() },
-    scans:   { list: vi.fn() },
     configs: { list: vi.fn(), forHost: vi.fn() },
   },
 }))
@@ -41,7 +40,7 @@ beforeEach(() => {
   vi.mocked(useAuth).mockReturnValue({ user: { id: 1, role: 'viewer' } } as any)
   vi.mocked(api.hosts.get).mockResolvedValue(mockHost as any)
   vi.mocked(api.alerts.list).mockResolvedValue([])
-  vi.mocked(api.scans.list).mockResolvedValue([])
+  vi.mocked(api.hosts.latestScans).mockResolvedValue([])
   vi.mocked(api.configs.list).mockResolvedValue([])
   vi.mocked(api.configs.forHost).mockResolvedValue(null)
 })

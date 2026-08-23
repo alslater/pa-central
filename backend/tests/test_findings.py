@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from app.models import AlertSeverity, FindingRecord
 from app.services.finding_lifecycle import compute_sla_days, in_breach, is_accepted
@@ -168,12 +169,6 @@ class TestFindingSchemas:
         with pytest.raises(pydantic.ValidationError):
             FindingAcceptBody()
 
-    def test_finding_settings_has_three_fields(self):
-        from app.schemas import FindingSettingsPut
-        s = FindingSettingsPut(sla_high_days=14, sla_medium_days=90, finding_retention_days=365)
-        assert s.sla_high_days == 14
-
-
 async def _make_scan_and_finding(db, admin_user, days_old=20, severity="high",
                                  closed=False, accepted=False, accepted_until=None,
                                  scan_name="test", no_cutoff=False):
@@ -300,14 +295,15 @@ class TestFindingsAPI:
 
     async def test_accept_finding_sets_fields(self, client, db, admin_user, admin_token):
         _, record = await _make_scan_and_finding(db, admin_user)
+        future = (datetime.now(UTC).date() + timedelta(days=365)).isoformat()
         r = await client.post(f"/api/findings/{record.id}/accept",
-            json={"reason": "known risk", "accepted_until": "2027-01-01"},
+            json={"reason": "known risk", "accepted_until": future},
             headers=auth(admin_token))
         assert r.status_code == 200
         data = r.json()
         assert data["is_accepted"] is True
         assert data["accepted_reason"] == "known risk"
-        assert data["accepted_until"] == "2027-01-01"
+        assert data["accepted_until"] == future
 
     async def test_accept_finding_missing_reason_422(self, client, db, admin_user, admin_token):
         _, record = await _make_scan_and_finding(db, admin_user)
@@ -328,10 +324,81 @@ class TestFindingsAPI:
         assert r.json()["is_accepted"] is False
         assert r.json()["accepted_reason"] is None
 
+    async def test_accept_finding_creates_acceptance_event(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        _, record = await _make_scan_and_finding(db, admin_user)
+        future = datetime.now(UTC).date() + timedelta(days=365)
+        r = await client.post(f"/api/findings/{record.id}/accept",
+            json={"reason": "known risk", "accepted_until": future.isoformat()},
+            headers=auth(admin_token))
+        assert r.status_code == 200
+        events = (await db.execute(
+            select(FindingAcceptanceEvent).where(FindingAcceptanceEvent.finding_record_id == record.id)
+        )).scalars().all()
+        assert len(events) == 1
+        assert events[0].action == "accepted"
+        assert events[0].by_user_id == admin_user.id
+        assert events[0].reason == "known risk"
+        assert events[0].accepted_until == future
+
+    async def test_revoke_accept_creates_revoked_event(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        _, record = await _make_scan_and_finding(db, admin_user, accepted=True)
+        r = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
+        assert r.status_code == 200
+        events = (await db.execute(
+            select(FindingAcceptanceEvent)
+            .where(FindingAcceptanceEvent.finding_record_id == record.id)
+            .order_by(FindingAcceptanceEvent.at)
+        )).scalars().all()
+        # _make_scan_and_finding(accepted=True) doesn't itself insert an event
+        # (it directly sets the live columns to seed test state) — so the only
+        # event expected here is the one this revoke call creates.
+        assert len(events) == 1
+        assert events[0].action == "revoked"
+        assert events[0].by_user_id == admin_user.id
+
+    async def test_accept_then_revoke_creates_two_events_in_order(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        _, record = await _make_scan_and_finding(db, admin_user)
+        await client.post(f"/api/findings/{record.id}/accept",
+            json={"reason": "known risk"}, headers=auth(admin_token))
+        await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
+        events = (await db.execute(
+            select(FindingAcceptanceEvent)
+            .where(FindingAcceptanceEvent.finding_record_id == record.id)
+            .order_by(FindingAcceptanceEvent.at)
+        )).scalars().all()
+        assert [e.action for e in events] == ["accepted", "revoked"]
+
     async def test_revoke_non_accepted_is_idempotent(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
         _, record = await _make_scan_and_finding(db, admin_user, accepted=False)
         r = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
         assert r.status_code == 200
+        # Revoking a finding that was never accepted must not fabricate a
+        # "revoked" audit event — there was no acceptance episode to revoke.
+        events = (await db.execute(
+            select(FindingAcceptanceEvent).where(FindingAcceptanceEvent.finding_record_id == record.id)
+        )).scalars().all()
+        assert events == []
+
+    async def test_revoke_already_revoked_does_not_create_another_event(self, client, db, admin_user, admin_token):
+        from app.models import FindingAcceptanceEvent
+        # accepted=True seeds live columns directly (no event insert) — see
+        # _make_scan_and_finding — so the first revoke below creates the
+        # only "accepted"-adjacent state this test starts from.
+        _, record = await _make_scan_and_finding(db, admin_user, accepted=True)
+        first = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
+        assert first.status_code == 200
+        second = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
+        assert second.status_code == 200
+        events = (await db.execute(
+            select(FindingAcceptanceEvent)
+            .where(FindingAcceptanceEvent.finding_record_id == record.id)
+            .order_by(FindingAcceptanceEvent.at)
+        )).scalars().all()
+        assert [e.action for e in events] == ["revoked"]
 
     async def test_accept_closed_finding_returns_409(self, client, db, admin_user, admin_token):
         _, record = await _make_scan_and_finding(db, admin_user, closed=True)
@@ -343,28 +410,6 @@ class TestFindingsAPI:
         _, record = await _make_scan_and_finding(db, admin_user, closed=True, accepted=True)
         r = await client.delete(f"/api/findings/{record.id}/accept", headers=auth(admin_token))
         assert r.status_code == 409
-
-    async def test_get_finding_settings_returns_defaults(self, client, admin_token):
-        r = await client.get("/api/settings/findings", headers=auth(admin_token))
-        assert r.status_code == 200
-        data = r.json()
-        assert data["sla_high_days"] == 14
-        assert data["sla_medium_days"] == 90
-        assert data["finding_retention_days"] == 365
-
-    async def test_put_finding_settings_persists(self, client, admin_token):
-        r = await client.put("/api/settings/findings",
-            json={"sla_high_days": 7, "sla_medium_days": 60, "finding_retention_days": 180},
-            headers=auth(admin_token))
-        assert r.status_code == 200
-        r2 = await client.get("/api/settings/findings", headers=auth(admin_token))
-        assert r2.json()["sla_high_days"] == 7
-
-    async def test_put_finding_settings_rejects_zero(self, client, admin_token):
-        r = await client.put("/api/settings/findings",
-            json={"sla_high_days": 0, "sla_medium_days": 90, "finding_retention_days": 365},
-            headers=auth(admin_token))
-        assert r.status_code == 422
 
     async def test_lapsed_acceptance_not_shown_as_accepted(self, client, db, admin_user, admin_token):
         from datetime import timedelta
@@ -707,3 +752,90 @@ class TestListRepoScanResults:
         item = next(x for x in r.json() if x["repo_scan_id"] == scan.id)
         assert item["scan_breach"] is True
         assert item["scan_breach_count"] >= 1
+
+
+@pytest.mark.asyncio
+class TestLoadFindingAcceptanceEventsBatching:
+    """load_finding_acceptance_events batches its IN (...) query rather than
+    binding every id in one statement. Both exposure-history endpoints
+    prefilter with could_contribute_to_exposure_window_sql_expr before
+    calling this, so record_ids is the (still potentially large) set of
+    open-or-recently-closed records that can overlap the window — not every
+    retained record with no date bound. That set can still be large enough
+    to exceed SQLite/PostgreSQL's per-statement bind-parameter limit and
+    fail outright on a fleet with many open findings. This forces a small
+    batch size so the test can cross a batch boundary without creating
+    thousands of rows."""
+
+    async def test_events_grouped_correctly_across_a_batch_boundary(
+        self, db, admin_user, monkeypatch
+    ):
+        from app.models import FindingAcceptanceEvent
+        from app.services import finding_lifecycle
+        monkeypatch.setattr(finding_lifecycle, "_ACCEPTANCE_EVENT_ID_BATCH_SIZE", 2)
+
+        _, rec_a = await _make_scan_and_finding(db, admin_user, scan_name="batch-a")
+        _, rec_b = await _make_scan_and_finding(db, admin_user, scan_name="batch-b")
+        _, rec_c = await _make_scan_and_finding(db, admin_user, scan_name="batch-c")
+        now = datetime.now(UTC)
+        db.add_all([
+            FindingAcceptanceEvent(finding_record_id=rec_a.id, action="accepted", at=now, by_user_id=admin_user.id),
+            FindingAcceptanceEvent(finding_record_id=rec_c.id, action="accepted", at=now, by_user_id=admin_user.id),
+        ])
+        await db.commit()
+
+        # 3 ids with batch size 2 forces two IN (...) queries (2 ids, then 1) —
+        # every id must still get an entry, and each event must land under its
+        # own record_id regardless of which batch it was fetched in.
+        result = await finding_lifecycle.load_finding_acceptance_events(
+            db, [rec_a.id, rec_b.id, rec_c.id]
+        )
+        assert set(result) == {rec_a.id, rec_b.id, rec_c.id}
+        assert [e.action for e in result[rec_a.id]] == ["accepted"]
+        assert result[rec_b.id] == []
+        assert [e.action for e in result[rec_c.id]] == ["accepted"]
+
+    async def test_more_ids_than_one_batch_still_returns_every_id(self, db, admin_user, monkeypatch):
+        from app.services import finding_lifecycle
+        monkeypatch.setattr(finding_lifecycle, "_ACCEPTANCE_EVENT_ID_BATCH_SIZE", 3)
+
+        records = []
+        for i in range(10):
+            _, rec = await _make_scan_and_finding(db, admin_user, scan_name=f"batch-many-{i}")
+            records.append(rec)
+
+        result = await finding_lifecycle.load_finding_acceptance_events(
+            db, [r.id for r in records]
+        )
+        assert set(result) == {r.id for r in records}
+        assert all(events == [] for events in result.values())
+
+    async def test_actually_issues_multiple_queries_when_ids_exceed_batch_size(
+        self, db, admin_user, monkeypatch
+    ):
+        """The two tests above only check grouping correctness, which an
+        unbatched single-query implementation would also satisfy — this
+        asserts the batching itself actually happens, since that's the part
+        the fix is for (avoiding one oversized IN (...) that could exceed
+        SQLite/PostgreSQL's bind-parameter limit)."""
+        from app.services import finding_lifecycle
+        monkeypatch.setattr(finding_lifecycle, "_ACCEPTANCE_EVENT_ID_BATCH_SIZE", 3)
+
+        records = []
+        for i in range(10):
+            _, rec = await _make_scan_and_finding(db, admin_user, scan_name=f"batch-count-{i}")
+            records.append(rec)
+
+        real_execute = db.execute
+        call_count = 0
+
+        async def counting_execute(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return await real_execute(*args, **kwargs)
+
+        monkeypatch.setattr(db, "execute", counting_execute)
+        await finding_lifecycle.load_finding_acceptance_events(db, [r.id for r in records])
+
+        # 10 ids at batch size 3 -> ceil(10/3) = 4 queries, not 1.
+        assert call_count == 4

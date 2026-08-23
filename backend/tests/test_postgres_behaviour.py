@@ -18,8 +18,23 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.core.database import get_db
+from app.core.security import create_access_token, hash_password
+from app.main import app
+from app.models import (
+    FindingRecord,
+    Host,
+    RepoScan,
+    RepoScanResult,
+    RepoScanStatus,
+    Scan,
+    User,
+    UserRole,
+)
+from tests.conftest import auth
 from tests.conftest_postgres import make_async_engine
 from tests.test_postgres_migrations import HEAD_REVISION, alembic
 
@@ -687,6 +702,248 @@ class TestOpenFindingPartialIndex:
         assert n == 3
 
 
+class TestRepoScanHeadlineLatestResultRanking:
+    """`list_repo_scan_headlines`'s per-scan latest-result lookup uses
+    ``row_number().over(partition_by=..., order_by=...)`` to rank results in
+    SQL rather than fetching every retained result and picking the first one
+    in Python. row_number() is ANSI-standard and not expected to diverge
+    between SQLite and PostgreSQL, but this is the first window-function
+    query in the codebase, so it's verified directly here rather than
+    assumed — enum status values must round-trip correctly through a
+    subquery column on PostgreSQL's native enum handling.
+
+    Exercises the real GET /repo-scans/headlines endpoint (not a
+    hand-reconstructed copy of its SQL) so a regression to the handler's own
+    partition/order/status selection is actually caught here, rather than
+    leaving this test green regardless of what the handler does.
+    """
+
+    @pytest.fixture
+    async def session(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+        await engine.dispose()
+
+    @pytest.fixture
+    async def client(self, session):
+        async def override_db():
+            yield session
+
+        app.dependency_overrides[get_db] = override_db
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+        app.dependency_overrides.pop(get_db, None)
+
+    async def test_ranks_results_per_scan_and_picks_latest(self, session, client):
+        admin = User(
+            email="admin@x.com", display_name="Admin", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(admin)
+        await session.flush()
+        token = create_access_token(admin.id)
+
+        scan_a = RepoScan(name="a", url="http://x/a", branch="main")
+        scan_b = RepoScan(name="b", url="http://x/b", branch="main")
+        session.add_all([scan_a, scan_b])
+        await session.flush()
+        session.add_all([
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.failed,
+                            started_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.success,
+                            started_at=datetime(2026, 1, 3, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_a.id, status=RepoScanStatus.running,
+                            started_at=datetime(2026, 1, 2, tzinfo=UTC).replace(tzinfo=None)),
+            RepoScanResult(repo_scan_id=scan_b.id, status=RepoScanStatus.pending,
+                            started_at=datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)),
+        ])
+        await session.commit()
+
+        r = await client.get("/api/repo-scans/headlines", headers=auth(token))
+        assert r.status_code == 200
+        by_name = {h["name"]: h for h in r.json()}
+
+        assert by_name["a"]["latest_status"] == "success"
+        assert by_name["a"]["latest_scanned_at"] == "2026-01-03T00:00:00Z"
+        assert by_name["b"]["latest_status"] == "pending"
+
+    async def test_tied_started_at_breaks_tie_by_result_id(self, session, client):
+        """Two results for the same scan can share started_at (e.g.
+        second-level precision, or a retried scan) — without id as a
+        secondary ORDER BY key, row_number()'s tie-break is unspecified, so
+        either row could get rank 1 and latest_status would be
+        nondeterministic between requests. id desc must be the deciding
+        factor, matching the same tie-break strategy used by
+        GET /hosts/{id}/latest-scans."""
+        admin = User(
+            email="admin2@x.com", display_name="Admin2", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(admin)
+        await session.flush()
+        token = create_access_token(admin.id)
+
+        scan = RepoScan(name="tied-scan", url="http://x/tied", branch="main")
+        session.add(scan)
+        await session.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC).replace(tzinfo=None)
+        session.add(RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.failed, started_at=tied))
+        await session.commit()
+        # Inserted after the first row, so it has a strictly greater id
+        # while sharing the same started_at — this is the row that must win.
+        session.add(RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.success, started_at=tied))
+        await session.commit()
+
+        r = await client.get("/api/repo-scans/headlines", headers=auth(token))
+        assert r.status_code == 200
+        by_name = {h["name"]: h for h in r.json()}
+        assert by_name["tied-scan"]["latest_status"] == "success"
+
+
+class TestHostLatestScansRanking:
+    """GET /hosts/{id}/latest-scans ranks per project_path in SQL, then
+    re-fetches full Scan ORM rows by id from the ranked-to-rank-1 subset —
+    a different shape from TestRepoScanHeadlineLatestResultRanking's ranked
+    subquery above (that one selects plain columns to avoid ORM-entity
+    round-tripping through a subquery; this one ranks only the id column,
+    then does a second select(Scan).where(Scan.id.in_(...)) to get back real
+    ORM objects for FastAPI's response_model=list[ScanOut] to serialize).
+
+    Exercises the real GET /hosts/{id}/latest-scans endpoint (not a
+    hand-reconstructed copy of its SQL) so a regression to the handler's own
+    partition/order/tie-break columns is actually caught here, rather than
+    leaving these tests green regardless of what the handler does.
+    """
+
+    @pytest.fixture
+    async def session(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+        await engine.dispose()
+
+    @pytest.fixture
+    async def client(self, session):
+        async def override_db():
+            yield session
+
+        app.dependency_overrides[get_db] = override_db
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+        app.dependency_overrides.pop(get_db, None)
+
+    async def test_ranks_by_project_and_refetches_full_rows(self, session, client):
+        owner = User(
+            email="owner@x.com", display_name="Owner", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(owner)
+        await session.flush()
+        token = create_access_token(owner.id)
+
+        host = Host(name="h", hostname="h.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        session.add_all([
+            Scan(host_id=host.id, project_path="proj-a",
+                 scanned_at=datetime(2026, 1, 1, tzinfo=UTC), finding_count=3),
+            Scan(host_id=host.id, project_path="proj-a",
+                 scanned_at=datetime(2026, 1, 3, tzinfo=UTC), finding_count=0),
+            Scan(host_id=host.id, project_path="proj-b",
+                 scanned_at=datetime(2026, 1, 2, tzinfo=UTC), finding_count=1),
+        ])
+        await session.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        scans = r.json()
+
+        by_project = {s["project_path"]: s for s in scans}
+        assert set(by_project) == {"proj-a", "proj-b"}
+        assert by_project["proj-a"]["finding_count"] == 0  # the later proj-a scan, not the earlier one
+        # proj-a's latest scan (Jan 3) is more recent than proj-b's (Jan 2).
+        assert [s["project_path"] for s in scans] == ["proj-a", "proj-b"]
+
+    async def test_tied_scanned_at_final_order_breaks_tie_by_received_at(self, session, client):
+        """Different projects commonly share a scan timestamp (e.g. scans
+        triggered together) — without received_at/id as secondary ORDER BY
+        keys on the final row fetch, their relative order in the response is
+        unspecified and can vary between requests, even though the ranking
+        subquery itself already has the correct per-project tie-break.
+
+        Note: dropping the secondary keys does not reliably fail this test —
+        PostgreSQL's query planner happens to return this small, unindexed
+        result set in insertion order regardless, so the "wrong" order isn't
+        forced by any input this test can construct. That's the nature of
+        the bug: SQL gives no ordering guarantee without an explicit ORDER
+        BY on every tie-breaking column, so relying on incidental planner
+        behaviour is exactly what this fix removes, even though a passing
+        test can't distinguish "guaranteed correct" from "happened to be
+        correct this time" for this specific case.
+        """
+        owner = User(
+            email="owner3@x.com", display_name="Owner3", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(owner)
+        await session.flush()
+        token = create_access_token(owner.id)
+
+        host = Host(name="h3", hostname="h3.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC)
+        session.add_all([
+            Scan(host_id=host.id, project_path="proj-later-received", scanned_at=tied,
+                 received_at=tied, finding_count=0),
+            Scan(host_id=host.id, project_path="proj-earlier-received", scanned_at=tied,
+                 received_at=tied - timedelta(minutes=5), finding_count=0),
+        ])
+        await session.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        scans = r.json()
+
+        # Both projects tie on scanned_at; received_at desc breaks it.
+        assert [s["project_path"] for s in scans] == ["proj-later-received", "proj-earlier-received"]
+
+    async def test_tied_scanned_at_breaks_tie_by_received_at(self, session, client):
+        """Without a secondary ORDER BY, PostgreSQL's row_number() tie-break
+        for equal scanned_at is unspecified — this pins received_at desc as
+        the deciding factor, matching the previous client-side behaviour
+        (iterate GET /scans' received_at-desc rows, keep the first match)."""
+        owner = User(
+            email="owner2@x.com", display_name="Owner2", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(owner)
+        await session.flush()
+        token = create_access_token(owner.id)
+
+        host = Host(name="h2", hostname="h2.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC)
+        session.add_all([
+            Scan(host_id=host.id, project_path="proj-retry", scanned_at=tied,
+                 received_at=tied - timedelta(minutes=5), finding_count=3),
+            Scan(host_id=host.id, project_path="proj-retry", scanned_at=tied,
+                 received_at=tied, finding_count=0),
+        ])
+        await session.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        scans = r.json()
+
+        assert len(scans) == 1
+        assert scans[0]["finding_count"] == 0  # the row with the greater received_at
+
+
 # ── Test fixture URL conversion ───────────────────────────────────────────────
 
 class TestFixtureUrlConversionTranslatesSslAliases:
@@ -1346,3 +1603,98 @@ class TestPreferConnectsToAPlaintextServer:
                 assert (await conn.execute(sa.text("SELECT 1"))).scalar() == 1
         finally:
             await engine.dispose()
+
+
+class TestAcceptRevokeRowLocking:
+    """accept_finding/revoke_accept (and the risks equivalents) use
+    ``db.get(..., with_for_update=True)`` to serialise concurrent accept/
+    revoke requests on the same record.
+
+    Without it, two overlapping requests can both read the row before
+    either commits, then commit their live-column writes in whichever order
+    the database happens to schedule them — independent of the order their
+    FindingAcceptanceEvent rows' `at` timestamps say the actions happened
+    in. is_accepted_as_of replays by `at`, so the live columns and the
+    event-derived history could permanently disagree about current state.
+    A second, distinct failure mode: two concurrent revokes can each read
+    accepted_at as non-NULL and both append their own "revoked" event.
+
+    SQLite ignores FOR UPDATE entirely (confirmed by reading its rows with
+    no error, but no actual blocking), so this can only be verified against
+    real PostgreSQL.
+    """
+
+    @pytest.fixture
+    async def session_factory(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
+        await engine.dispose()
+
+    @pytest.fixture
+    async def finding_id(self, session_factory):
+        async with session_factory() as s:
+            scan = RepoScan(name="lock-test", url="http://x/lock", branch="main")
+            s.add(scan)
+            await s.flush()
+            record = FindingRecord(
+                repo_scan_id=scan.id, advisory_id="GHSA-lock", package="pkg",
+                ecosystem="pypi", severity="high", first_found_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            s.add(record)
+            await s.commit()
+            return record.id
+
+    async def test_select_for_update_blocks_a_second_session(self, session_factory, finding_id):
+        """The mechanism the fix relies on: a row locked FOR UPDATE by one
+        transaction is not readable-for-update by a second, concurrent one
+        until the first commits or rolls back."""
+        async with session_factory() as first:
+            await first.execute(
+                sa.text("SELECT id FROM finding_records WHERE id = :id FOR UPDATE"),
+                {"id": finding_id},
+            )
+            # first now holds the row lock, uncommitted.
+
+            async with session_factory() as second:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        second.execute(
+                            sa.text("SELECT id FROM finding_records WHERE id = :id FOR UPDATE"),
+                            {"id": finding_id},
+                        ),
+                        timeout=2.0,
+                    )
+                await second.rollback()
+
+            await first.commit()
+
+            # Released: a fresh session can now acquire it without blocking.
+            async with session_factory() as third:
+                row = await asyncio.wait_for(
+                    third.execute(
+                        sa.text("SELECT id FROM finding_records WHERE id = :id FOR UPDATE"),
+                        {"id": finding_id},
+                    ),
+                    timeout=2.0,
+                )
+                assert row.scalar() == finding_id
+                await third.commit()
+
+    async def test_db_get_with_for_update_blocks_a_second_session(self, session_factory, finding_id):
+        """Same guarantee, exercised through the exact ORM call the fix
+        actually uses (db.get(..., with_for_update=True)) rather than raw
+        SQL, so a change to how that option is passed would be caught here
+        too."""
+        async with session_factory() as first:
+            await first.get(FindingRecord, finding_id, with_for_update=True)
+
+            async with session_factory() as second:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        second.get(FindingRecord, finding_id, with_for_update=True),
+                        timeout=2.0,
+                    )
+                await second.rollback()
+
+            await first.commit()

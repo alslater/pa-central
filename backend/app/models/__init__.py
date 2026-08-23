@@ -229,6 +229,18 @@ class Scan(Base):
 
     host: Mapped[Host] = relationship("Host", back_populates="scans")
 
+    __table_args__ = (
+        # Supports GET /hosts/{id}/latest-scans' row_number() ranking: filter
+        # by host_id, partition by project_path, order by scanned_at desc,
+        # received_at desc, id desc. That endpoint has no row cap (unlike
+        # GET /scans), so an unindexed scan+sort here means a full table scan
+        # on every host-detail page load.
+        Index(
+            "ix_scans_host_project_scanned_received_id",
+            "host_id", "project_path", "scanned_at", "received_at", "id",
+        ),
+    )
+
 
 # ── Config Template ────────────────────────────────────────────────────────────
 
@@ -379,6 +391,19 @@ class RepoScanResult(Base):
 
     repo_scan: Mapped[RepoScan] = relationship("RepoScan", back_populates="results")
 
+    __table_args__ = (
+        # Supports GET /repo-scans/headlines' row_number() ranking: filter
+        # by repo_scan_id, partition by repo_scan_id, order by started_at
+        # desc, id desc. That query has no row cap and runs on every
+        # Scans-page load (and again after each accept/revoke), so an
+        # unindexed scan+sort here means a full table scan across all
+        # historical results on every request.
+        Index(
+            "ix_repo_scan_results_scan_started_id",
+            "repo_scan_id", "started_at", "id",
+        ),
+    )
+
 
 # ── Finding Record ────────────────────────────────────────────────────────────
 
@@ -474,4 +499,64 @@ class RiskRecord(Base):
     __table_args__ = (
         Index("ix_risk_records_identity", "repo_scan_id", "package", "ecosystem"),
         Index("ix_risk_records_closed", "closed_at"),
+    )
+
+
+# ── Finding Acceptance Event ─────────────────────────────────────────────────
+
+class FindingAcceptanceEvent(Base):
+    """Append-only log of accept/revoke actions on a FindingRecord.
+
+    Exists because FindingRecord's accepted_at/accepted_until/etc. only ever
+    hold *current* acceptance state — revoking nulls them out, destroying any
+    evidence the finding was ever accepted. Historical reconstruction (the
+    exposure-history chart) needs to know "was this accepted on day X" for
+    ANY past day, including days after a since-revoked acceptance — hence a
+    separate, never-mutated event log. See finding_lifecycle.is_accepted_as_of.
+    """
+    __tablename__ = "finding_acceptance_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    finding_record_id: Mapped[int] = mapped_column(
+        ForeignKey("finding_records.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(20), nullable=False)  # "accepted" | "revoked"
+    at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    accepted_until: Mapped[date | None] = mapped_column(Date(), nullable=True)
+
+    __table_args__ = (
+        Index("ix_finding_acceptance_events_record_at", "finding_record_id", "at"),
+    )
+
+
+# ── Risk Acceptance Event ────────────────────────────────────────────────────
+
+class RiskAcceptanceEvent(Base):
+    """Append-only log of accept/revoke actions on a RiskRecord.
+
+    Mirrors FindingAcceptanceEvent — see its docstring. Risks don't currently
+    feed any exposure-history computation, but are fixed symmetrically since
+    RiskRecord's accept/revoke code is otherwise identical to FindingRecord's
+    and would otherwise silently diverge.
+    """
+    __tablename__ = "risk_acceptance_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    risk_record_id: Mapped[int] = mapped_column(
+        ForeignKey("risk_records.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(20), nullable=False)  # "accepted" | "revoked"
+    at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    accepted_until: Mapped[date | None] = mapped_column(Date(), nullable=True)
+
+    __table_args__ = (
+        Index("ix_risk_acceptance_events_record_at", "risk_record_id", "at"),
     )

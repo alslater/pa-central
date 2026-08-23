@@ -257,16 +257,35 @@ class ScanOut(OrmBase):
 
 # ── Config Template ────────────────────────────────────────────────────────────
 
+def _normalize_line_endings(v: str) -> str:
+    """CRLF/lone-CR in stored TOML makes the frontend editor (CodeMirror,
+    which always normalizes to \\n internally) treat the very first load of
+    that content as an external edit and mark the page dirty before the
+    user has touched anything. Normalizing at the write boundary means
+    every template saved through this API is LF-only from here on."""
+    return v.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class ConfigTemplateCreate(BaseModel):
     name: str
     description: str | None = None
     toml_content: str
+
+    @field_validator("toml_content")
+    @classmethod
+    def normalize_toml_line_endings(cls, v: str) -> str:
+        return _normalize_line_endings(v)
 
 
 class ConfigTemplateUpdate(BaseModel):
     description: str | None = None
     toml_content: str | None = None
     is_default: bool | None = None
+
+    @field_validator("toml_content")
+    @classmethod
+    def normalize_toml_line_endings(cls, v: str | None) -> str | None:
+        return _normalize_line_endings(v) if v is not None else v
 
 
 class ConfigTemplateOut(OrmBase):
@@ -344,8 +363,18 @@ class DashboardStats(BaseModel):
     hosts_offline: int
     unacknowledged_alerts: int
     critical_alerts: int
-    scans_with_findings: int
+    outstanding_scans_by_severity: dict[str, int] | None
     recent_alerts: list[AlertOut]
+
+
+class ExposurePoint(BaseModel):
+    date: date
+    exposure: int
+
+
+class ExposureHistoryOut(BaseModel):
+    points: list[ExposurePoint]
+    window_days: int
 
 
 # ── System Settings ───────────────────────────────────────────────────────────
@@ -354,8 +383,13 @@ class SystemSettingOut(OrmBase):
     key: str
     value: str | None  # secret values are redacted to None in responses
     value_type: SettingValueType
-    updated_at: datetime
+    updated_at: datetime | None  # None for a synthesized default row (is_default=True) never actually saved
     updated_by_id: int | None
+    # True when this key has no row in system_settings and `value` is the
+    # runtime default the application falls back to (get_global_sla, etc.),
+    # not a value an admin has ever saved. Lets the UI show what's actually
+    # in effect without it looking like a persisted choice.
+    is_default: bool = False
 
 
 class SystemSettingPatch(BaseModel):
@@ -474,6 +508,18 @@ class RepoScanOut(OrmBase):
     scan_config_hash: str | None
 
 
+class RepoScanHeadlineOut(BaseModel):
+    id: int
+    name: str
+    url: str
+    latest_status: RepoScanStatus | None
+    latest_scanned_at: datetime | None
+    open_findings_by_severity: dict[str, int]
+    open_risks_by_level: dict[str, int]
+    breach: bool
+    breach_count: int
+
+
 class RepoScanResultOut(OrmBase):
     id: int
     repo_scan_id: int
@@ -575,18 +621,6 @@ class FindingAcceptBody(BaseModel):
         if v is not None and v <= datetime.now(UTC).date():
             raise ValueError('accepted_until must be a future date')
         return v
-
-
-class FindingSettingsOut(BaseModel):
-    sla_high_days: int
-    sla_medium_days: int
-    finding_retention_days: int
-
-
-class FindingSettingsPut(BaseModel):
-    sla_high_days: int = Field(..., gt=0)
-    sla_medium_days: int = Field(..., gt=0)
-    finding_retention_days: int = Field(..., gt=0)
 
 
 # ── Risk Record ─────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ from app.models import (
     RepoScan,
     RepoScanResult,
     RepoScanStatus,
+    RiskRecord,
     ScanTrigger,
     SystemSetting,
     utcnow,
@@ -222,7 +223,12 @@ async def prune_old_results(db_factory: Any) -> None:
                 days = int(retention_days)
             except (TypeError, ValueError):
                 days = None
-            if days:
+            # days == 0 intentionally disables day-based retention; a negative
+            # value would compute a cutoff in the future and delete every
+            # historical result, so it's treated the same as absent/invalid
+            # rather than acted on. Write-time validation (system_settings.py)
+            # already rejects negative values — this is defense in depth.
+            if days is not None and days > 0:
                 cutoff = utcnow() - timedelta(days=days)
                 rows = await session.execute(
                     select(RepoScanResult).where(RepoScanResult.started_at < cutoff)
@@ -266,6 +272,15 @@ async def prune_old_results(db_factory: Any) -> None:
             delete(FindingRecord)
             .where(FindingRecord.closed_at.isnot(None))
             .where(FindingRecord.closed_at < finding_cutoff)
+        )
+
+        # Purge old closed risk records — mirrors the FindingRecord retention
+        # policy above using the same finding_retention_days setting (risks
+        # have no separate retention setting of their own).
+        await session.execute(
+            delete(RiskRecord)
+            .where(RiskRecord.closed_at.isnot(None))
+            .where(RiskRecord.closed_at < finding_cutoff)
         )
 
         await session.commit()

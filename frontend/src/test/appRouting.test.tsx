@@ -37,8 +37,6 @@ vi.mock('@/pages/Configs', () => ({ default: () => <div>page:configs</div> }))
 vi.mock('@/pages/ApiKeys', () => ({ default: () => <div>page:api-keys</div> }))
 vi.mock('@/pages/Users', () => ({ default: () => <div>page:users</div> }))
 vi.mock('@/pages/RepoScans', () => ({ default: () => <div>page:repo-scans</div> }))
-vi.mock('@/pages/Vulnerabilities', () => ({ default: () => <div>page:vulnerabilities</div> }))
-vi.mock('@/pages/Risks', () => ({ default: () => <div>page:risks</div> }))
 vi.mock('@/pages/SystemSettings', () => ({ default: () => <div>page:settings</div> }))
 // Scans is a named export, not a default.
 vi.mock('@/pages/Scans', () => ({ Scans: () => <div>page:scans</div> }))
@@ -80,7 +78,7 @@ describe('App routing — unauthenticated', () => {
 
   it.each([
     '/', '/hosts', '/hosts/7', '/alerts', '/scans', '/cooldown',
-    '/configs', '/api-keys', '/users', '/repo-scans', '/vulnerabilities', '/risks', '/settings',
+    '/configs', '/api-keys', '/users', '/repo-scans', '/settings',
   ])('redirects %s to /login', async (path) => {
     renderAt(path)
     expect(await landedOn()).toBe('login')
@@ -113,7 +111,6 @@ describe('App routing — signed in as a non-admin', () => {
     ['/hosts', 'hosts'],
     ['/hosts/7', 'host-detail'],
     ['/alerts', 'alerts'],
-    ['/scans', 'scans'],
     ['/cooldown', 'cooldown'],
     ['/configs', 'configs'],
     ['/api-keys', 'api-keys'],
@@ -124,7 +121,7 @@ describe('App routing — signed in as a non-admin', () => {
 
   // The admin-only half of the route table. A regression here would expose
   // admin pages to every signed-in user.
-  it.each(['/users', '/repo-scans', '/vulnerabilities', '/risks', '/settings'])(
+  it.each(['/scans', '/users', '/repo-scans', '/settings'])(
     'redirects admin-only %s to the dashboard',
     async (path) => {
       renderAt(path)
@@ -139,10 +136,9 @@ describe('App routing — signed in as an admin', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   it.each([
+    ['/scans', 'scans'],
     ['/users', 'users'],
     ['/repo-scans', 'repo-scans'],
-    ['/vulnerabilities', 'vulnerabilities'],
-    ['/risks', 'risks'],
     ['/settings', 'settings'],
   ])('renders admin-only %s', async (path, expected) => {
     renderAt(path)

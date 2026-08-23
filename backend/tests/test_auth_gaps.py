@@ -413,24 +413,6 @@ class TestFindingsAuthGaps:
         r = await client.delete("/api/findings/999/accept", headers=auth(operator_token))
         assert r.status_code == 403
 
-    async def test_get_settings_findings_requires_auth(self, client):
-        r = await client.get("/api/settings/findings")
-        assert r.status_code == 401
-
-    async def test_get_settings_findings_non_admin_forbidden(self, client, operator_token):
-        r = await client.get("/api/settings/findings", headers=auth(operator_token))
-        assert r.status_code == 403
-
-    async def test_put_settings_findings_requires_auth(self, client):
-        r = await client.put("/api/settings/findings", json={"sla_high_days": 14, "sla_medium_days": 90, "finding_retention_days": 365})
-        assert r.status_code == 401
-
-    async def test_put_settings_findings_non_admin_forbidden(self, client, operator_token):
-        r = await client.put("/api/settings/findings",
-            json={"sla_high_days": 14, "sla_medium_days": 90, "finding_retention_days": 365},
-            headers=auth(operator_token))
-        assert r.status_code == 403
-
 
 # ── /api/risks ────────────────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { api, Host, Alert, Scan, ConfigTemplate } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
-import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, useToast, Empty, ScanDetailTabs, timeAgo } from '@/components/ui'
+import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, Input, useToast, Empty, ScanDetailTabs, timeAgo } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useRovingTabs } from '@/lib/hooks'
 import { ArrowLeft, Bell, ScanSearch, Settings2 } from 'lucide-react'
@@ -176,29 +176,48 @@ function HostAlerts({ hostId, isOperator, show }: { hostId: number; isOperator: 
 function HostScans({ hostId }: { hostId: number }) {
   const [scans, setScans] = useState<Scan[]>([])
   const [loading, setLoading] = useState(true)
-  const [expanded, setExpanded] = useState<number | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [filter, setFilter] = useState('')
 
-  useEffect(() => { api.scans.list({ host_id: hostId }).then(setScans).finally(() => setLoading(false)) }, [hostId])
+  // GET /hosts/{id}/latest-scans returns one row per project (already the
+  // latest scan for that project, ranked server-side) — unlike GET /scans,
+  // which caps at 100 rows by default and is the package-alert CLI's live
+  // surface, so it can't be relied on to return every project once a host
+  // has more scan history than that cap.
+  useEffect(() => { api.hosts.latestScans(hostId).then(setScans).finally(() => setLoading(false)) }, [hostId])
 
   if (loading) return <div className="loading-text">Loading…</div>
   if (!scans.length) return <Empty message="No scans from this host." />
 
+  const filtered = scans.filter(s => s.project_path.toLowerCase().includes(filter.trim().toLowerCase()))
+
   return (
     <div className="host-scans-list">
-      {scans.map(s => {
+      <Input
+        type="search"
+        placeholder="Filter projects…"
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        aria-label="Filter projects"
+        className="mb-3"
+      />
+      {filtered.length === 0 ? (
+        <Empty message="No projects match this filter." />
+      ) : filtered.map(s => {
         const hasFindings = !!s.findings?.length
         const hasRisks = !!s.risks?.length
         const hasRiskFailures = (s.risk_failures ?? 0) > 0
         const hasDetail = hasFindings || hasRisks
+        const isExpanded = expanded === s.project_path
         return (
-        <Card key={s.id}>
+        <Card key={s.project_path}>
           <div
             className={`host-scan-card-row ${hasDetail ? 'data-tr-clickable' : 'data-tr-static'}`}
-            onClick={hasDetail ? () => setExpanded(expanded === s.id ? null : s.id) : undefined}
-            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(expanded === s.id ? null : s.id) } }) : undefined}
+            onClick={hasDetail ? () => setExpanded(isExpanded ? null : s.project_path) : undefined}
+            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(isExpanded ? null : s.project_path) } }) : undefined}
             role={hasDetail ? 'button' : undefined}
             tabIndex={hasDetail ? 0 : undefined}
-            aria-expanded={hasDetail ? expanded === s.id : undefined}
+            aria-expanded={hasDetail ? isExpanded : undefined}
           >
             <ScanBadge status={s.status} />
             <div className="host-scan-info">
@@ -237,7 +256,7 @@ function HostScans({ hostId }: { hostId: number }) {
             )}
             <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>
           </div>
-          {expanded === s.id && hasDetail && (
+          {isExpanded && hasDetail && (
             <div className="host-scan-findings-panel">
               <ScanDetailTabs findings={s.findings} risks={s.risks} />
             </div>

@@ -1,15 +1,37 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import func, select, tuple_, update
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import RepoScanResult, RepoScanStatus, RiskRecord, utcnow
 from app.schemas import RiskRecordOut
 
 _VALID_LEVELS = {"critical", "warning", "info"}
+
+
+def accepted_sql_expr(today: date) -> ColumnElement[bool]:
+    """SQL expression: risk is currently accepted (accepted_at set and not expired).
+
+    Accepts an explicit UTC date so the SQL filter matches the Python
+    is_accepted() function exactly, regardless of the DB session timezone.
+    Mirrors finding_lifecycle.accepted_sql_expr.
+    """
+    return and_(
+        RiskRecord.accepted_at.isnot(None),
+        or_(RiskRecord.accepted_until.is_(None), RiskRecord.accepted_until > today),
+    )
+
+
+def not_accepted_sql_expr(today: date) -> ColumnElement[bool]:
+    """SQL expression: risk is NOT currently accepted (complement of accepted_sql_expr)."""
+    return or_(
+        RiskRecord.accepted_at.is_(None),
+        and_(RiskRecord.accepted_until.isnot(None), RiskRecord.accepted_until <= today),
+    )
 
 
 def is_accepted(record: RiskRecord, now: datetime | None = None) -> bool:

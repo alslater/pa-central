@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router'
 import {
   LayoutDashboard, Server, Bell, ScanSearch, Settings2,
   ShieldCheck, Key, Users, LogOut, Shield, GitBranch, Sliders,
-  Sun, Moon, Monitor, ShieldAlert, TriangleAlert,
+  Sun, Moon, Monitor,
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { api } from '@/lib/api'
@@ -14,13 +14,11 @@ const NAV = [
   { to: '/',          label: 'Dashboard',   icon: LayoutDashboard },
   { to: '/hosts',     label: 'Hosts',       icon: Server },
   { to: '/alerts',    label: 'Alerts',      icon: Bell },
-  { to: '/scans',     label: 'Scans',       icon: ScanSearch },
+  { to: '/scans',     label: 'Scans',       icon: ScanSearch, adminOnly: true },
   { to: '/cooldown',  label: 'Cooldown',    icon: ShieldCheck },
   { to: '/configs',   label: 'Config',      icon: Settings2 },
   { to: '/api-keys',  label: 'API Keys',    icon: Key },
   { to: '/repo-scans', label: 'Repo Scans', icon: GitBranch, adminOnly: true },
-  { to: '/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert, adminOnly: true },
-  { to: '/risks',     label: 'Risks',       icon: TriangleAlert, adminOnly: true },
   { to: '/users',     label: 'Users',       icon: Users, adminOnly: true },
   { to: '/settings',  label: 'Settings',    icon: Sliders, adminOnly: true },
 ]

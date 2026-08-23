@@ -4,7 +4,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models import AlertSeverity, FindingRecord, RepoScan
+from app.models import (
+    AlertSeverity,
+    FindingAcceptanceEvent,
+    FindingRecord,
+    RepoScan,
+    RiskRecord,
+    utcnow,
+)
 from app.scheduler.scheduler import (
     is_due,
     next_run_after,
@@ -206,6 +213,8 @@ async def test_prune_by_days_deletes_old_results(mock_db_factory):
         ])))),
         MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[old])))),
         MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        MagicMock(),  # FindingRecord delete
+        MagicMock(),  # RiskRecord delete
     ])
     session.delete = AsyncMock()
     session.commit = AsyncMock()
@@ -215,6 +224,66 @@ async def test_prune_by_days_deletes_old_results(mock_db_factory):
 
     session.delete.assert_called_once_with(old)
     session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prune_by_days_ignores_negative_retention_days(mock_db_factory):
+    """A negative scan_result_retention_days would compute a cutoff in the
+    future (utcnow() - timedelta(days=-5)), matching every historical result.
+    Write-time validation in system_settings.py already rejects negative
+    values, but the worker defensively requires days > 0 too — this asserts
+    a negative value reaching the worker (e.g. stored before that validation
+    existed) is treated as absent rather than acted on. A row is present in
+    the mocked "old results" query so a broken `if days:` guard (true for
+    -5) would genuinely reach session.delete — this fails without the fix."""
+    factory, session = mock_db_factory
+    old = MagicMock()
+    old.id = 100
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[
+            MagicMock(key="scan_result_retention_days", value="-5"),
+            MagicMock(key="scan_result_retention_count", value=None),
+        ])))),
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[old])))),
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        MagicMock(),  # FindingRecord delete
+        MagicMock(),  # RiskRecord delete
+    ])
+    session.delete = AsyncMock()
+    session.commit = AsyncMock()
+
+    from app.scheduler.scheduler import prune_old_results
+    await prune_old_results(factory)
+
+    session.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prune_by_days_ignores_zero_retention_days(mock_db_factory):
+    """days == 0 intentionally disables day-based retention — must not be
+    treated as "delete everything with age > 0". A row is present in the
+    mocked "old results" query; if 0 were ever treated as "no limit" rather
+    than "disabled", it would be deleted."""
+    factory, session = mock_db_factory
+    old = MagicMock()
+    old.id = 101
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[
+            MagicMock(key="scan_result_retention_days", value="0"),
+            MagicMock(key="scan_result_retention_count", value=None),
+        ])))),
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[old])))),
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+        MagicMock(),  # FindingRecord delete
+        MagicMock(),  # RiskRecord delete
+    ])
+    session.delete = AsyncMock()
+    session.commit = AsyncMock()
+
+    from app.scheduler.scheduler import prune_old_results
+    await prune_old_results(factory)
+
+    session.delete.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -320,3 +389,119 @@ class TestFindingRetentionPrune:
         from sqlalchemy import select
         rows = (await db.execute(select(FindingRecord).where(FindingRecord.closed_at.is_(None)))).scalars().all()
         assert any(r.id == open_finding.id for r in rows)
+
+
+# ── Risk retention pruning ────────────────────────────────────────────────────
+
+def _make_risk(repo_scan_id, closed_days_ago=None):
+    now = datetime.now(UTC)
+    closed_at = now - timedelta(days=closed_days_ago) if closed_days_ago is not None else None
+    return RiskRecord(
+        repo_scan_id=repo_scan_id,
+        package="pkg", ecosystem="pypi", package_version="1.0",
+        score=80, level="critical", signals=[],
+        first_found_at=now - timedelta(days=(closed_days_ago or 0) + 5),
+        closed_at=closed_at,
+        reopen_count=0,
+    )
+
+
+@pytest.mark.asyncio
+class TestRiskRetentionPrune:
+    async def test_old_closed_risk_pruned(self, db, admin_user):
+        scan = RepoScan(name="risk-rs", url="https://g.com/rr.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        old_risk = _make_risk(scan.id, closed_days_ago=400)
+        db.add(old_risk)
+        await db.commit()
+
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from app.scheduler.scheduler import prune_old_results
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        rows = (await db.execute(select(RiskRecord))).scalars().all()
+        assert all(r.id != old_risk.id for r in rows)
+
+    async def test_recent_closed_risk_not_pruned(self, db, admin_user):
+        scan = RepoScan(name="risk-rs2", url="https://g.com/rr2.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        recent_risk = _make_risk(scan.id, closed_days_ago=10)
+        db.add(recent_risk)
+        await db.commit()
+
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from app.scheduler.scheduler import prune_old_results
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        rows = (await db.execute(select(RiskRecord))).scalars().all()
+        assert any(r.id == recent_risk.id for r in rows)
+
+    async def test_open_risk_never_pruned(self, db, admin_user):
+        scan = RepoScan(name="risk-rs3", url="https://g.com/rr3.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        open_risk = _make_risk(scan.id, closed_days_ago=None)
+        db.add(open_risk)
+        await db.commit()
+
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from app.scheduler.scheduler import prune_old_results
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        rows = (await db.execute(select(RiskRecord).where(RiskRecord.closed_at.is_(None)))).scalars().all()
+        assert any(r.id == open_risk.id for r in rows)
+
+
+# ── Acceptance Event cascade delete ───────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestAcceptanceEventCascadeDelete:
+    async def test_finding_acceptance_events_deleted_with_parent_record(self, db, admin_user):
+        scan = RepoScan(name="cascade-rs", url="https://g.com/c.git", branch="main",
+                        min_notify_severity="medium", created_by_id=admin_user.id)
+        db.add(scan)
+        await db.commit()
+        await db.refresh(scan)
+
+        old_finding = _make_finding(scan.id, closed_days_ago=400)
+        db.add(old_finding)
+        await db.commit()
+        await db.refresh(old_finding)
+
+        db.add(FindingAcceptanceEvent(
+            finding_record_id=old_finding.id, action="accepted",
+            at=utcnow(), by_user_id=admin_user.id,
+        ))
+        await db.commit()
+
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from app.scheduler.scheduler import prune_old_results
+        factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+        await prune_old_results(factory)
+
+        from sqlalchemy import select
+        events = (await db.execute(
+            select(FindingAcceptanceEvent).where(FindingAcceptanceEvent.finding_record_id == old_finding.id)
+        )).scalars().all()
+        assert events == []

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '@/lib/api'
+import { api, type SystemSetting } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Select, useToast } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
@@ -17,6 +17,9 @@ const KNOWN_SETTINGS: Array<{
   { key: 'smtp_tls_mode',  label: 'TLS Mode',      type: 'string' },
   { key: 'scan_result_retention_days',  label: 'Retention (days)',  hint: 'e.g. 30', type: 'int' },
   { key: 'scan_result_retention_count', label: 'Retention (count)', hint: 'e.g. 100', type: 'int' },
+  { key: 'sla_high_days',           label: 'SLA: High/Critical (days)', hint: 'e.g. 14', type: 'int' },
+  { key: 'sla_medium_days',         label: 'SLA: Medium (days)',        hint: 'e.g. 90', type: 'int' },
+  { key: 'finding_retention_days',  label: 'Finding & risk retention (days)',  hint: 'e.g. 365 — also applies to closed risks', type: 'int' },
   { key: 'app_base_url',         label: 'App Base URL',          hint: 'https://pa-central.example.com', type: 'string' },
   { key: 'default_cron_timezone', label: 'Default cron timezone', hint: 'IANA name, e.g. Europe/London — leave blank for UTC', type: 'string' },
 ]
@@ -25,6 +28,10 @@ const SECRET_KEYS = new Set(KNOWN_SETTINGS.filter(s => s.type === 'secret').map(
 
 export default function SystemSettings() {
   const [settings, setSettings] = useState<Record<string, string>>({})
+  // Keys the backend reported as is_default: true — the field shows the
+  // runtime value the app is actually using (e.g. sla_high_days=14), but
+  // nobody has saved it, so it isn't a persisted admin choice.
+  const [defaultKeys, setDefaultKeys] = useState<Set<string>>(new Set())
   // Tracks which secret fields the user has actually typed into this session.
   // Secret fields not in this set are excluded from the PATCH so we never
   // overwrite a stored secret with an empty string.
@@ -34,18 +41,28 @@ export default function SystemSettings() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
+  const applyRows = (rows: SystemSetting[]) => {
+    const m: Record<string, string> = {}
+    const defaults = new Set<string>()
+    for (const r of rows) {
+      m[r.key] = r.value ?? ''
+      if (r.is_default) defaults.add(r.key)
+    }
+    setSettings(m)
+    setDefaultKeys(defaults)
+  }
+
   const load = useCallback(() => {
-    api.systemSettings.list().then(rows => {
-      const m: Record<string, string> = {}
-      for (const r of rows) m[r.key] = r.value ?? ''
-      setSettings(m)
-    }).catch(e => show(e.message, 'err'))
+    api.systemSettings.list().then(applyRows).catch(e => show(e.message, 'err'))
   }, [show])
   useEffect(() => { load() }, [load])
 
   const set = (key: string, val: string) => {
     setSettings(prev => ({ ...prev, [key]: val }))
     if (SECRET_KEYS.has(key)) setDirtySecrets(prev => new Set(prev).add(key))
+    // Editing a field is a deliberate choice, even if the typed value
+    // happens to match the default — it stops being an unsaved fallback.
+    setDefaultKeys(prev => { if (!prev.has(key)) return prev; const n = new Set(prev); n.delete(key); return n })
   }
 
   const save = async () => {
@@ -56,10 +73,15 @@ export default function SystemSettings() {
       // Only patch keys the user has actually loaded or edited; skip keys that
       // were never populated so we don't overwrite DB values with null.
       if (!(key in settings)) continue
+      // Still showing a synthesized runtime default the admin hasn't
+      // touched — must not be persisted as a side effect of an unrelated
+      // save, or "using default" silently becomes "explicitly saved".
+      if (defaultKeys.has(key)) continue
       updates[key] = settings[key] === '' ? null : settings[key]
     }
     try {
-      await api.systemSettings.update(updates)
+      const rows = await api.systemSettings.update(updates)
+      applyRows(rows)
       show('Settings saved')
       setDirtySecrets(new Set())
     } catch (e: any) {
@@ -117,6 +139,25 @@ export default function SystemSettings() {
                     label={label}
                     type="number"
                     inputMode="numeric"
+                    min={0}
+                    placeholder={hint}
+                    value={settings[key] ?? ''}
+                    onChange={e => set(key, e.target.value)}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section>
+              <h3 className="text-style-caption mb-3">Findings / SLA</h3>
+              <div className="flex flex-col gap-3">
+                {KNOWN_SETTINGS.filter(s => s.key === 'sla_high_days' || s.key === 'sla_medium_days' || s.key === 'finding_retention_days').map(({ key, label, hint }) => (
+                  <Input
+                    key={key}
+                    label={defaultKeys.has(key) ? `${label} (using default — not saved)` : label}
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
                     placeholder={hint}
                     value={settings[key] ?? ''}
                     onChange={e => set(key, e.target.value)}

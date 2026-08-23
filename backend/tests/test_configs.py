@@ -48,6 +48,29 @@ class TestCreateTemplate:
         }, headers=auth(viewer_token))
         assert r.status_code == 403
 
+    async def test_crlf_line_endings_are_normalized_to_lf(self, client, operator_token):
+        """CodeMirror (the frontend TOML editor) always normalizes \\r\\n to
+        \\n internally, so stored CRLF content makes the editor treat the
+        very first load as an external edit and mark the page dirty before
+        any user interaction — regression coverage for that bug at the
+        write boundary, independent of the frontend-side fix."""
+        r = await client.post("/api/config-templates", json={
+            "name": "crlf-cfg",
+            "toml_content": "[pa]\r\nlevel = 'high'\r\n",
+        }, headers=auth(operator_token))
+        assert r.status_code == 201
+        assert r.json()["toml_content"] == "[pa]\nlevel = 'high'\n"
+
+    async def test_lone_cr_line_endings_are_normalized_to_lf(self, client, operator_token):
+        """Classic Mac-style lone \\r line endings are rare but the same
+        CodeMirror normalization applies to them too."""
+        r = await client.post("/api/config-templates", json={
+            "name": "cr-cfg",
+            "toml_content": "[pa]\rlevel = 'high'\r",
+        }, headers=auth(operator_token))
+        assert r.status_code == 201
+        assert r.json()["toml_content"] == "[pa]\nlevel = 'high'\n"
+
 
 @pytest.mark.asyncio
 class TestUpdateTemplate:
@@ -64,6 +87,24 @@ class TestUpdateTemplate:
             "toml_content": "x"
         }, headers=auth(admin_token))
         assert r.status_code == 404
+
+    async def test_crlf_line_endings_are_normalized_to_lf_on_update(self, client, operator_token):
+        tmpl = await _create_template(client, operator_token)
+        r = await client.patch(f"/api/config-templates/{tmpl['id']}", json={
+            "toml_content": "[updated]\r\nfoo=1\r\n",
+        }, headers=auth(operator_token))
+        assert r.status_code == 200
+        assert r.json()["toml_content"] == "[updated]\nfoo=1\n"
+
+    async def test_update_without_toml_content_does_not_error_on_normalization(self, client, operator_token):
+        """toml_content is optional on update — the normalizer must not
+        choke on None when only e.g. description is being changed."""
+        tmpl = await _create_template(client, operator_token)
+        r = await client.patch(f"/api/config-templates/{tmpl['id']}", json={
+            "description": "just a description change",
+        }, headers=auth(operator_token))
+        assert r.status_code == 200
+        assert r.json()["toml_content"] == tmpl["toml_content"]
 
 
 @pytest.mark.asyncio
