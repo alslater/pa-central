@@ -156,26 +156,31 @@ describe('HostDetail scan row — risks', () => {
 })
 
 describe('HostDetail scan row — rendering GET /hosts/{id}/latest-scans results', () => {
-  // Grouping to one row per project_path and sorting alphabetically are now
-  // done server-side (see TestHostLatestScans in backend/tests/test_hosts.py)
-  // — GET /scans caps at 100 rows by default and is the package-alert CLI's
-  // live surface, so client-side dedup against it could silently drop
-  // projects once a host had more scans than that cap. The component now
-  // renders whatever the endpoint returns, in the order it returns it.
+  // Grouping to one row per project_path and ordering (most recently
+  // scanned first — scanned_at desc, then received_at desc, then id desc as
+  // tie-breakers) are now done server-side (see TestHostLatestScans in
+  // backend/tests/test_hosts.py) — GET /scans caps at 100 rows by default
+  // and is the package-alert CLI's live surface, so client-side dedup
+  // against it could silently drop projects once a host had more scans than
+  // that cap. The component now renders whatever the endpoint returns, in
+  // the order it returns it, without re-sorting.
   it('renders one card per row returned by the endpoint, in the given order', async () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([
-      { id: 1, host_id: 1, project_path: '/alpha', scan_type: 'project', status: 'clean',
+      { id: 1, host_id: 1, project_path: '/zeta', scan_type: 'project', status: 'clean',
         finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
-      { id: 2, host_id: 1, project_path: '/zeta', scan_type: 'project', status: 'clean',
+      { id: 2, host_id: 1, project_path: '/alpha', scan_type: 'project', status: 'clean',
         finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
-        scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
+        scanned_at: '2026-08-19T00:00:00Z', received_at: '2026-08-19T00:00:00Z' },
     ] as any)
     await openScansTab()
 
-    await screen.findByText('/alpha')
+    // The mock deliberately returns /zeta before /alpha — the opposite of
+    // alphabetical order — so this only passes if the component preserves
+    // the endpoint's order rather than re-sorting it client-side.
+    await screen.findByText('/zeta')
     const paths = screen.getAllByText(/^\/(alpha|zeta)$/).map(el => el.textContent)
-    expect(paths).toEqual(['/alpha', '/zeta'])
+    expect(paths).toEqual(['/zeta', '/alpha'])
   })
 
   it('expanding one project card does not expand another', async () => {

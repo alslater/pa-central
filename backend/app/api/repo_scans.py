@@ -238,7 +238,7 @@ async def list_repo_scan_headlines(db: DbDep, _: OperatorDep) -> list[RepoScanHe
         func.row_number()
         .over(
             partition_by=RepoScanResult.repo_scan_id,
-            order_by=RepoScanResult.started_at.desc(),
+            order_by=(RepoScanResult.started_at.desc(), RepoScanResult.id.desc()),
         )
         .label("rank")
     )

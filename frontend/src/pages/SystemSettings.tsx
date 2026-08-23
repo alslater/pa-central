@@ -19,7 +19,7 @@ const KNOWN_SETTINGS: Array<{
   { key: 'scan_result_retention_count', label: 'Retention (count)', hint: 'e.g. 100', type: 'int' },
   { key: 'sla_high_days',           label: 'SLA: High/Critical (days)', hint: 'e.g. 14', type: 'int' },
   { key: 'sla_medium_days',         label: 'SLA: Medium (days)',        hint: 'e.g. 90', type: 'int' },
-  { key: 'finding_retention_days',  label: 'Finding retention (days)',  hint: 'e.g. 365', type: 'int' },
+  { key: 'finding_retention_days',  label: 'Finding & risk retention (days)',  hint: 'e.g. 365 — also applies to closed risks', type: 'int' },
   { key: 'app_base_url',         label: 'App Base URL',          hint: 'https://pa-central.example.com', type: 'string' },
   { key: 'default_cron_timezone', label: 'Default cron timezone', hint: 'IANA name, e.g. Europe/London — leave blank for UTC', type: 'string' },
 ]

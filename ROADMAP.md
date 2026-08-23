@@ -136,23 +136,56 @@ When a host project or repo scan produces findings or errors, it should open an 
 
 ---
 
-### Dashboard exposure-history endpoint loads every FindingRecord unfiltered
+### Dashboard exposure-history endpoint's remaining cost scales with open-finding count
 
-`GET /dashboard/exposure-history` fetches every `FindingRecord` row in the
-database with no scan or date bound, then (since the acceptance-history fix)
-issues a second unfiltered query for every one of those records' acceptance
-events. At current data volumes this is negligible; at large finding counts
-it becomes two full table scans and a large in-memory dict per request.
+**Resolved (2026-08-23):** the original version of this entry — `GET
+/dashboard/exposure-history` fetching every `FindingRecord` ever created,
+with no scan or date bound — is fixed. The query is now filtered by
+`could_contribute_to_exposure_window_sql_expr(window_start)`
+(`backend/app/services/finding_lifecycle.py`): a record closed before the
+requested window even starts is excluded before it's loaded, since it can
+never contribute to any day in that window. The acceptance-events fetch
+(`load_finding_acceptance_events`) naturally inherits the same bound, since
+it only ever queries events for the record IDs already selected.
 
-**Proposed fix:** Bound the initial fetch to records relevant to the
-requested window (e.g. `first_found_at <= today` and `closed_at IS NULL OR
-closed_at >= window_start`), which also naturally bounds the acceptance-event
-fetch to the same record set.
+**What's left:** the query is bounded by *open-or-recently-closed* finding
+count, not by total historical count — which is a real improvement, but
+still unbounded in its own right. A fleet with a very large number of
+simultaneously open findings (across all repo scans, since this endpoint
+has no per-scan scope) still loads all of them into Python and iterates
+`window_days` times per record in `compute_exposure_history`. This is a
+narrower, more defensible cost than before, not a fully bounded one.
 
-**Files affected:** `backend/app/api/dashboard.py`, `backend/app/services/finding_lifecycle.py`.
+**Proposed fix (preferred direction):** move the computation out of the
+request path entirely. Have the scheduler (`backend/app/scheduler/main.py`'s
+poll loop, alongside `recover_stuck_scans`/`prune_old_results`/
+`run_one_tick`) precompute and persist each day's exposure point(s) once
+per interval, and have `GET /dashboard/exposure-history` (and the per-scan
+variant) just read the precomputed rows back for the requested window.
+Today the cost is paid on every dashboard poll (every 30s) for every
+concurrently viewing user — with many simultaneous dashboard viewers, that
+duplicated recomputation is the part that gets heavy fastest, independent
+of open-finding volume. A scheduler-side job amortizes it to once per poll
+interval regardless of viewer count.
 
-**Trigger:** When finding volume makes the dashboard exposure-history request
-visibly slow.
+Needs its own design pass before implementation: a new table (or columns)
+to store precomputed daily points per scan (and fleet-wide for the
+dashboard-wide endpoint), how "today" is handled when it's still partial
+and changing intraday, backfill for the existing window on first deploy,
+and whether acceptance/revoke actions should trigger an incremental
+recompute of just the affected day(s) rather than waiting for the next
+scheduler tick.
+
+**Files affected:** `backend/app/scheduler/scheduler.py` (new periodic
+job), `backend/app/scheduler/main.py` (wire it into the poll loop),
+`backend/app/models/__init__.py` (new table), a new migration,
+`backend/app/api/dashboard.py`, `backend/app/api/repo_scans.py`
+(read precomputed rows instead of recomputing), `backend/app/services/finding_lifecycle.py`.
+
+**Trigger:** When either open-finding volume or concurrent dashboard
+viewer count makes the exposure-history request visibly slow — the latter
+is not addressed by the existing SQL-filter fix at all, since that only
+bounds the query per request, not the number of requests.
 
 ---
 

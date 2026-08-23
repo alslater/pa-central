@@ -1,5 +1,5 @@
 // Scans page — one row per repo scan project, expand for Findings/Risks
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, RepoScanHeadline, FindingRecord, RiskRecord, ExposureHistory } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, RepoScanStatusBadge, SeverityBadge, RiskLevelBadge, RecordTabs, Empty, Input, timeAgo, useToast } from '@/components/ui'
@@ -24,8 +24,14 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
   const [exposureHistory, setExposureHistory] = useState<ExposureHistory | null>(null)
   const [loading, setLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
+  // Guards against overlapping loadDetail calls (e.g. rapid accept/revoke,
+  // each triggering a background refresh) — only the most recently started
+  // request may commit state, so a slower older response can't overwrite
+  // a faster newer one on resolution.
+  const requestSeq = useRef(0)
 
   const loadDetail = useCallback((background = false) => {
+    const seq = ++requestSeq.current
     setDetailError(false)
     if (!background) setLoading(true)
     Promise.all([
@@ -33,12 +39,19 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
       api.risks.listAllForRepo(headline.id),
       isAdmin ? api.repoScans.exposureHistory(headline.id).catch(() => null) : Promise.resolve(null),
     ])
-      .then(([f, r, eh]) => { setFindings(f); setRisks(r); setExposureHistory(eh) })
+      .then(([f, r, eh]) => {
+        if (seq !== requestSeq.current) return
+        setFindings(f); setRisks(r); setExposureHistory(eh)
+      })
       .catch((e: Error) => {
+        if (seq !== requestSeq.current) return
         if (!background) setDetailError(true)
         show(e.message ?? 'Failed to load details', 'err')
       })
-      .finally(() => setLoading(false))
+      .finally(() => {
+        if (seq !== requestSeq.current) return
+        setLoading(false)
+      })
   }, [headline.id, isAdmin, show])
 
   useEffect(() => { if (isExpanded && findings === null) loadDetail() }, [isExpanded, findings, loadDetail]) // eslint-disable-line react-hooks/set-state-in-effect -- loads detail on first expand; matches FindingsPanel/RisksPanel in RepoScans.tsx
@@ -118,15 +131,32 @@ export function Scans() {
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [filter, setFilter] = useState('')
   const { show, Toast } = useToast()
+  // Guards against overlapping load() calls (e.g. two quick accept/revoke
+  // actions on different rows, each triggering a background headlines
+  // refresh) — only the most recently started request may commit state, and
+  // a response for a request no longer current (including one still
+  // in-flight when the component unmounts) is ignored.
+  const requestSeq = useRef(0)
 
   const load = useCallback((background = false) => {
+    const seq = ++requestSeq.current
     if (!background) { setLoading(true); setLoadError(false) }
-    api.repoScans.headlines().then(setHeadlines).catch((e: Error) => {
+    api.repoScans.headlines().then(headlines => {
+      if (seq !== requestSeq.current) return
+      setHeadlines(headlines)
+    }).catch((e: Error) => {
+      if (seq !== requestSeq.current) return
       if (!background) setLoadError(true)
       show(e.message ?? 'Failed to load scans', 'err')
-    }).finally(() => { if (!background) setLoading(false) })
+    }).finally(() => {
+      if (seq !== requestSeq.current) return
+      if (!background) setLoading(false)
+    })
   }, [show])
-  useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect -- initial load on mount; matches FindingsPanel/RisksPanel in RepoScans.tsx
+  useEffect(() => {
+    load()
+    return () => { requestSeq.current += 1 }
+  }, [load]) // eslint-disable-line react-hooks/set-state-in-effect -- initial load on mount; matches FindingsPanel/RisksPanel in RepoScans.tsx
 
   const loadHeadlinesBackground = useCallback(() => { load(true) }, [load])
 

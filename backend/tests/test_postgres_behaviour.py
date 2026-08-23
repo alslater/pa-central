@@ -768,6 +768,38 @@ class TestRepoScanHeadlineLatestResultRanking:
         assert by_name["a"]["latest_scanned_at"] == "2026-01-03T00:00:00Z"
         assert by_name["b"]["latest_status"] == "pending"
 
+    async def test_tied_started_at_breaks_tie_by_result_id(self, session, client):
+        """Two results for the same scan can share started_at (e.g.
+        second-level precision, or a retried scan) — without id as a
+        secondary ORDER BY key, row_number()'s tie-break is unspecified, so
+        either row could get rank 1 and latest_status would be
+        nondeterministic between requests. id desc must be the deciding
+        factor, matching the same tie-break strategy used by
+        GET /hosts/{id}/latest-scans."""
+        admin = User(
+            email="admin2@x.com", display_name="Admin2", role=UserRole.admin,
+            hashed_password=hash_password("x"),
+        )
+        session.add(admin)
+        await session.flush()
+        token = create_access_token(admin.id)
+
+        scan = RepoScan(name="tied-scan", url="http://x/tied", branch="main")
+        session.add(scan)
+        await session.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC).replace(tzinfo=None)
+        session.add(RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.failed, started_at=tied))
+        await session.commit()
+        # Inserted after the first row, so it has a strictly greater id
+        # while sharing the same started_at — this is the row that must win.
+        session.add(RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.success, started_at=tied))
+        await session.commit()
+
+        r = await client.get("/api/repo-scans/headlines", headers=auth(token))
+        assert r.status_code == 200
+        by_name = {h["name"]: h for h in r.json()}
+        assert by_name["tied-scan"]["latest_status"] == "success"
+
 
 class TestHostLatestScansRanking:
     """GET /hosts/{id}/latest-scans ranks per project_path in SQL, then

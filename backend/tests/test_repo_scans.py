@@ -503,6 +503,32 @@ class TestRepoScanHeadlines:
         assert h["latest_status"] == "success"
         assert h["latest_scanned_at"].startswith("2026-01-03")
 
+    async def test_tied_started_at_breaks_tie_by_result_id(self, client, admin_token, db, admin_user):
+        """Two results for the same scan can share started_at (e.g. results
+        recorded with second-level precision, or a retried scan). Ranking by
+        started_at alone leaves row_number()'s tie-break unspecified — either
+        row could get rank 1, making latest_status nondeterministic between
+        requests. id desc must be the deciding tie-breaker, matching the
+        deterministic strategy used by GET /hosts/{id}/latest-scans."""
+        scan = RepoScan(name="headline-repo-tied", url="https://x/ht", branch="main",
+                         created_by_id=admin_user.id)
+        db.add(scan)
+        await db.flush()
+        tied = datetime(2026, 1, 5, tzinfo=UTC)
+        db.add(RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.failed,
+                               started_at=tied, completed_at=tied))
+        await db.commit()
+        # Inserted after the first row, so it has a strictly greater id
+        # while sharing the same started_at — this is the row that must win.
+        db.add(RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.success,
+                               started_at=tied, completed_at=tied))
+        await db.commit()
+
+        r = await client.get("/api/repo-scans/headlines", headers=auth(admin_token))
+        assert r.status_code == 200
+        rows = {row["id"]: row for row in r.json()}
+        assert rows[scan.id]["latest_status"] == "success"  # the greater-id row, not the first-inserted one
+
     async def test_breach_scoped_correctly_across_multiple_scans(self, client, admin_token, db, admin_user):
         """Headlines batches breach candidates across all scans in one query
         (see list_repo_scans' candidates_by_scan pattern) — this asserts that
