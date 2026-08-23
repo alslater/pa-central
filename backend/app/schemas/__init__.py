@@ -446,7 +446,7 @@ class RepoScanCreate(BaseModel):
     cron_schedule: str | None = None
     cron_timezone: str | None = None
     min_notify_severity: AlertSeverity = AlertSeverity.medium
-    notify_recipients: list[str] | None = None
+    notify_recipients: list[EmailStr] | None = None
     config_template_id: int | None = None
     is_enabled: bool = True
     scan_flags: str | None = Field(None, max_length=4096)
@@ -468,7 +468,7 @@ class RepoScanUpdate(BaseModel):
     cron_schedule: str | None = None
     cron_timezone: str | None = None
     min_notify_severity: AlertSeverity | None = None
-    notify_recipients: list[str] | None = None
+    notify_recipients: list[EmailStr] | None = None
     config_template_id: int | None = None
     is_enabled: bool | None = None
     scan_flags: str | None = Field(None, max_length=4096)

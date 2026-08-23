@@ -194,6 +194,7 @@ async def _send_result_email(result_id: int) -> None:
         SmtpConfig,
         build_failure_email,
         build_findings_email,
+        filter_deliverable_recipients,
         filter_findings_by_severity,
     )
     from app.core.encryption import decrypt_value
@@ -253,8 +254,6 @@ async def _send_result_email(result_id: int) -> None:
                 select(User).where(User.role == UserRole.admin, User.is_active.is_(True))
             )
             admin_emails = [u.email for u in admins.scalars().all()]
-            if not admin_emails:
-                return
 
             valkey = None
             if app_settings.valkey_url:
@@ -263,19 +262,26 @@ async def _send_result_email(result_id: int) -> None:
             lock_key = f"repo_scan_result:{result_id}:notify"
             try:
                 if result.status == RepoScanStatus.failed:
+                    deliverable_admins = filter_deliverable_recipients(admin_emails)
+                    if not deliverable_admins:
+                        return
                     msg = build_failure_email(
                         repo_name=scan.name, repo_url=scan.url, branch=scan.branch,
                         pa_version=result.pa_version, error_message=result.error_message or "",
                         ecs_task_arn=result.ecs_task_arn,
-                        recipients=admin_emails, from_addr=smtp_cfg.from_addr,
+                        recipients=deliverable_admins, from_addr=smtp_cfg.from_addr,
                     )
-                    sent = await svc.send_with_dedup(msg, admin_emails, valkey, lock_key)
+                    sent = await svc.send_with_dedup(msg, deliverable_admins, valkey, lock_key)
                 else:
                     findings = result.findings or []
                     filtered = filter_findings_by_severity(findings, scan.min_notify_severity)
                     if not filtered:
                         return
-                    all_recipients = list(set(admin_emails + (scan.notify_recipients or [])))
+                    all_recipients = filter_deliverable_recipients(
+                        list(set(admin_emails + (scan.notify_recipients or [])))
+                    )
+                    if not all_recipients:
+                        return
                     msg = build_findings_email(
                         repo_name=scan.name, branch=scan.branch, pa_version=result.pa_version or "",
                         findings=findings, min_severity=scan.min_notify_severity,

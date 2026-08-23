@@ -8,6 +8,7 @@ from app.core.email import (
     SmtpConfig,
     build_failure_email,
     build_findings_email,
+    filter_deliverable_recipients,
     filter_findings_by_severity,
 )
 from app.models import AlertSeverity
@@ -61,6 +62,21 @@ def test_build_failure_email_subject():
     )
     assert "bad-repo" in msg["Subject"]
     assert "failed" in msg["Subject"].lower()
+
+
+def test_filter_deliverable_recipients_drops_localhost():
+    result = filter_deliverable_recipients(["admin@localhost", "real@example.com"])
+    assert result == ["real@example.com"]
+
+
+def test_filter_deliverable_recipients_drops_bare_hostname_and_no_at():
+    result = filter_deliverable_recipients(["user@intranet", "not-an-email", "ok@example.com"])
+    assert result == ["ok@example.com"]
+
+
+def test_filter_deliverable_recipients_keeps_all_valid():
+    addrs = ["a@example.com", "b@sub.example.co.uk"]
+    assert filter_deliverable_recipients(addrs) == addrs
 
 
 def test_filter_findings_by_severity():
@@ -121,6 +137,43 @@ async def test_send_email_reaches_smtp_server(smtp_server):
         repo_name="repo", branch="main", pa_version="1.0",
         findings=[{"package": "requests", "severity": "high", "advisory_id": "X", "summary": "s"}],
         min_severity=AlertSeverity.medium,
+        recipients=["admin@example.com"],
+        from_addr="fleet@example.com",
+    )
+    await svc.send(msg, ["admin@example.com"])
+    assert len(smtp_server.messages) == 1
+
+
+async def test_send_findings_email_with_non_ascii_summary(smtp_server):
+    """Non-ASCII characters (e.g. an em dash) in a finding summary must not
+    crash SMTP serialization — set_content() picks an encoding that can
+    represent them; set_payload() assumes ASCII and raises UnicodeEncodeError."""
+    svc = EmailService(smtp_cfg())
+    msg = build_findings_email(
+        repo_name="repo", branch="main", pa_version="1.0",
+        findings=[{
+            "package": "requests", "severity": "high", "advisory_id": "X",
+            "summary": "Regular expression denial of service — backtracking",
+        }],
+        min_severity=AlertSeverity.medium,
+        recipients=["admin@example.com"],
+        from_addr="fleet@example.com",
+    )
+    await svc.send(msg, ["admin@example.com"])
+    assert len(smtp_server.messages) == 1
+
+
+async def test_send_failure_email_with_non_ascii_error_message(smtp_server):
+    """Same non-ASCII regression as above, but for build_failure_email — it
+    was switched to set_content() too, and error_message (often copied
+    verbatim from a subprocess/git error) can just as easily contain
+    non-ASCII characters."""
+    svc = EmailService(smtp_cfg())
+    msg = build_failure_email(
+        repo_name="repo", repo_url="https://github.com/x/y",
+        branch="main", pa_version="1.0",
+        error_message="clone failed: authentication error — bad credentials",
+        ecs_task_arn="arn:test",
         recipients=["admin@example.com"],
         from_addr="fleet@example.com",
     )
