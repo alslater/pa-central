@@ -39,6 +39,23 @@ def filter_findings_by_severity(
     return [f for f in findings if _rank(f) >= threshold]
 
 
+def filter_deliverable_recipients(recipients: list[str]) -> list[str]:
+    """Drop addresses whose domain isn't fully-qualified (e.g. admin@localhost).
+
+    Real SMTP servers reject these with 'Recipient address rejected: need
+    fully-qualified address'. smtplib only raises when *every* recipient is
+    refused — a partial refusal is returned as a dict instead, which
+    EmailService._send_sync discards — so a single bad address otherwise
+    fails silently whenever at least one other recipient is valid.
+    """
+    result = []
+    for addr in recipients:
+        domain = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+        if "." in domain:
+            result.append(addr)
+    return result
+
+
 def build_findings_email(
     repo_name: str,
     branch: str,
@@ -58,7 +75,7 @@ def build_findings_email(
         f"  {f.get('package','?'):<30} {f.get('severity','?'):<10} {f.get('advisory_id','N/A'):<20} {f.get('summary','')}"
         for f in filtered
     )
-    msg.set_payload(
+    msg.set_content(
         f"Repository: {repo_name} (branch: {branch})\n"
         f"PA version: {pa_version}\n"
         f"Findings ({len(filtered)}):\n\n"
@@ -83,7 +100,7 @@ def build_failure_email(
     msg["Subject"] = f"[PA Central] Scan failed: {repo_name}"
     msg["From"] = from_addr
     msg["To"] = ", ".join(recipients)
-    msg.set_payload(
+    msg.set_content(
         f"Scan failed for repository: {repo_name}\n"
         f"URL: {repo_url}\n"
         f"Branch: {branch}\n"

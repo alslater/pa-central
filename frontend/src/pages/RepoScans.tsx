@@ -417,7 +417,7 @@ function ScanCard({
   scanOptionsVersion: number
   isOperator: boolean
   isAdmin: boolean
-  onUpdate: (id: number, patch: Partial<RepoScan>) => void
+  onUpdate: (id: number, patch: Partial<RepoScan>) => Promise<void>
   onDelete: (scan: RepoScan) => void
   onTrigger: (scan: RepoScan) => Promise<void>
 }) {
@@ -521,7 +521,7 @@ function ScanCard({
 
       {editing && isOperator && (
         <div className="form-section-border">
-          <EditForm scan={scan} credentials={credentials} templates={templates} defaultTz={defaultTz} scanOptions={scanOptions} scanOptionsVersion={scanOptionsVersion} onSave={patch => { onUpdate(scan.id, patch); setEditing(false) }} />
+          <EditForm scan={scan} credentials={credentials} templates={templates} defaultTz={defaultTz} scanOptions={scanOptions} scanOptionsVersion={scanOptionsVersion} onSave={patch => onUpdate(scan.id, patch).then(() => setEditing(false)).catch(() => {})} />
         </div>
       )}
 
@@ -830,9 +830,9 @@ export default function RepoScans() {
     catch (e: any) { show(e.message, 'err') }
   }
 
-  const handleUpdate = async (id: number, patch: Partial<RepoScan>) => {
+  const handleUpdate = async (id: number, patch: Partial<RepoScan>): Promise<void> => {
     try { await api.repoScans.update(id, patch); show('Saved'); load() }
-    catch (e: any) { show(e.message, 'err') }
+    catch (e: any) { show(e.message, 'err'); throw e }
   }
 
   const handleDelete = async (scan: RepoScan) => {

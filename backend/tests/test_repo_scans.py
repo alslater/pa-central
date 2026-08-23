@@ -44,6 +44,31 @@ class TestRepoScans:
         assert r.status_code == 200
         assert r.json()["id"] == created["id"]
 
+    async def test_create_repo_scan_rejects_invalid_notify_recipient(self, client, admin_token):
+        payload = {**REPO_PAYLOAD, "notify_recipients": ["not-an-email"]}
+        r = await client.post("/api/repo-scans", json=payload, headers=auth(admin_token))
+        assert r.status_code == 422
+
+    async def test_create_repo_scan_rejects_non_fully_qualified_notify_recipient(self, client, admin_token):
+        payload = {**REPO_PAYLOAD, "notify_recipients": ["admin@localhost"]}
+        r = await client.post("/api/repo-scans", json=payload, headers=auth(admin_token))
+        assert r.status_code == 422
+
+    async def test_create_repo_scan_accepts_valid_notify_recipients(self, client, admin_token):
+        payload = {**REPO_PAYLOAD, "notify_recipients": ["team@example.com"]}
+        r = await client.post("/api/repo-scans", json=payload, headers=auth(admin_token))
+        assert r.status_code == 201, r.text
+        assert r.json()["notify_recipients"] == ["team@example.com"]
+
+    async def test_patch_repo_scan_rejects_invalid_notify_recipient(self, client, admin_token):
+        created = (await client.post("/api/repo-scans", json=REPO_PAYLOAD, headers=auth(admin_token))).json()
+        r = await client.patch(
+            f"/api/repo-scans/{created['id']}",
+            json={"notify_recipients": ["not-an-email"]},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 422
+
     async def test_patch_repo_scan(self, client, admin_token):
         created = (await client.post("/api/repo-scans", json=REPO_PAYLOAD, headers=auth(admin_token))).json()
         r = await client.patch(
