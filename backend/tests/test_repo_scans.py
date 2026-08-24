@@ -114,6 +114,26 @@ class TestRepoScanTrigger:
         assert r.status_code == 202, r.text
         assert r.json()["triggered_by"] == "manual"
 
+    async def test_trigger_records_failure_when_ecs_fleet_url_unset(self, client, admin_token, monkeypatch):
+        """ECS mode with no SCAN_TASK_FLEET_URL must fail the launch cleanly
+        (202 + failed result) rather than let the task start with no way to
+        report results back, or bubble up as an unhandled 500."""
+        from app.core.config import settings as app_settings
+        monkeypatch.setattr(app_settings, "local_docker_scan", False)
+        monkeypatch.setattr(app_settings, "scan_task_fleet_url", None)
+
+        scan = await self._create_scan(client, admin_token)
+        with patch("app.api.repo_scans._get_valkey") as MockValkey:
+            mock_ctx = MagicMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=None)
+            mock_ctx.__aexit__ = AsyncMock(return_value=None)
+            MockValkey.return_value = mock_ctx
+            r = await client.post(f"/api/repo-scans/{scan['id']}/trigger", headers=auth(admin_token))
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "failed"
+        assert "SCAN_TASK_FLEET_URL" in body["error_message"]
+
     async def test_trigger_returns_400_when_disabled(self, client, admin_token):
         scan = await self._create_scan(client, admin_token)
         await client.patch(

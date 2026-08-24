@@ -24,9 +24,14 @@ pa-central/
 ├── backend/                FastAPI + SQLAlchemy (async)
 │   ├── app/
 │   │   ├── api/            Route handlers (auth, hosts, alerts, scans, configs, cooldown, ingest,
-│   │   │                                  users, repo_scans, system_settings)
-│   │   ├── models/         SQLAlchemy ORM (User, Host, Alert, Scan, ConfigTemplate, ApiKey,
-│   │   │                                  CooldownEntry, RepoScan, RepoScanResult, SystemSetting)
+│   │   │                                  users, api_keys, dashboard, findings, risks,
+│   │   │                                  repo_scans, repo_credentials, scan_options,
+│   │   │                                  system_settings)
+│   │   ├── models/         SQLAlchemy ORM (User, ApiKey, Host, Alert, Scan, ConfigTemplate,
+│   │   │                                  ConfigAssignment, CooldownEntry, SystemSetting,
+│   │   │                                  RepoCredential, RepoScan, RepoScanResult,
+│   │   │                                  FindingRecord, RiskRecord, FindingAcceptanceEvent,
+│   │   │                                  RiskAcceptanceEvent)
 │   │   ├── schemas/        Pydantic v2 request/response schemas
 │   │   ├── scheduler/      Standalone scheduler service (cron eval, ECS/Docker launch, stuck-job
 │   │   │                   recovery, result retention pruning)
@@ -68,7 +73,7 @@ ECS_CLUSTER_ARN=arn:aws:ecs:us-east-1:123456789:cluster/my-cluster
 SCAN_TASK_DEFINITION_ARN=arn:aws:ecs:us-east-1:123456789:task-definition/pa-central-scan:1
 SCAN_TASK_SUBNET_IDS=subnet-abc,subnet-def
 SCAN_TASK_SECURITY_GROUP_IDS=sg-abc
-FLEET_BASE_URL=https://pa-central.example.com
+SCAN_TASK_FLEET_URL=https://pa-central.example.com
 FLEET_SYSTEM_API_KEY=<generate with: python3 -c "import secrets; print(secrets.token_hex(32))">
 ```
 
@@ -115,6 +120,9 @@ All ingest endpoints authenticate with `X-API-Key: <key>` where the key is bound
 | `POST` | `/api/ingest/alerts` | Upload a new alert |
 | `POST` | `/api/ingest/scans` | Upload scan results (pa scan-project --format json) |
 | `GET`  | `/api/ingest/config` | Pull assigned TOML config (200 with body, or 204 if none) |
+| `GET`  | `/api/ingest/cooldown` | Pull active cooldown allowlist entries for this host |
+
+The scan task and scheduler additionally authenticate with `FLEET_SYSTEM_API_KEY` (not a per-host key) to call `POST /api/ingest/repo-scan-result` and report the outcome of a scheduled repo scan.
 
 ## Quick start (development)
 
@@ -292,15 +300,26 @@ For PostgreSQL: `asyncpg` is already included in the Docker image (via `uv sync 
 
 | Role | Permissions |
 |------|-------------|
-| `viewer` | Read-only access to everything |
-| `operator` | + acknowledge alerts, manage cooldowns, assign configs, create API keys |
-| `admin` | + manage users, delete hosts, revoke any API key |
+| `viewer` | Read-only access to most resources (hosts, alerts, cooldown, configs), plus can create/revoke their own API keys. **Cannot** list/view scheduled repo scans or credentials — see below |
+| `operator` | + acknowledge alerts, manage cooldowns, manage config templates, assign configs, **and** create/view/update scheduled repo scans, trigger scans, manage repo credentials |
+| `admin` | + manage users, delete hosts, revoke any API key, delete repo scans and credentials, view a scan's findings/risks/exposure history, accept/revoke finding and risk exceptions |
+
+Repo scan and credential authorization doesn't fit a strict read-only-viewer /
+read-write-operator / delete-admin split — most of `/api/repo-scans` and
+`/api/repo-credentials` (list, create, update, trigger) requires `operator`,
+not just `viewer`, while a scan's `findings`/`risks`/`exposure-history` and
+both resources' delete endpoints require `admin`. `GET /api/repo-scans/results`
+(all results across scans) and `GET /api/repo-scans/scan-options` are the only
+repo-scan endpoints open to `viewer`. See `backend/app/api/repo_scans.py` and
+`backend/app/api/repo_credentials.py` for the exact per-endpoint dependency.
 
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SECRET_KEY` | `changeme-...` | JWT signing key — **change this in production** |
+| `ALGORITHM` | `HS256` | JWT signing algorithm |
+| `APP_TITLE` | `PA Central` | App title shown in the API docs (Swagger UI) |
 | `DATABASE_TYPE` | `sqlite` | `sqlite` or `postgresql` |
 | `DATABASE_NAME` | `<repo>/backend/pa_central.db` running the app directly; `./data/pa_central.db` under Docker Compose (see `docker-compose.yml`) | SQLite file path, or PostgreSQL database name |
 | `DATABASE_HOST` | *(unset)* | PostgreSQL host (unused for SQLite) |
@@ -317,14 +336,20 @@ For PostgreSQL: `asyncpg` is already included in the Docker image (via `uv sync 
 | `BOOTSTRAP_ADMIN_PASSWORD` | *(unset)* | Creates `admin@localhost` on first startup if set |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `480` | Session duration (8 hours) |
 | `DEBUG` | `false` | Enables SQLAlchemy query logging **and disables TOTP entirely** — tokens are issued immediately on `POST /auth/login` with no second factor. Never set this in production. |
+| `HOST_ONLINE_THRESHOLD_MINUTES` | `15` | Minutes since last heartbeat before a host is considered offline |
 | `VALKEY_URL` | *(unset)* | Redis/Valkey URL for distributed locks — required for multi-replica deployments |
+| `UVICORN_HOST` | `127.0.0.1` | Dev server bind address — set to `0.0.0.0` for local Docker scan mode |
+| `UVICORN_PORT` | `8000` | Dev server port |
+| `UVICORN_RELOAD` | `false` | Auto-reload on code changes (dev only) |
+| `UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN` | `5` | Seconds to wait for in-flight requests to finish on shutdown |
 | `SETTINGS_ENCRYPTION_KEY` | `changeme-...` | AES-256 key for encrypting secret system settings (SMTP password etc.) — **change in production**. Generate with: `python3 -c "import secrets; print(secrets.token_hex(16))"` |
-| `FLEET_BASE_URL` | `http://localhost:8000` | Public base URL of this app (used in email links etc.) |
 | `FLEET_SYSTEM_API_KEY` | *(unset)* | Pre-shared key authenticating scan tasks and the scheduler |
+| `AWS_REGION` | `us-east-1` | AWS region for ECS and Secrets Manager clients |
+| `AWS_ENDPOINT_URL` | *(unset)* | Override endpoint for AWS clients — used to point at LocalStack in tests/dev |
 | `ECS_CLUSTER_ARN` | *(unset)* | ECS cluster to launch scan tasks in |
 | `SCAN_TASK_DEFINITION_ARN` | *(unset)* | ECS task definition for the scan task |
 | `SCAN_TASK_SUBNET_IDS` | *(unset)* | Comma-separated subnet IDs for ECS Fargate |
 | `SCAN_TASK_SECURITY_GROUP_IDS` | *(unset)* | Comma-separated security group IDs for ECS Fargate |
 | `LOCAL_DOCKER_SCAN` | `false` | Use local Docker instead of ECS (development) |
 | `SCAN_TASK_IMAGE` | `pa-central-scan-task:latest` | Image name for local Docker scan mode |
-| `SCAN_TASK_FLEET_URL` | *(unset)* | Fleet URL passed to scan containers in local Docker mode — defaults to `http://host.docker.internal:8000` when unset |
+| `SCAN_TASK_FLEET_URL` | `http://host.docker.internal:8000` under `LOCAL_DOCKER_SCAN=true`; **required** otherwise | URL passed to scan task containers as `FLEET_API_URL` so they know where to POST results back. The `host.docker.internal` default only makes sense for local Docker scan tasks, which share a host with this server; ECS tasks run on separate infrastructure, so triggering an ECS scan with this unset fails the scan (not startup) with a clear error rather than silently defaulting |

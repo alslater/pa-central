@@ -106,8 +106,9 @@ async def _launch_ecs_task(scan: Any, result_id: int, credential: Any = None) ->
 
     if app_settings.local_docker_scan:
         from app.core.docker_runner import run_local_scan
-        fleet_url = app_settings.scan_task_fleet_url or "http://host.docker.internal:8000"
-        return await run_local_scan(app_settings.scan_task_image, env, fleet_url)
+        return await run_local_scan(
+            app_settings.scan_task_image, env, app_settings.resolved_scan_task_fleet_url
+        )
 
     client = EcsClient(region_name=app_settings.aws_region)
     return await client.run_scan_task(
