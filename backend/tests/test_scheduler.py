@@ -34,8 +34,16 @@ def test_is_due_hourly_cron_not_yet():
     assert is_due(expr, last_run, now) is False
 
 
-def test_is_due_when_no_last_run():
-    assert is_due("0 * * * *", None, datetime.now(UTC)) is True
+def test_is_due_since_creation_when_no_last_run():
+    """A scan created just before its first cron occurrence is due once
+    that occurrence passes — it does not fire immediately regardless of
+    schedule."""
+    expr = "0 * * * *"
+    created_at = datetime(2026, 6, 9, 10, 30, 0, tzinfo=UTC)
+    not_yet = datetime(2026, 6, 9, 10, 45, 0, tzinfo=UTC)
+    due = datetime(2026, 6, 9, 11, 0, 0, tzinfo=UTC)
+    assert is_due(expr, created_at, not_yet) is False
+    assert is_due(expr, created_at, due) is True
 
 
 def test_is_due_with_grace_period():
@@ -58,7 +66,74 @@ def test_should_trigger_scan_enabled():
     scan.cron_schedule = "0 * * * *"
     scan.cron_timezone = None
     scan.last_scan_at = None
-    assert should_trigger_scan(scan, datetime.now(UTC)) is True
+    scan.enabled_at = datetime(2026, 6, 9, 9, 0, 0, tzinfo=UTC)
+    scan.created_at = scan.enabled_at
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)) is True
+
+
+def test_should_trigger_scan_not_yet_due_from_enabling():
+    """A freshly enabled scan waits for its own next cron occurrence — it
+    does not fire immediately just because it has never run."""
+    scan = MagicMock()
+    scan.is_enabled = True
+    scan.cron_schedule = "0 7 * * 1"  # Monday 07:00
+    scan.cron_timezone = None
+    scan.last_scan_at = None
+    scan.enabled_at = datetime(2026, 6, 9, 8, 0, 0, tzinfo=UTC)  # Tuesday
+    scan.created_at = scan.enabled_at
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 8, 1, 0, tzinfo=UTC)) is False
+
+
+def test_should_trigger_scan_anchors_to_enabled_at_not_created_at():
+    """A scan created disabled (or re-enabled after missing an occurrence)
+    must wait for its next occurrence from when it actually became enabled
+    — created_at alone would already be in the past for that missed window
+    and fire immediately on the very next tick."""
+    scan = MagicMock()
+    scan.is_enabled = True
+    scan.cron_schedule = "0 7 * * 1"  # Monday 07:00
+    scan.cron_timezone = None
+    scan.last_scan_at = None
+    scan.created_at = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)  # long before any Monday 07:00
+    scan.enabled_at = datetime(2026, 6, 9, 8, 0, 0, tzinfo=UTC)  # Tuesday, just re-enabled
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 8, 1, 0, tzinfo=UTC)) is False
+
+
+def test_should_trigger_scan_falls_back_to_created_at_when_enabled_at_missing():
+    """Defensive fallback for a scan that somehow predates both a
+    successful run and the enabled_at column/backfill."""
+    scan = MagicMock()
+    scan.is_enabled = True
+    scan.cron_schedule = "0 7 * * 1"  # Monday 07:00
+    scan.cron_timezone = None
+    scan.last_scan_at = None
+    scan.enabled_at = None
+    scan.created_at = datetime(2026, 6, 9, 8, 0, 0, tzinfo=UTC)  # Tuesday
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 8, 1, 0, tzinfo=UTC)) is False
+    assert should_trigger_scan(scan, datetime(2026, 6, 15, 7, 0, 0, tzinfo=UTC)) is True
+
+
+def test_should_trigger_scan_re_enabling_a_previously_successful_scan_waits_for_next_occurrence():
+    """A scan that already ran successfully once, then was disabled through
+    one or more scheduled occurrences, then re-enabled, must not use its
+    stale last_scan_at as the anchor — that predates the gap and would look
+    overdue the instant it's turned back on. The anchor must be the later
+    of last_scan_at and enabled_at, not "prefer last_scan_at" outright."""
+    scan = MagicMock()
+    scan.is_enabled = True
+    scan.cron_schedule = "0 7 * * 1"  # Monday 07:00
+    scan.cron_timezone = None
+    # Ran successfully two Mondays ago...
+    scan.last_scan_at = datetime(2026, 5, 25, 7, 0, 5, tzinfo=UTC)
+    # ...then was disabled through last Monday's occurrence, and only
+    # re-enabled this Tuesday — after the missed occurrence, not before it.
+    scan.enabled_at = datetime(2026, 6, 9, 8, 0, 0, tzinfo=UTC)
+    scan.created_at = datetime(2026, 5, 1, 0, 0, 0, tzinfo=UTC)
+    # Without the fix: next_run_after(last_scan_at) is last Monday (06-08,
+    # already passed) => due immediately. With the fix: next_run_after
+    # picks up from enabled_at (this Tuesday) => next Monday (06-15).
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 8, 1, 0, tzinfo=UTC)) is False
+    assert should_trigger_scan(scan, datetime(2026, 6, 15, 7, 0, 0, tzinfo=UTC)) is True
 
 
 def test_should_trigger_scan_disabled():
@@ -67,7 +142,9 @@ def test_should_trigger_scan_disabled():
     scan.cron_schedule = "0 * * * *"
     scan.cron_timezone = None
     scan.last_scan_at = None
-    assert should_trigger_scan(scan, datetime.now(UTC)) is False
+    scan.enabled_at = None
+    scan.created_at = datetime(2026, 6, 9, 9, 0, 0, tzinfo=UTC)
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)) is False
 
 
 def test_should_trigger_scan_no_schedule():
@@ -76,7 +153,35 @@ def test_should_trigger_scan_no_schedule():
     scan.cron_schedule = None
     scan.cron_timezone = None
     scan.last_scan_at = None
-    assert should_trigger_scan(scan, datetime.now(UTC)) is False
+    scan.enabled_at = datetime(2026, 6, 9, 9, 0, 0, tzinfo=UTC)
+    scan.created_at = scan.enabled_at
+    assert should_trigger_scan(scan, datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)) is False
+
+
+def test_should_trigger_scan_withholds_during_failure_backoff():
+    scan = MagicMock()
+    scan.is_enabled = True
+    scan.cron_schedule = "0 * * * *"
+    scan.cron_timezone = None
+    scan.last_scan_at = datetime(2026, 6, 9, 9, 0, 0, tzinfo=UTC)
+    scan.enabled_at = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    scan.created_at = scan.enabled_at
+    now = datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)  # cron-due
+    last_failed_attempt_at = datetime(2026, 6, 9, 9, 55, 0, tzinfo=UTC)  # 5 min ago
+    assert should_trigger_scan(scan, now, last_failed_at=last_failed_attempt_at) is False
+
+
+def test_should_trigger_scan_retries_after_backoff_expires():
+    scan = MagicMock()
+    scan.is_enabled = True
+    scan.cron_schedule = "0 * * * *"
+    scan.cron_timezone = None
+    scan.last_scan_at = datetime(2026, 6, 9, 9, 0, 0, tzinfo=UTC)
+    scan.enabled_at = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    scan.created_at = scan.enabled_at
+    now = datetime(2026, 6, 9, 10, 0, 0, tzinfo=UTC)  # cron-due
+    last_failed_attempt_at = datetime(2026, 6, 9, 9, 45, 0, tzinfo=UTC)  # 15 min ago
+    assert should_trigger_scan(scan, now, last_failed_at=last_failed_attempt_at) is True
 
 
 # ── Integration: trigger loop ─────────────────────────────────────────────────
@@ -103,6 +208,8 @@ def due_scan():
     scan.cron_schedule = "0 * * * *"
     scan.cron_timezone = None
     scan.last_scan_at = None
+    scan.enabled_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+    scan.created_at = scan.enabled_at
     scan.config_template_id = None
     scan.pa_version = "1.0.0"
     scan.credential_type = CredentialType.https_token
@@ -129,6 +236,64 @@ async def test_run_one_tick_triggers_due_scans(mock_db_factory, due_scan):
 
 
 @pytest.mark.asyncio
+async def test_run_one_tick_withholds_scan_in_failure_backoff(mock_db_factory, due_scan):
+    """A scan whose most recent result is a recent launch failure must not
+    be retried on the very next tick — see should_trigger_scan's backoff."""
+    from app.models import RepoScanStatus
+    due_scan.enabled_at = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    factory, session = mock_db_factory
+    tz_setting = MagicMock()
+    tz_setting.value = None
+    session.get = AsyncMock(return_value=tz_setting)
+    now = datetime.now(UTC)
+    failed_at = now - timedelta(minutes=1)
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[due_scan])))),
+        MagicMock(__iter__=lambda self: iter([
+            (due_scan.id, RepoScanStatus.failed, failed_at - timedelta(seconds=30), failed_at)
+        ])),
+    ])
+    with patch("app.scheduler.scheduler.trigger_scan") as mock_trigger, \
+         patch("app.scheduler.scheduler.utcnow", return_value=now):
+        from app.scheduler.scheduler import run_one_tick
+        await run_one_tick(factory)
+    mock_trigger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_one_tick_backoff_counts_from_completion_not_launch_start(mock_db_factory, due_scan):
+    """A launch that hangs before finally raising must back off from when
+    the failure was recorded (completed_at), not from started_at — which is
+    stamped before the launch attempt even begins. Otherwise a hang longer
+    than FAILED_LAUNCH_BACKOFF_MINUTES would already be past its own
+    backoff window the instant the failure is written, and the very next
+    tick could retry immediately."""
+    from app.models import RepoScanStatus
+    from app.scheduler.scheduler import FAILED_LAUNCH_BACKOFF_MINUTES
+    due_scan.enabled_at = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    factory, session = mock_db_factory
+    tz_setting = MagicMock()
+    tz_setting.value = None
+    session.get = AsyncMock(return_value=tz_setting)
+    now = datetime.now(UTC)
+    # started_at is old enough that backoff-from-started_at would already
+    # have expired; completed_at (when it actually failed) is recent.
+    started_at = now - timedelta(minutes=FAILED_LAUNCH_BACKOFF_MINUTES + 5)
+    completed_at = now - timedelta(minutes=1)
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[due_scan])))),
+        MagicMock(__iter__=lambda self: iter([
+            (due_scan.id, RepoScanStatus.failed, started_at, completed_at)
+        ])),
+    ])
+    with patch("app.scheduler.scheduler.trigger_scan") as mock_trigger, \
+         patch("app.scheduler.scheduler.utcnow", return_value=now):
+        from app.scheduler.scheduler import run_one_tick
+        await run_one_tick(factory)
+    mock_trigger.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_one_tick_skips_disabled_scans(mock_db_factory, due_scan):
     due_scan.is_enabled = False
     factory, session = mock_db_factory
@@ -142,6 +307,122 @@ async def test_run_one_tick_skips_disabled_scans(mock_db_factory, due_scan):
         from app.scheduler.scheduler import run_one_tick
         await run_one_tick(factory)
     mock_trigger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_one_tick_skips_the_ranked_results_query_with_no_candidate_scans(mock_db_factory, due_scan):
+    """The row_number() window over repo_scan_results must not run at all
+    when nothing could possibly be triggered this tick — otherwise every
+    poll pays for a query proportional to the whole (ever-growing) results
+    table just to answer a backoff check that has no scans to apply to."""
+    due_scan.is_enabled = False
+    factory, session = mock_db_factory
+    tz_setting = MagicMock()
+    tz_setting.value = None
+    session.get = AsyncMock(return_value=tz_setting)
+    session.execute = AsyncMock(return_value=MagicMock(
+        scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[due_scan])))
+    ))
+    with patch("app.scheduler.scheduler.trigger_scan"):
+        from app.scheduler.scheduler import run_one_tick
+        await run_one_tick(factory)
+    # Only the initial `select(RepoScan)` should have run — no second
+    # execute() for the ranked-results subquery.
+    assert session.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_one_tick_restricts_ranked_results_to_candidate_scan_ids(mock_db_factory, due_scan):
+    """The ranked-results query must filter to enabled, scheduled scans —
+    not scan every row in repo_scan_results — so its cost tracks the number
+    of active schedules rather than total historical result volume. The
+    filter must be a correlated subquery against RepoScan, not an IN-list of
+    literal ids: a literal list needs one bind parameter per candidate scan,
+    which can exceed the driver's bind-parameter ceiling (SQLite defaults to
+    32766) once there are enough active schedules, failing every tick
+    outright instead of launching anything."""
+    factory, session = mock_db_factory
+    tz_setting = MagicMock()
+    tz_setting.value = None
+    session.get = AsyncMock(return_value=tz_setting)
+    session.execute = AsyncMock(side_effect=[
+        MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[due_scan])))),
+        MagicMock(__iter__=lambda self: iter([])),
+    ])
+    with patch("app.scheduler.scheduler.trigger_scan"):
+        from app.scheduler.scheduler import run_one_tick
+        await run_one_tick(factory)
+    assert session.execute.call_count == 2
+    ranked_query = session.execute.call_args_list[1].args[0]
+    ranked_subquery = ranked_query.selected_columns[0].table.element
+    where_clause = str(ranked_subquery.whereclause)
+    assert "repo_scan_id IN" in where_clause
+
+    compiled = ranked_subquery.compile()
+    # A literal IN-list renders one bind parameter per candidate id; a
+    # correlated subquery renders none for this filter regardless of how
+    # many scans are enabled — bind-parameter count must not scale with
+    # candidate count.
+    assert not any(name.startswith("repo_scan_id_") for name in compiled.params)
+
+
+@pytest.mark.asyncio
+async def test_run_one_tick_candidate_filter_excludes_empty_string_schedule(db, admin_user):
+    """should_trigger_scan treats cron_schedule="" the same as None (`if not
+    scan.cron_schedule: return False`) — the API's schema is `str | None`
+    with no validator rejecting an empty string, so a scan can genuinely end
+    up with cron_schedule="". The SQL candidate filter must exclude it too,
+    not just NULL: otherwise every enabled scan with an empty schedule gets
+    ranked in the results window on every tick regardless of how much
+    manual-trigger history it has, defeating the point of restricting the
+    query to scans that could actually be triggered."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.models import RepoScanResult, RepoScanStatus, ScanTrigger
+    from app.scheduler.scheduler import run_one_tick
+
+    valid = RepoScan(
+        name="valid", url="https://g.com/valid.git", branch="main",
+        min_notify_severity="medium", is_enabled=True, cron_schedule="0 * * * *",
+        enabled_at=datetime(2026, 1, 1, tzinfo=UTC), created_by_id=admin_user.id,
+    )
+    empty_schedule = RepoScan(
+        name="empty-schedule", url="https://g.com/empty.git", branch="main",
+        min_notify_severity="medium", is_enabled=True, cron_schedule="",
+        enabled_at=datetime(2026, 1, 1, tzinfo=UTC), created_by_id=admin_user.id,
+    )
+    db.add_all([valid, empty_schedule])
+    await db.commit()
+    await db.refresh(valid)
+    await db.refresh(empty_schedule)
+
+    # A recent failed result for the empty-schedule scan — if it were
+    # wrongly included by the candidate filter, it would show up in the
+    # ranked results this tick even though it can never be triggered.
+    recent_failure = utcnow() - timedelta(minutes=1)
+    db.add(RepoScanResult(
+        repo_scan_id=empty_schedule.id, status=RepoScanStatus.failed,
+        triggered_by=ScanTrigger.scheduled, started_at=recent_failure, completed_at=recent_failure,
+    ))
+    await db.commit()
+
+    factory = async_sessionmaker(bind=db.bind, class_=AsyncSession, expire_on_commit=False)
+    seen_last_failed_at: dict[int, object] = {}
+
+    def _recording_should_trigger_scan(scan, now, default_tz=None, last_failed_at=None):
+        seen_last_failed_at[scan.id] = last_failed_at
+        return should_trigger_scan(scan, now, default_tz, last_failed_at)
+
+    with patch("app.scheduler.scheduler.trigger_scan"), \
+         patch("app.scheduler.scheduler.should_trigger_scan", side_effect=_recording_should_trigger_scan):
+        await run_one_tick(factory)
+
+    # The empty-schedule scan's recent failure must never surface as a
+    # last_failed_at, whether or not should_trigger_scan itself would have
+    # ignored it — proving the SQL candidate filter excluded it upstream.
+    assert seen_last_failed_at.get(empty_schedule.id) is None
+    # Sanity check should_trigger_scan was actually invoked for both scans.
+    assert set(seen_last_failed_at) == {valid.id, empty_schedule.id}
 
 
 @pytest.mark.asyncio

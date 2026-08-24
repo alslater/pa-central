@@ -96,6 +96,91 @@ class TestRepoScans:
 
 
 @pytest.mark.asyncio
+class TestEnabledAtBookkeeping:
+    """enabled_at anchors the scheduler's due-time check when there's no
+    last_scan_at yet (see should_trigger_scan) — it must track every
+    False->True is_enabled transition, not just creation, or a re-enabled
+    scan fires immediately instead of waiting for its next occurrence."""
+
+    async def test_create_enabled_sets_enabled_at(self, client, db, admin_token):
+        created = (await client.post(
+            "/api/repo-scans", json={**REPO_PAYLOAD, "is_enabled": True}, headers=auth(admin_token)
+        )).json()
+        scan = await db.get(RepoScan, created["id"])
+        assert scan.enabled_at is not None
+
+    async def test_create_disabled_leaves_enabled_at_unset(self, client, db, admin_token):
+        created = (await client.post(
+            "/api/repo-scans", json={**REPO_PAYLOAD, "is_enabled": False}, headers=auth(admin_token)
+        )).json()
+        scan = await db.get(RepoScan, created["id"])
+        assert scan.enabled_at is None
+
+    async def test_re_enabling_updates_enabled_at(self, client, db, admin_token):
+        created = (await client.post(
+            "/api/repo-scans", json={**REPO_PAYLOAD, "is_enabled": False}, headers=auth(admin_token)
+        )).json()
+        scan = await db.get(RepoScan, created["id"])
+        assert scan.enabled_at is None
+
+        await client.patch(
+            f"/api/repo-scans/{created['id']}", json={"is_enabled": True}, headers=auth(admin_token)
+        )
+        await db.refresh(scan)
+        assert scan.enabled_at is not None
+
+    async def test_disabling_does_not_clear_enabled_at(self, client, db, admin_token):
+        """enabled_at records the most recent activation, not current
+        state — disabling doesn't erase when it was last turned on, since
+        should_trigger_scan already short-circuits on is_enabled first."""
+        created = (await client.post(
+            "/api/repo-scans", json={**REPO_PAYLOAD, "is_enabled": True}, headers=auth(admin_token)
+        )).json()
+        scan = await db.get(RepoScan, created["id"])
+        first_enabled_at = scan.enabled_at
+        assert first_enabled_at is not None
+
+        await client.patch(
+            f"/api/repo-scans/{created['id']}", json={"is_enabled": False}, headers=auth(admin_token)
+        )
+        await db.refresh(scan)
+        assert scan.enabled_at == first_enabled_at
+
+    async def test_updating_other_fields_while_enabled_does_not_bump_enabled_at(self, client, db, admin_token):
+        """Only a False->True transition should move enabled_at — an
+        unrelated edit on an already-enabled scan must not reset its
+        scheduling anchor."""
+        created = (await client.post(
+            "/api/repo-scans", json={**REPO_PAYLOAD, "is_enabled": True}, headers=auth(admin_token)
+        )).json()
+        scan = await db.get(RepoScan, created["id"])
+        first_enabled_at = scan.enabled_at
+
+        await client.patch(
+            f"/api/repo-scans/{created['id']}", json={"branch": "develop"}, headers=auth(admin_token)
+        )
+        await db.refresh(scan)
+        assert scan.enabled_at == first_enabled_at
+
+    async def test_re_enabling_via_already_true_is_enabled_does_not_bump_enabled_at(
+        self, client, db, admin_token
+    ):
+        """Sending is_enabled: true when it's already true is not a
+        transition — must not look like a fresh activation."""
+        created = (await client.post(
+            "/api/repo-scans", json={**REPO_PAYLOAD, "is_enabled": True}, headers=auth(admin_token)
+        )).json()
+        scan = await db.get(RepoScan, created["id"])
+        first_enabled_at = scan.enabled_at
+
+        await client.patch(
+            f"/api/repo-scans/{created['id']}", json={"is_enabled": True}, headers=auth(admin_token)
+        )
+        await db.refresh(scan)
+        assert scan.enabled_at == first_enabled_at
+
+
+@pytest.mark.asyncio
 class TestRepoScanTrigger:
     async def _create_scan(self, client, token):
         r = await client.post("/api/repo-scans", json=REPO_PAYLOAD, headers=auth(token))
