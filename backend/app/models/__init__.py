@@ -347,6 +347,14 @@ class RepoScan(Base):
     notify_recipients: Mapped[list | None] = mapped_column(JSON, nullable=True)
     config_template_id: Mapped[int | None] = mapped_column(ForeignKey("config_templates.id"), nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Timestamp of the most recent False->True is_enabled transition (set at
+    # creation too, if created enabled). Used as the scheduler's fallback
+    # cron anchor when there's no last_scan_at yet — created_at alone would
+    # make a scan that was created disabled, or stayed disabled through one
+    # scheduled occurrence, fire immediately the moment it's re-enabled,
+    # since that missed occurrence is already in the past relative to
+    # created_at. See should_trigger_scan in app/scheduler/scheduler.py.
+    enabled_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     sla_high_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sla_medium_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_scan_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)

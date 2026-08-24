@@ -7,7 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.core.config import settings as app_settings
 from app.models import (
@@ -56,22 +56,70 @@ def next_run_after(cron_expression: str, after: datetime, tz: ZoneInfo | None = 
     return nxt_local.replace(tzinfo=tz).astimezone(UTC)
 
 
-def is_due(cron_expression: str, last_run: datetime | None, now: datetime, tz: ZoneInfo | None = None) -> bool:
-    """Return True if the cron schedule is due at `now` relative to `last_run`."""
-    if last_run is None:
-        return True
-    nxt = next_run_after(cron_expression, last_run, tz)
+# After a failed launch, wait this long before retrying — independent of
+# the cron schedule, so a transient failure on an infrequent cron (e.g.
+# weekly) doesn't sit unretried for a week, and so a persistently failing
+# launch (a bad setting, an outage) doesn't retry on every single poll tick.
+FAILED_LAUNCH_BACKOFF_MINUTES = 10
+
+
+def is_due(cron_expression: str, since: datetime, now: datetime, tz: ZoneInfo | None = None) -> bool:
+    """Return True if the cron schedule has a due occurrence between `since` and `now`.
+
+    `since` must be a real point in time to compute the next occurrence
+    from — the scan's creation time if it has never completed a run. There
+    is no "always due" case: a schedule like `0 7 * * 1` must wait for its
+    own next Monday-07:00 occurrence, even for a scan created seconds ago.
+    """
+    nxt = next_run_after(cron_expression, since, tz)
     return nxt <= now
 
 
-def should_trigger_scan(scan: Any, now: datetime, default_tz: ZoneInfo | None = None) -> bool:
-    """Return True if `scan` should be triggered at `now`."""
+def should_trigger_scan(
+    scan: Any,
+    now: datetime,
+    default_tz: ZoneInfo | None = None,
+    last_failed_at: datetime | None = None,
+) -> bool:
+    """Return True if `scan` should be triggered at `now`.
+
+    `last_failed_at` is when the most recent *failed* launch attempt for
+    this scan was recorded as failed — `RepoScanResult.completed_at`,
+    falling back to `started_at` (see `run_one_tick`). completed_at, not
+    started_at, is what the backoff window must count from: started_at is
+    stamped before the launch attempt even begins, so a launch that hangs
+    longer than FAILED_LAUNCH_BACKOFF_MINUTES before finally raising would
+    already be past its own backoff window the instant the failure is
+    written, letting it retry on the very next tick regardless. It is
+    intentionally not `scan.last_scan_at` — that field is only set on
+    success, so relying on it alone would let a failing launch retry on
+    every single poll tick forever, with no backoff, until it happens to
+    succeed.
+    """
     if not scan.is_enabled:
         return False
     if not scan.cron_schedule:
         return False
+    if last_failed_at is not None:
+        backoff_until = last_failed_at + timedelta(minutes=FAILED_LAUNCH_BACKOFF_MINUTES)
+        if now < backoff_until:
+            return False
     tz = _resolve_tz(scan.cron_timezone) if scan.cron_timezone else default_tz
-    return is_due(scan.cron_schedule, scan.last_scan_at, now, tz)
+    # The anchor must be the *later* of last_scan_at and enabled_at, not
+    # just "prefer last_scan_at" — a scan disabled through one or more
+    # scheduled occurrences and then re-enabled has a last_scan_at from
+    # before that gap, which is older than enabled_at and would make it
+    # look overdue and fire immediately on the next tick. enabled_at alone
+    # (not created_at) covers a scan that has never had a successful run —
+    # a scan created disabled, or re-enabled before ever completing one,
+    # must wait for its next occurrence from when it actually became
+    # enabled, since created_at would already be in the past for any
+    # missed window. Falling back to created_at only covers scans that
+    # predate the enabled_at column and somehow missed the migration's
+    # backfill.
+    candidates = [t for t in (scan.last_scan_at, scan.enabled_at) if t is not None]
+    since = max(candidates) if candidates else scan.created_at
+    return is_due(scan.cron_schedule, since, now, tz)
 
 
 # ── Lock helpers ──────────────────────────────────────────────────────────────
@@ -179,8 +227,94 @@ async def run_one_tick(db_factory: Any) -> None:
         tz_setting = await session.get(SystemSetting, "default_cron_timezone")
         default_tz = _resolve_tz(tz_setting.value if tz_setting else None)
 
+        # Only scans that could actually be triggered this tick need a
+        # backoff lookup — should_trigger_scan already returns False before
+        # reaching it for anything disabled or scheduleless. Restricting the
+        # window query to these scans keeps it bounded by the number of
+        # active schedules rather than the whole (ever-growing) results
+        # table, which run_one_tick otherwise scans in full every poll tick.
+        # Filtered via IN (SELECT ...) against RepoScan directly rather than
+        # an IN-list of literal ids: a literal list needs one bind parameter
+        # per candidate scan, which can exceed the driver's bind-parameter
+        # ceiling (SQLite's default is 32766) once the fleet has enough
+        # active schedules — at that point every tick would fail outright
+        # instead of launching anything. The subquery form has no such
+        # ceiling regardless of candidate count.
+        has_candidate_scans = any(s.is_enabled and s.cron_schedule for s in scans)
+
+        last_failed_attempt_by_scan: dict[int, datetime] = {}
+        if has_candidate_scans:
+            # Details of each candidate scan's most recent result, keyed by
+            # scan — needed to tell whether that most recent attempt was a
+            # launch failure (see should_trigger_scan's
+            # last_failed_at docstring). A plain MAX(started_at)
+            # WHERE status='failed' would be wrong here: if a scan failed
+            # and then later succeeded, that query would still return the
+            # old failure and incorrectly hold the scan in backoff even
+            # though its most recent attempt actually succeeded. Ranking is
+            # still by started_at (identifies which result is the most
+            # recent *attempt*, regardless of outcome) — but the timestamp
+            # used for the backoff window itself must be completed_at, when
+            # the failure was actually recorded. A launch that hangs for
+            # longer than FAILED_LAUNCH_BACKOFF_MINUTES before raising would
+            # otherwise already be past its own backoff window the instant
+            # the failure is written, since started_at predates the launch
+            # attempt entirely. started_at is kept as a fallback for a
+            # failed result that somehow has no completed_at.
+            result_rank = (
+                func.row_number()
+                .over(
+                    partition_by=RepoScanResult.repo_scan_id,
+                    order_by=(RepoScanResult.started_at.desc(), RepoScanResult.id.desc()),
+                )
+                .label("rank")
+            )
+            ranked_results = (
+                select(
+                    RepoScanResult.repo_scan_id,
+                    RepoScanResult.status,
+                    RepoScanResult.started_at,
+                    RepoScanResult.completed_at,
+                    result_rank,
+                )
+                .where(
+                    RepoScanResult.repo_scan_id.in_(
+                        select(RepoScan.id).where(
+                            RepoScan.is_enabled.is_(True),
+                            # Must match should_trigger_scan's `if not
+                            # scan.cron_schedule: return False` exactly —
+                            # that's falsy for both NULL and "" (the API
+                            # schema allows cron_schedule="" through as a
+                            # plain str | None with no validator rejecting
+                            # it). Excluding only NULL here would rank
+                            # every enabled scan with an empty schedule too,
+                            # re-creating the full-table cost this filter
+                            # exists to avoid once such scans have
+                            # substantial manual-trigger history.
+                            RepoScan.cron_schedule.isnot(None),
+                            RepoScan.cron_schedule != "",
+                        )
+                    )
+                )
+                .subquery()
+            )
+            latest_rows = await session.execute(
+                select(
+                    ranked_results.c.repo_scan_id,
+                    ranked_results.c.status,
+                    ranked_results.c.started_at,
+                    ranked_results.c.completed_at,
+                )
+                .where(ranked_results.c.rank == 1)
+            )
+            last_failed_attempt_by_scan = {
+                scan_id: completed_at or started_at
+                for scan_id, status, started_at, completed_at in latest_rows
+                if status == RepoScanStatus.failed
+            }
+
     for scan in scans:
-        if should_trigger_scan(scan, now, default_tz):
+        if should_trigger_scan(scan, now, default_tz, last_failed_attempt_by_scan.get(scan.id)):
             await trigger_scan(scan, db_factory)
 
 

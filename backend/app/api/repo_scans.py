@@ -189,6 +189,7 @@ async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -
         notify_recipients=body.notify_recipients,
         config_template_id=body.config_template_id,
         is_enabled=body.is_enabled,
+        enabled_at=utcnow() if body.is_enabled else None,
         scan_flags=body.scan_flags,
         subfolder=body.subfolder,
         scan_config_hash=compute_scan_config_hash(body.scan_flags, body.subfolder, body.config_template_id),
@@ -367,8 +368,14 @@ async def update_repo_scan(scan_id: int, body: RepoScanUpdate, db: DbDep, _: Ope
     updates = body.model_dump(exclude_unset=True)
     if updates.get("credential_id") is not None and not await db.get(RepoCredential, updates["credential_id"]):
         raise HTTPException(404, "Credential not found")
+    # A disabled scan re-enabled after missing one or more scheduled
+    # occurrences must wait for its *next* one, not fire immediately because
+    # created_at is already in the past — see should_trigger_scan.
+    newly_enabled = updates.get("is_enabled") is True and not scan.is_enabled
     for k, v in updates.items():
         setattr(scan, k, v)
+    if newly_enabled:
+        scan.enabled_at = utcnow()
     _CONFIG_FIELDS = {"scan_flags", "subfolder", "config_template_id"}
     if _CONFIG_FIELDS & set(updates):
         scan.scan_config_hash = compute_scan_config_hash(

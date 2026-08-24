@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "dc0f75bde427"
+HEAD_REVISION = "32fdcda2b0de"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -977,6 +977,112 @@ class TestAcceptanceEventBackfill:
                 sa.text("SELECT count(*) FROM finding_acceptance_events")
             ).scalar()
         assert count == 0
+
+
+class TestRepoScansEnabledAtBackfill:
+    """32fdcda2b0de backfills enabled_at = created_at for already-enabled
+    repo scans, so the scheduler's fallback due-time anchor doesn't silently
+    change for scans that existed before this column did.
+
+    Seeded before the migration under test, same rationale as
+    TestAcceptanceEventBackfill: an upgrade against an empty database
+    backfills nothing and would pass regardless of whether the logic works.
+    """
+
+    PRE_ENABLED_AT_REVISION = "dc0f75bde427"
+
+    @staticmethod
+    def _seed_pre_migration_rows(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,"
+                    "is_enabled,created_at,updated_at) VALUES "
+                    "(1,'enabled','https://example.invalid/e','main','high',true,"
+                    "'2026-01-01 08:00:00',now())"
+                ))
+                # Disabled: must be left NULL, not backfilled from created_at —
+                # it isn't scheduling and has no real "enabled since" to report.
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,"
+                    "is_enabled,created_at,updated_at) VALUES "
+                    "(2,'disabled','https://example.invalid/d','main','high',false,"
+                    "'2026-01-02 09:00:00',now())"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def backfilled(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_ENABLED_AT_REVISION).returncode == 0
+        self._seed_pre_migration_rows(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_enabled_scan_gets_enabled_at_from_created_at(self, backfilled):
+        with backfilled.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT enabled_at FROM repo_scans WHERE id = 1"
+            )).one()
+        assert row.enabled_at.strftime("%Y-%m-%d %H:%M") == "2026-01-01 08:00"
+
+    def test_disabled_scan_is_left_null(self, backfilled):
+        with backfilled.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT enabled_at FROM repo_scans WHERE id = 2"
+            )).one()
+        assert row.enabled_at is None
+
+    def test_rerunning_the_migration_does_not_error_on_an_untouched_row(self, postgres_url, backfilled):
+        """The stamp-and-rerun recovery procedure documented in CLAUDE.md
+        replays this migration against a database that already has the
+        column and the backfilled value — add_column must not error a
+        second time."""
+        assert alembic(postgres_url, "stamp", self.PRE_ENABLED_AT_REVISION).returncode == 0
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        with backfilled.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT enabled_at FROM repo_scans WHERE id = 1"
+            )).one()
+        assert row.enabled_at.strftime("%Y-%m-%d %H:%M") == "2026-01-01 08:00"
+
+    def test_rerunning_the_migration_does_not_overwrite_a_real_re_enable(self, postgres_url, backfilled):
+        """A scan can be disabled and re-enabled by the application in the
+        time between the first migration run and a later replay via the
+        stamp-and-rerun recovery procedure — that gives it a real, newer
+        enabled_at than the one the first run backfilled from created_at.
+
+        The backfill's WHERE clause must require enabled_at IS NULL, not
+        just is_enabled: without it, a replay unconditionally overwrites
+        every enabled row with created_at again, silently destroying a
+        legitimate activation timestamp and making should_trigger_scan
+        think the scan has been enabled since day one rather than since
+        its real, later re-enable."""
+        newer_enabled_at = "2026-03-15 10:30:00"
+        with backfilled.connect() as conn:
+            conn.execute(sa.text(
+                "UPDATE repo_scans SET is_enabled = false, enabled_at = NULL WHERE id = 1"
+            ))
+            conn.execute(sa.text(
+                "UPDATE repo_scans SET is_enabled = true, enabled_at = :ts WHERE id = 1"
+            ), {"ts": newer_enabled_at})
+
+        assert alembic(postgres_url, "stamp", self.PRE_ENABLED_AT_REVISION).returncode == 0
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        with backfilled.connect() as conn:
+            row = conn.execute(sa.text(
+                "SELECT enabled_at FROM repo_scans WHERE id = 1"
+            )).one()
+        assert row.enabled_at.strftime("%Y-%m-%d %H:%M:%S") == newer_enabled_at, (
+            f"replay overwrote the real re-enable timestamp: got {row.enabled_at}"
+        )
 
 
 class TestDeleteCascadeBehaviour:
