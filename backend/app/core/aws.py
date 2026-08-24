@@ -94,7 +94,7 @@ async def build_scan_task_env(scan: Any, result_id: int, credential: Any = None)
         "CREDENTIAL_TYPE": cred_type.value,
         "CREDENTIAL_SECRET_ARN": "" if local_arn else (cred_arn or ""),
         "CREDENTIAL_VALUE": cred_arn[len("local://"):] if local_arn else "",
-        "FLEET_API_URL": app_settings.fleet_base_url,
+        "FLEET_API_URL": app_settings.resolved_scan_task_fleet_url,
         "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
         "PA_CONFIG_TOML": "",  # filled by caller if config template assigned
         "PA_SCAN_FLAGS": getattr(scan, 'scan_flags', None) or "",

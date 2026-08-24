@@ -526,25 +526,26 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
     await db.flush()
 
     local_arn = (cred_arn or "").startswith("local://")
-    task_env = {
-        "PA_VERSION": pa_version,
-        "REPO_SCAN_RESULT_ID": str(result.id),
-        "REPO_URL": scan.url,
-        "BRANCH": scan.branch,
-        "CREDENTIAL_TYPE": cred_type.value,
-        "CREDENTIAL_SECRET_ARN": "" if local_arn else (cred_arn or ""),
-        "CREDENTIAL_VALUE": cred_arn[len("local://"):] if local_arn else "",
-        "FLEET_API_URL": app_settings.fleet_base_url,
-        "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
-        "PA_CONFIG_TOML": config_toml,
-        "PA_SCAN_FLAGS": scan.scan_flags or "",
-        "PA_SUBFOLDER": scan.subfolder or "",
-    }
     try:
+        task_env = {
+            "PA_VERSION": pa_version,
+            "REPO_SCAN_RESULT_ID": str(result.id),
+            "REPO_URL": scan.url,
+            "BRANCH": scan.branch,
+            "CREDENTIAL_TYPE": cred_type.value,
+            "CREDENTIAL_SECRET_ARN": "" if local_arn else (cred_arn or ""),
+            "CREDENTIAL_VALUE": cred_arn[len("local://"):] if local_arn else "",
+            "FLEET_API_URL": app_settings.resolved_scan_task_fleet_url,
+            "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
+            "PA_CONFIG_TOML": config_toml,
+            "PA_SCAN_FLAGS": scan.scan_flags or "",
+            "PA_SUBFOLDER": scan.subfolder or "",
+        }
         if app_settings.local_docker_scan:
             from app.core.docker_runner import run_local_scan
-            fleet_url = app_settings.scan_task_fleet_url or "http://host.docker.internal:8000"
-            task_arn = await run_local_scan(app_settings.scan_task_image, task_env, fleet_url)
+            task_arn = await run_local_scan(
+                app_settings.scan_task_image, task_env, app_settings.resolved_scan_task_fleet_url
+            )
         else:
             ecs = EcsClient(region_name=app_settings.aws_region)
             subnet_ids = [s.strip() for s in app_settings.scan_task_subnet_ids.split(",") if s.strip()]

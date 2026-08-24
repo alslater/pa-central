@@ -259,3 +259,25 @@ Users currently have no way to reset their own password if they forget it — th
 **Files affected:** new `backend/app/api/auth.py` endpoints (`forgot-password`, `reset-password`), `backend/app/core/email.py` (new email template, following `build_findings_email`/`build_failure_email`), a new token store (Redis or DB table + migration), `frontend/src/pages/Login.tsx` (or wherever the login form lives) for the "Forgot password?" entry point and reset-token landing page, `frontend/src/lib/api.ts`.
 
 **Trigger:** When SMTP configuration is in place for at least one deployment and a user without admin access has actually been locked out.
+
+---
+
+### Scheduler fires immediately (and on every tick) for a scan with no prior run, ignoring its cron schedule entirely
+
+`is_due()` in `backend/app/scheduler/scheduler.py` treats `scan.last_scan_at is None` as "always due":
+
+```python
+def is_due(cron_expression, last_run, now, tz=None):
+    if last_run is None:
+        return True
+    nxt = next_run_after(cron_expression, last_run, tz)
+    return nxt <= now
+```
+
+This means a freshly created (or newly enabled) `RepoScan` is triggered on the very next scheduler poll, regardless of its `cron_schedule` — a scan configured for `0 7 * * 1` (Monday 07:00) will instead fire the moment the scheduler next ticks, at whatever time that happens to be. Worse, `last_scan_at` is only set on a **successful** launch (`trigger_scan`'s success branch); if the launch fails for any reason (an exception before that point — a bad setting, ECS throttling, a transient network error), `last_scan_at` stays `None` and the scan re-fires on *every subsequent tick* — once per `SCHEDULER_POLL_INTERVAL` (default 60s) — until a launch finally succeeds or the scan is disabled. This was observed directly: a scan with no prior results hit an unrelated `AttributeError` on every 60-second tick for ~15 minutes, producing 15 consecutive failed `RepoScanResult` rows, all outside its configured cron window.
+
+**Proposed solution:** compute the first-ever due time from `scan.created_at` (or the time it was last enabled, if that's tracked) via the existing `next_run_after`, rather than short-circuiting to `True`. A scan should wait for its true next cron occurrence like any other tick, whether or not it has run before. Separately, consider whether a launch failure should back off (e.g. skip re-attempting for N minutes) rather than retrying on the very next tick indefinitely — the current behavior turns any transient launch error into a tight retry loop with no cap.
+
+**Files affected:** `backend/app/scheduler/scheduler.py` (`is_due`, `should_trigger_scan`), `backend/tests/test_scheduler.py`.
+
+**Trigger:** Noticed 2026-08-24 while restarting the scheduler process after an unrelated code change; not scoped for the current branch.

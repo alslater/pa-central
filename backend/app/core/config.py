@@ -79,9 +79,6 @@ class Settings(BaseSettings):
     scan_task_subnet_ids: str = ""   # comma-separated
     scan_task_security_group_ids: str = ""  # comma-separated
 
-    # URL this fleet app is reachable at (used by scan tasks to POST results back)
-    fleet_base_url: str = "http://localhost:8000"
-
     # System API key for scan tasks and scheduler auth
     fleet_system_api_key: str | None = None
 
@@ -89,8 +86,31 @@ class Settings(BaseSettings):
     local_docker_scan: bool = False
     # Image name built from docker/scan_task/
     scan_task_image: str = "pa-central-scan-task:latest"
-    # Override fleet URL for containers (defaults to host.docker.internal when unset)
+
+    # URL scan task containers POST results back to. Defaults to
+    # host.docker.internal (the Docker bridge gateway) under
+    # LOCAL_DOCKER_SCAN=true, since the scan container and this server are
+    # known to share a host there; ECS tasks have no such default, since they
+    # run on separate infrastructure, so this must be set explicitly in that
+    # mode.
     scan_task_fleet_url: str | None = None
+
+    @property
+    def resolved_scan_task_fleet_url(self) -> str:
+        if self.scan_task_fleet_url:
+            return self.scan_task_fleet_url
+        if self.local_docker_scan:
+            return "http://host.docker.internal:8000"
+        # Unlike local Docker mode, an ECS task shares no network with this
+        # server, so there is no default that could ever be correct.
+        # Falling back to localhost would let the task launch successfully
+        # and then silently fail to report results (or report them
+        # somewhere meaningless) instead of failing at launch time, where
+        # the cause is obvious.
+        raise RuntimeError(
+            "SCAN_TASK_FLEET_URL must be set to this server's reachable URL "
+            "when launching ECS scan tasks (LOCAL_DOCKER_SCAN is not set)."
+        )
 
     # Ceiling on how long startup waits to acquire the PostgreSQL migration
     # advisory lock before failing (seconds; unused on SQLite). Generous
