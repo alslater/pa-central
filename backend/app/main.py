@@ -322,6 +322,21 @@ async def lifespan(app: FastAPI):
     await _run_migrations()
     await bootstrap_admin()
     yield
+    # Let in-flight password reset emails finish before the loop goes away.
+    # They are detached tasks (see dispatch_reset_email), so a restart would
+    # otherwise cancel them after the endpoint has already answered 202 — the
+    # token stays live and holds the cooldown, so the recipient gets no email
+    # and cannot request another.
+    from app.services.password_reset import drain_pending_sends
+
+    await drain_pending_sends()
+
+    # Release the SMTP executor's threads once nothing is left to send. Best
+    # effort, not a guarantee — see shutdown_send_executor's docstring for
+    # why a thread already blocked in smtplib cannot be forced to stop.
+    from app.core.email import shutdown_send_executor
+
+    await shutdown_send_executor()
 
 
 async def bootstrap_admin() -> None:

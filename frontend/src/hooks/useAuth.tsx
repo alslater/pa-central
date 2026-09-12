@@ -7,6 +7,11 @@ interface AuthCtx {
   login: (email: string, password: string) => Promise<TotpChallenge | null>
   completeTotp: (sessionToken: string, code: string) => Promise<void>
   logout: () => void
+  /** Installs a replacement access token without a full re-login — for
+   *  PATCH /users/{id}'s own access_token, returned when the caller just
+   *  changed their own password (which invalidates the token that
+   *  authenticated that very request). */
+  setToken: (accessToken: string) => void
 }
 
 const Ctx = createContext<AuthCtx>(null!)
@@ -50,5 +55,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
   }
 
-  return <Ctx.Provider value={{ user, loading, login, completeTotp, logout }}>{children}</Ctx.Provider>
+  const setToken = (accessToken: string) => {
+    localStorage.setItem('token', accessToken)
+  }
+
+  return <Ctx.Provider value={{ user, loading, login, completeTotp, logout, setToken }}>{children}</Ctx.Provider>
 }

@@ -52,6 +52,33 @@ class TestLogin:
         assert r.status_code == 200
         assert "access_token" in r.json()
 
+    async def test_login_json_rejects_a_password_over_bcrypt_limit(self, client, admin_user):
+        """bcrypt hashes only the first 72 bytes of its input and raises
+        ValueError past that. Reproduced before the schema-level guard
+        existed: this request reached bcrypt.checkpw() unvalidated and
+        crashed with an unhandled 500 instead of a clean validation error."""
+        r = await client.post(
+            "/api/auth/login",
+            json={"email": "admin@example.com", "password": "a" * 100},
+        )
+        assert r.status_code == 422
+
+    async def test_oauth_token_endpoint_rejects_a_password_over_bcrypt_limit(
+        self, client, admin_user
+    ):
+        """OAuth2PasswordRequestForm is not a Pydantic model this codebase
+        controls, so the schema-level guard above cannot reach this
+        endpoint — core.security's own length check is what stops it
+        reaching bcrypt.checkpw() and crashing here. A too-long password is
+        indistinguishable from any other wrong password: 401, not 500 or a
+        different error that would disclose the length limit."""
+        r = await client.post(
+            "/api/auth/token",
+            data={"username": "admin@example.com", "password": "a" * 100},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 401
+
 
 @pytest.mark.asyncio
 class TestMe:
@@ -90,6 +117,20 @@ class TestRegister:
             "email": "sneaky@example.com", "display_name": "S", "password": "Password1!abcd", "role": "viewer"
         }, headers=auth(viewer_token))
         assert r.status_code == 403
+
+    async def test_register_rejects_a_password_over_the_bcrypt_limit(
+        self, client, admin_token
+    ):
+        """bcrypt hashes only the first 72 bytes of its input and raises
+        ValueError past that. Reproduced before this schema-level guard
+        existed: this request reached hash_password -> bcrypt.hashpw()
+        unvalidated and would have crashed with an unhandled 500 instead of
+        a clean 422."""
+        r = await client.post("/api/auth/register", json={
+            "email": "toolong@example.com", "display_name": "Too Long",
+            "password": "a" * 100, "role": "viewer",
+        }, headers=auth(admin_token))
+        assert r.status_code == 422
 
 
 @pytest.mark.asyncio

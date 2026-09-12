@@ -34,8 +34,9 @@ vi.mock('@/lib/api', () => ({
       trigger:     vi.fn(),
     },
     repoCredentials: { list: vi.fn() },
-    systemSettings:  { list: vi.fn() },
+    systemSettings:  { list: vi.fn(), passwordResetReadiness: vi.fn() },
     users:           { list: vi.fn() },
+    auth:            { passwordResetConfig: vi.fn() },
   },
 }))
 
@@ -67,6 +68,7 @@ function setRole(role: User['role'] | null) {
     login: vi.fn(),
     completeTotp: vi.fn(),
     logout: vi.fn(),
+    setToken: vi.fn(),
   })
 }
 
@@ -228,6 +230,9 @@ describe('Configs page — assign and delete template buttons', () => {
 describe('Users page — add user button', () => {
   beforeEach(() => {
     vi.mocked(api.users.list).mockResolvedValue([])
+    // Users reads this on mount to decide whether Add User offers a welcome
+    // link or a password field; an unresolved mock throws during render.
+    vi.mocked(api.auth.passwordResetConfig).mockResolvedValue({ self_service_enabled: false })
   })
 
   it('shows Add user for admin', async () => {
@@ -297,6 +302,7 @@ describe('RepoScans page — action buttons', () => {
 describe('SystemSettings page — save button', () => {
   beforeEach(() => {
     vi.mocked(api.systemSettings.list).mockResolvedValue([])
+    vi.mocked(api.systemSettings.passwordResetReadiness).mockResolvedValue({ ready: false, reasons: [] })
   })
 
   it('shows Save for admin', async () => {
