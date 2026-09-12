@@ -24,6 +24,9 @@ vi.mock('@/lib/api', () => ({
     },
     auth: {
       register: vi.fn(),
+      // Users mounts a one-off config read to decide whether Add User offers
+      // a welcome link or a password field.
+      passwordResetConfig: vi.fn(),
     },
   },
 }))
@@ -65,11 +68,12 @@ const DEVELOPER: User = { ...TARGET, role: 'developer' }
 function setup({ totpEnabled = false, withOther = false, as = ADMIN } = {}) {
   vi.mocked(useAuth).mockReturnValue({
     user: as, loading: false,
-    login: vi.fn(), completeTotp: vi.fn(), logout: vi.fn(),
+    login: vi.fn(), completeTotp: vi.fn(), logout: vi.fn(), setToken: vi.fn(),
   })
   const list = [ADMIN, totpEnabled ? TARGET_TOTP : TARGET]
   if (withOther) list.push(OTHER)
   vi.mocked(api.users.list).mockResolvedValue(list)
+  vi.mocked(api.auth.passwordResetConfig).mockResolvedValue({ self_service_enabled: false })
   // Unexpected fetch calls throw so they surface as real test failures rather
   // than silently becoming "Unauthorized" UI noise.
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: unknown) => {

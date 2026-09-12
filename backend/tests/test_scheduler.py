@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from app.models import (
     AlertSeverity,
@@ -786,3 +787,185 @@ class TestAcceptanceEventCascadeDelete:
             select(FindingAcceptanceEvent).where(FindingAcceptanceEvent.finding_record_id == old_finding.id)
         )).scalars().all()
         assert events == []
+
+
+# ── Password reset token pruning ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestPasswordResetTokenPruning:
+    """prune_old_results deletes reset tokens past expiry *plus* a grace
+    period.
+
+    Run against a real database rather than a mocked session on purpose: the
+    behaviour under test is a SQL cutoff comparison, and a mock never
+    evaluates it. Nothing else covered this — the only existing assertion
+    compares the two constants arithmetically, so a reversed operator or a
+    dropped grace interval would have deleted live tokens without failing
+    anything.
+
+    The grace period is not incidental. Rows are the rate-limit ledger the
+    public throttle counts (see prepare_reset_email), and pruning one still
+    inside the rate-limit window would hand an attacker a fresh quota; a
+    just-expired row also lets a user clicking a stale link be told it
+    expired rather than that it never existed.
+    """
+
+    @pytest_asyncio.fixture
+    async def db_factory(self, tmp_path):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.core.database import Base
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/prune.db")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+        await engine.dispose()
+
+    async def _seed(self, factory, ages: dict[str, timedelta]) -> int:
+        """Create one token per entry, `expires_at` offset from now by the
+        given delta (negative = already expired). Returns the user id."""
+        from app.core.security import hash_password
+        from app.models import PasswordResetToken, User, UserRole, utcnow
+
+        async with factory() as session:
+            user = User(
+                email="prune@example.com", display_name="Prune",
+                hashed_password=hash_password("password123456"),
+                role=UserRole.viewer, is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+            for name, offset in ages.items():
+                session.add(PasswordResetToken(
+                    token_hash=name.ljust(64, "0"),
+                    user_id=user.id,
+                    created_at=utcnow() - timedelta(days=1),
+                    expires_at=utcnow() + offset,
+                ))
+            await session.commit()
+            return user.id
+
+    async def _surviving(self, factory) -> set[str]:
+        from sqlalchemy import select
+
+        from app.models import PasswordResetToken
+
+        async with factory() as session:
+            rows = (await session.execute(select(PasswordResetToken))).scalars().all()
+        return {r.token_hash.rstrip("0") for r in rows}
+
+    async def test_keeps_live_and_recently_expired_tokens(self, db_factory):
+        """Only rows past expiry + grace may go. A live token being deleted
+        would strand a user mid-reset; a recently expired one being deleted
+        turns "this link expired" into "invalid link"."""
+        from app.scheduler.scheduler import prune_old_results
+        from app.services.password_reset import RESET_TOKEN_PRUNE_GRACE_HOURS
+
+        grace = RESET_TOKEN_PRUNE_GRACE_HOURS
+        await self._seed(db_factory, {
+            "live": timedelta(minutes=30),
+            "justexpired": timedelta(minutes=-1),
+            "midgrace": timedelta(hours=-(grace / 2)),
+            "insidegrace": timedelta(hours=-(grace - 1)),
+        })
+
+        await prune_old_results(db_factory)
+
+        assert await self._surviving(db_factory) == {
+            "live", "justexpired", "midgrace", "insidegrace",
+        }
+
+    async def test_deletes_tokens_beyond_the_grace_period(self, db_factory):
+        from app.scheduler.scheduler import prune_old_results
+        from app.services.password_reset import RESET_TOKEN_PRUNE_GRACE_HOURS
+
+        grace = RESET_TOKEN_PRUNE_GRACE_HOURS
+        await self._seed(db_factory, {
+            "keep": timedelta(hours=-(grace - 1)),
+            "pastgrace": timedelta(hours=-(grace + 1)),
+            "ancient": timedelta(days=-90),
+        })
+
+        await prune_old_results(db_factory)
+
+        assert await self._surviving(db_factory) == {"keep"}
+
+    async def test_the_cutoff_is_expiry_plus_grace_not_expiry_alone(self, db_factory):
+        """Pins the grace interval itself. Dropping it — pruning at expiry —
+        leaves this the only failing test, since every other case sits well
+        clear of the boundary."""
+        from app.scheduler.scheduler import prune_old_results
+        from app.services.password_reset import RESET_TOKEN_PRUNE_GRACE_HOURS
+
+        grace = RESET_TOKEN_PRUNE_GRACE_HOURS
+        await self._seed(db_factory, {
+            "expiredonly": timedelta(hours=-(grace - 2)),
+        })
+
+        await prune_old_results(db_factory)
+
+        assert await self._surviving(db_factory) == {"expiredonly"}, (
+            "a token expired but still inside the grace period was pruned"
+        )
+
+    async def test_a_used_token_inside_the_grace_period_is_kept(self, db_factory):
+        """Used rows prune on the same schedule, not immediately: they are
+        still the rate-limit ledger, and keeping one briefly gives a clearer
+        message on a double-clicked link."""
+        from sqlalchemy import select
+
+        from app.models import PasswordResetToken, utcnow
+        from app.scheduler.scheduler import prune_old_results
+        from app.services.password_reset import RESET_TOKEN_PRUNE_GRACE_HOURS
+
+        await self._seed(db_factory, {
+            "used": timedelta(hours=-(RESET_TOKEN_PRUNE_GRACE_HOURS - 1)),
+        })
+        async with db_factory() as session:
+            row = (await session.execute(select(PasswordResetToken))).scalar_one()
+            row.used_at = utcnow()
+            await session.commit()
+
+        await prune_old_results(db_factory)
+
+        assert await self._surviving(db_factory) == {"used"}
+
+    async def test_pruning_never_reaches_inside_the_rate_limit_window(self, db_factory):
+        """The throttle counts rows by `created_at` within the last hour. A
+        token created inside that window must survive, whatever its expiry —
+        otherwise pruning hands an attacker a fresh quota."""
+        from app.core.security import hash_password
+        from app.models import PasswordResetToken, User, UserRole, utcnow
+        from app.scheduler.scheduler import prune_old_results
+        from app.services.password_reset import RESET_REQUEST_WINDOW_SECONDS
+
+        async with db_factory() as session:
+            user = User(
+                email="window@example.com", display_name="Window",
+                hashed_password=hash_password("password123456"),
+                role=UserRole.viewer, is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+            # Created just now, but with the shortest expiry the app issues.
+            session.add(PasswordResetToken(
+                token_hash="recent".ljust(64, "0"),
+                user_id=user.id,
+                created_at=utcnow(),
+                expires_at=utcnow() + timedelta(minutes=60),
+            ))
+            await session.commit()
+
+        await prune_old_results(db_factory)
+
+        assert await self._surviving(db_factory) == {"recent"}
+        # And the guarantee stated as arithmetic, so a constant change that
+        # breaks it fails here rather than silently in production.
+        from app.services.password_reset import (
+            RESET_TOKEN_PRUNE_GRACE_HOURS,
+            RESET_TOKEN_TTL_MINUTES,
+        )
+        assert (
+            RESET_TOKEN_TTL_MINUTES * 60 + RESET_TOKEN_PRUNE_GRACE_HOURS * 3600
+        ) > RESET_REQUEST_WINDOW_SECONDS

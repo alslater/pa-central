@@ -9,7 +9,7 @@ vi.mock('@/hooks/useAuth', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    systemSettings: { list: vi.fn(), update: vi.fn() },
+    systemSettings: { list: vi.fn(), update: vi.fn(), passwordResetReadiness: vi.fn() },
   },
 }))
 
@@ -26,6 +26,7 @@ function renderPage() {
 beforeEach(() => {
   vi.mocked(useAuth).mockReturnValue({ user: mockAdmin } as any)
   vi.mocked(api.systemSettings.update).mockResolvedValue([])
+  vi.mocked(api.systemSettings.passwordResetReadiness).mockResolvedValue({ ready: false, reasons: [] })
 })
 
 describe('SystemSettings — synthesized runtime defaults', () => {

@@ -1,6 +1,7 @@
 """Tests for GET/PATCH /api/system-settings."""
 import pytest
 
+from app.core.email import MAX_SMTP_TIMEOUT_SECONDS
 from tests.conftest import auth
 
 
@@ -20,6 +21,38 @@ class TestSystemSettings:
         assert r.status_code == 200
         settings = {s["key"]: s for s in r.json()}
         assert settings["pa_version"]["value"] == "1.2.3"
+
+    async def test_an_unrelated_patch_seeds_the_reset_flag_with_its_real_type(
+        self, client, admin_token
+    ):
+        """patch_settings takes a lock on self_service_password_reset before
+        touching anything else, on *every* PATCH regardless of which keys it
+        actually names — and that lock's own upsert seeds the row if it
+        doesn't exist yet (see its own comment for why: an absent row is a
+        no-op to lock). The upsert's raw INSERT hardcoded value_type='string'
+        even though KEY_TYPES declares this key as bool, so a completely
+        unrelated PATCH on a fresh database — this one only ever mentions
+        pa_version — used to leave GET /system-settings reporting the wrong
+        type for self_service_password_reset until an admin happened to PATCH
+        that key directly (the per-key update loop's own
+        `existing.value_type = vtype` only fires then). Reproduced directly
+        against the unfixed code: this exact PATCH left the row with
+        value_type="string".
+        """
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"pa_version": "1.2.3"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+        g = await client.get("/api/system-settings", headers=auth(admin_token))
+        settings = {s["key"]: s for s in g.json()}
+        assert settings["self_service_password_reset"]["value_type"] == "bool", (
+            "an unrelated PATCH seeded self_service_password_reset with the "
+            "wrong value_type — the lock's own upsert must use this key's "
+            "canonical type, not a generic placeholder"
+        )
 
     async def test_patch_updates_existing_setting(self, client, admin_token):
         await client.patch(
@@ -150,6 +183,325 @@ class TestSystemSettingsNonNegativeIntValidation:
         assert r.status_code == 200
         settings = {s["key"]: s for s in r.json()}
         assert settings["scan_result_retention_days"]["value"] == "30"
+
+
+@pytest.mark.asyncio
+class TestSystemSettingsTimeoutValidation:
+    """smtp_timeout_seconds feeds core.smtp_settings.parse_smtp_timeout,
+    which silently substitutes the 30s default for anything non-numeric,
+    non-finite, non-positive, or over MAX_SMTP_TIMEOUT_SECONDS — the same
+    class of gap POSITIVE_INT_KEYS/NON_NEGATIVE_INT_KEYS close for the
+    integer settings above. Unlike those, this key is stored as a plain
+    string (SettingValueType.string, not .int) because it must accept
+    decimals, so it never reached the generic int-validation branch and had
+    no shape validation of its own at all — reproduced directly before this
+    fix: "abc", "0", "-5", "nan", and "1e309" all saved with a 200 while
+    parse_smtp_timeout silently used 30s at read time regardless of what
+    was displayed as saved.
+    """
+
+    @pytest.mark.parametrize("bad_value", ["abc", "not-a-number", "nan", "NaN"])
+    async def test_rejects_non_numeric(self, client, admin_token, bad_value):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": bad_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+        assert "smtp_timeout_seconds" in r.json()["detail"]
+
+    @pytest.mark.parametrize("bad_value", ["0", "-5", "-0.1"])
+    async def test_rejects_non_positive(self, client, admin_token, bad_value):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": bad_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.parametrize("bad_value", ["inf", "Infinity", "1e309"])
+    async def test_rejects_non_finite_or_overflowing(self, client, admin_token, bad_value):
+        """"1e309" parses to float('inf') in Python — same failure mode as
+        the literal infinities, all three must be rejected identically."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": bad_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+
+    async def test_rejects_a_value_over_the_maximum(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": str(MAX_SMTP_TIMEOUT_SECONDS + 1)}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+
+    async def test_accepts_the_maximum(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": str(MAX_SMTP_TIMEOUT_SECONDS)}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+    async def test_accepts_a_decimal_value(self, client, admin_token):
+        """The whole reason this key is a string, not an int, is decimal
+        support (a sub-second timeout is meaningful) — the fix must not
+        regress that."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": "0.5"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+        settings = {s["key"]: s for s in r.json()}
+        assert settings["smtp_timeout_seconds"]["value"] == "0.5"
+
+    async def test_accepts_an_ordinary_integer_value(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": "45"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+        settings = {s["key"]: s for s in r.json()}
+        assert settings["smtp_timeout_seconds"]["value"] == "45"
+
+    async def test_accepts_clearing_the_value(self, client, admin_token):
+        """An absent/empty value means "use the default" — that is not an
+        error, and must remain a valid write (e.g. an admin reverting to
+        the default explicitly)."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_timeout_seconds": ""}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+    async def test_unrelated_updates_are_unaffected(self, client, admin_token):
+        """The validation must trigger only when smtp_timeout_seconds is
+        actually present in the request body — not on every PATCH."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"pa_version": "1.2.3"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+class TestSystemSettingsPortValidation:
+    """smtp_port is neither in POSITIVE_INT_KEYS nor NON_NEGATIVE_INT_KEYS
+    (see parse_smtp_port's own docstring for why), so the generic int
+    check alone only confirmed it parses as *an* integer — an
+    out-of-range value like "99999" or "-1" passed untouched, with a 200,
+    regardless of whether self_service_password_reset was even enabled.
+
+    That mattered beyond self-service reset: smtp_port is also read by
+    the independent scan-result-notification path
+    (api/ingest.py:224, build_smtp_config(settings_map)). With reset off,
+    an out-of-range port previously saved successfully, and
+    build_smtp_config then silently returned None for every subsequent
+    scan-result email — indistinguishable from SMTP never having been
+    configured at all, with no error surfaced anywhere. Reproduced
+    directly: self_service_password_reset off, PATCH
+    {"smtp_port": "99999"} returned 200, and
+    build_smtp_config({"smtp_port": "99999", ...}) returned None.
+    """
+
+    @pytest.mark.parametrize("bad_value", ["99999", "-1", "0", "65536"])
+    async def test_rejects_an_out_of_range_port_regardless_of_reset_state(
+        self, client, admin_token, bad_value
+    ):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_port": bad_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+        assert "smtp_port" in r.json()["detail"]
+
+    async def test_accepts_a_valid_port(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_port": "2525"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+        settings = {s["key"]: s for s in r.json()}
+        assert settings["smtp_port"]["value"] == "2525"
+
+    async def test_accepts_clearing_the_value(self, client, admin_token):
+        """An absent/cleared value means "use the 587 default" — that is
+        not an error, and must remain a valid write. Cleared via null:
+        smtp_port is an int-typed key, and an empty string fails the
+        generic int-type check further up in the same loop before this
+        check ever runs — that behaviour predates this fix and is
+        unrelated to it (every int-typed key rejects "", not just this
+        one); null is how the frontend itself clears an int field."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_port": None}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+    async def test_unrelated_updates_are_unaffected(self, client, admin_token):
+        """The validation must trigger only when smtp_port is actually
+        present in the request body — not on every PATCH."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"pa_version": "1.2.3"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+    async def test_a_bad_port_with_reset_off_and_an_unrelated_change_is_rejected(
+        self, client, admin_token
+    ):
+        """The exact scenario the finding describes: self-service reset
+        is off, and this PATCH doesn't even mention it — only the new
+        per-key check (not the reset_enabled-gated effective-value check,
+        which never runs when reset is off) can catch this."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {
+                "smtp_host": "smtp.example.com",
+                "smtp_port": "99999",
+                "finding_retention_days": "400",
+            }},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+        assert "smtp_port" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+class TestSystemSettingsTlsModeValidation:
+    """smtp_tls_mode feeds EmailService._send_sync, which only recognises
+    the exact strings "ssl" and "starttls" — anything else, including a
+    typo, falls through identically to plain, unencrypted smtplib.SMTP
+    with no starttls() upgrade at all. This key had no shape validation of
+    its own at all, so a typo such as "start-tls" previously saved
+    successfully with a 200 and silently sent password reset links over an
+    unencrypted connection. The frontend restricts this field to a fixed
+    dropdown, but that is not a backend guarantee — this endpoint accepts
+    arbitrary strings from any direct API caller.
+    """
+
+    @pytest.mark.parametrize("bad_value", ["start-tls", "STARTTLS", "tls", "SSL"])
+    async def test_rejects_an_unrecognised_value(self, client, admin_token, bad_value):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_tls_mode": bad_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+        assert "smtp_tls_mode" in r.json()["detail"]
+
+    @pytest.mark.parametrize("bad_value", [" ssl", "ssl ", " none", "starttls "])
+    async def test_rejects_a_whitespace_padded_variant_of_a_valid_value(
+        self, client, admin_token, bad_value
+    ):
+        """A padded variant is not auto-corrected — it must fail exactly
+        like an unrelated typo, not be silently trimmed into working."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_tls_mode": bad_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.parametrize("valid_value", ["none", "ssl", "starttls"])
+    async def test_accepts_every_valid_value(self, client, admin_token, valid_value):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_tls_mode": valid_value}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+        settings = {s["key"]: s for s in r.json()}
+        assert settings["smtp_tls_mode"]["value"] == valid_value
+
+    async def test_accepts_clearing_the_value(self, client, admin_token):
+        """An absent/empty value means "use the starttls default" — that
+        is not an error, and must remain a valid write."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_tls_mode": ""}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+    async def test_unrelated_updates_are_unaffected(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"pa_version": "1.2.3"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+class TestSystemSettingsFromAddrValidation:
+    """smtp_from is assigned straight to EmailMessage()["From"]
+    (core/email.py's build_password_reset_email) — Python's own email
+    module raises ValueError for a value containing a carriage return or
+    line feed (a header-injection vector), and that assignment happens
+    after the reset token has already been committed, or after
+    set_password has already invalidated the admin-reset target's
+    password. This key had no shape validation at all, so a value with an
+    embedded CR/LF previously saved successfully with a 200 and only
+    surfaced as an unhandled 500 the next time a real account actually
+    triggered issuance.
+    """
+
+    async def test_rejects_a_value_with_a_carriage_return(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_from": "pa\r\nBcc: evil@example.com"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+        assert "smtp_from" in r.json()["detail"]
+
+    async def test_rejects_a_value_with_a_bare_line_feed(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_from": "pa\nBcc: evil@example.com"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 400
+
+    async def test_accepts_an_ordinary_value(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_from": "pa-central@example.com"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+        settings = {s["key"]: s for s in r.json()}
+        assert settings["smtp_from"]["value"] == "pa-central@example.com"
+
+    async def test_accepts_clearing_the_value(self, client, admin_token):
+        """An absent/empty value means "use the default" — that is not an
+        error, and must remain a valid write."""
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"smtp_from": ""}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
+
+    async def test_unrelated_updates_are_unaffected(self, client, admin_token):
+        r = await client.patch(
+            "/api/system-settings",
+            json={"updates": {"pa_version": "1.2.3"}},
+            headers=auth(admin_token),
+        )
+        assert r.status_code == 200
 
 
 @pytest.mark.asyncio

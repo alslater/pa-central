@@ -71,7 +71,7 @@ function useLiveAlerts() {
   return { count, clear: () => setCount(0) }
 }
 
-function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show }: {
+export function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show }: {
   userId: number
   totpEnabled: boolean
   onClose: () => void
@@ -87,6 +87,8 @@ function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show 
   const [totpSaving, setTotpSaving] = useState(false)
   const [totpError, setTotpError] = useState<string | null>(null)
 
+  const { setToken } = useAuth()
+
   const savePassword = async () => {
     if (next.length < 12) { setPwError('Password must be at least 12 characters'); return }
     const complexity = [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(r => r.test(next)).length
@@ -94,7 +96,14 @@ function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show 
     if (next !== confirm) { setPwError('Passwords do not match'); return }
     setPwSaving(true); setPwError(null)
     try {
-      await api.users.update(userId, { password: next } as any)
+      const result = await api.users.update(userId, { password: next })
+      // This is always a self-change (SecurityModal is only ever opened for
+      // the logged-in user's own account) — the backend bumped this
+      // account's token_epoch, invalidating the very token that just
+      // authenticated this request. Without installing the replacement, the
+      // next API call using the stale token 401s and silently logs the user
+      // out straight after being told "Password changed".
+      if ('access_token' in result) setToken(result.access_token)
       show('Password changed')
       setNext(''); setConfirm('')
       onClose()

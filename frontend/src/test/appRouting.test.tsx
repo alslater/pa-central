@@ -28,6 +28,7 @@ vi.mock('@/hooks/useAuth', () => ({
 // inlined rather than built by a helper — vi.mock is hoisted above any local
 // declaration, so referencing one here would throw at import time.
 vi.mock('@/pages/Login', () => ({ default: () => <div>page:login</div> }))
+vi.mock('@/pages/ResetPassword', () => ({ default: () => <div>page:reset-password</div> }))
 vi.mock('@/pages/Dashboard', () => ({ default: () => <div>page:dashboard</div> }))
 vi.mock('@/pages/Hosts', () => ({ default: () => <div>page:hosts</div> }))
 vi.mock('@/pages/HostDetail', () => ({ default: () => <div>page:host-detail</div> }))
@@ -55,7 +56,7 @@ const VIEWER: User = { ...ADMIN, id: 2, email: 'v@example.com', display_name: 'V
 function signedIn(user: User | null, { loading = false } = {}) {
   vi.mocked(useAuth).mockReturnValue({
     user, loading,
-    login: vi.fn(), completeTotp: vi.fn(), logout: vi.fn(),
+    login: vi.fn(), completeTotp: vi.fn(), logout: vi.fn(), setToken: vi.fn(),
   })
 }
 
@@ -89,6 +90,25 @@ describe('App routing — unauthenticated', () => {
     renderAt('/login')
     expect(await landedOn()).toBe('login')
     expect(window.location.pathname).toBe('/login')
+  })
+
+  it('renders /reset-password without redirecting', async () => {
+    // Must be reachable signed out: someone acting on a reset link has no
+    // session by definition, and on the admin-reset path their password is
+    // already invalidated, so a redirect to /login would strand them.
+    renderAt('/reset-password')
+    expect(await landedOn()).toBe('reset-password')
+    expect(window.location.pathname).toBe('/reset-password')
+  })
+
+  it('renders /reset-password with a token fragment', async () => {
+    // The token travels in the fragment (never sent to the server). The
+    // router must match on the path alone and leave the fragment intact for
+    // the page to read.
+    renderAt('/reset-password#token=abc123')
+    expect(await landedOn()).toBe('reset-password')
+    expect(window.location.pathname).toBe('/reset-password')
+    expect(window.location.hash).toBe('#token=abc123')
   })
 
   it('shows nothing while the session is still loading', () => {
@@ -143,6 +163,15 @@ describe('App routing — signed in as an admin', () => {
   ])('renders admin-only %s', async (path, expected) => {
     renderAt(path)
     expect(await landedOn()).toBe(expected)
+  })
+
+  it('still renders /reset-password when already signed in', async () => {
+    // The route sits outside Guard, so a live session must not redirect away
+    // from it — someone resetting their own password while logged in has to
+    // reach the form.
+    renderAt('/reset-password#token=abc123')
+    expect(await landedOn()).toBe('reset-password')
+    expect(window.location.pathname).toBe('/reset-password')
   })
 })
 

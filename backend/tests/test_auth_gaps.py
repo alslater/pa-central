@@ -195,7 +195,7 @@ class TestAlertAuthGaps:
     async def test_stream_non_integer_sub_returns_401_not_500(self, client):
         """A validly-signed token with a non-integer sub must yield 401 on the SSE stream."""
         from app.core.security import create_access_token
-        bad_token = create_access_token("not-an-integer")
+        bad_token = create_access_token("not-an-integer", token_epoch=0)
         r = await client.get("/api/alerts/stream", headers={"Authorization": f"Bearer {bad_token}"})
         assert r.status_code == 401
 
@@ -369,14 +369,14 @@ class TestJwtSubTypeSafety:
     async def test_non_integer_sub_returns_401_not_500(self, client):
         """A validly-signed token whose sub is not an integer must yield 401, not 500."""
         from app.core.security import create_access_token
-        bad_token = create_access_token("not-an-integer")
+        bad_token = create_access_token("not-an-integer", token_epoch=0)
         r = await client.get("/api/auth/me", headers=auth(bad_token))
         assert r.status_code == 401
 
     async def test_totp_session_token_cannot_be_used_as_access_token(self, client, admin_user):
         """A TOTP session token must not grant access to protected endpoints."""
         from app.core.security import create_totp_session_token
-        totp_token = create_totp_session_token(admin_user.id)
+        totp_token = create_totp_session_token(admin_user.id, admin_user.token_epoch)
         r = await client.get("/api/auth/me", headers=auth(totp_token))
         assert r.status_code == 401
 
@@ -453,3 +453,62 @@ class TestRisksAuthGaps:
     async def test_repo_scan_risks_non_admin_forbidden(self, client, operator_token):
         r = await client.get("/api/repo-scans/1/risks", headers=auth(operator_token))
         assert r.status_code == 403
+
+
+# ── /api/auth password reset ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestPasswordResetAuthGaps:
+    """The three password-reset endpoints are deliberately public — a
+    locked-out user cannot authenticate to ask for a reset. These tests pin
+    that down so it stays an explicit decision rather than an oversight, and
+    confirm they disclose nothing about which accounts exist.
+
+    The admin-initiated counterpart (POST /users/{id}/reset-password) is
+    covered below, and remains admin-only in both modes.
+    """
+
+    async def test_config_is_public(self, client):
+        r = await client.get("/api/auth/password-reset-config")
+        assert r.status_code == 200
+
+    async def test_forgot_password_is_public(self, client):
+        r = await client.post("/api/auth/forgot-password", json={"email": "nobody@example.com"})
+        assert r.status_code == 202
+
+    async def test_forgot_password_does_not_reveal_account_existence(self, client, admin_user):
+        """A real address and an unknown one must be indistinguishable."""
+        known = await client.post("/api/auth/forgot-password", json={"email": admin_user.email})
+        unknown = await client.post("/api/auth/forgot-password", json={"email": "nobody@example.com"})
+        assert known.status_code == unknown.status_code
+        assert known.json() == unknown.json()
+
+    async def test_reset_password_is_public(self, client):
+        """503 (feature off), not 401 — reachable without a token."""
+        r = await client.post(
+            "/api/auth/reset-password",
+            json={"token": "irrelevant", "new_password": "a-brand-new-password"},
+        )
+        assert r.status_code != 401
+
+    async def test_admin_reset_requires_auth(self, client, viewer_user):
+        r = await client.post(f"/api/users/{viewer_user.id}/reset-password")
+        assert r.status_code == 401
+
+    async def test_admin_reset_viewer_forbidden(self, client, viewer_token, viewer_user):
+        r = await client.post(
+            f"/api/users/{viewer_user.id}/reset-password", headers=auth(viewer_token)
+        )
+        assert r.status_code == 403
+
+    async def test_admin_reset_operator_forbidden(self, client, operator_token, viewer_user):
+        r = await client.post(
+            f"/api/users/{viewer_user.id}/reset-password", headers=auth(operator_token)
+        )
+        assert r.status_code == 403
+
+    async def test_admin_reset_admin_ok(self, client, admin_token, viewer_user):
+        r = await client.post(
+            f"/api/users/{viewer_user.id}/reset-password", headers=auth(admin_token)
+        )
+        assert r.status_code == 200

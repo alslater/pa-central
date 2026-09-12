@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, select
 from app.core.config import settings as app_settings
 from app.models import (
     FindingRecord,
+    PasswordResetToken,
     RepoScan,
     RepoScanResult,
     RepoScanStatus,
@@ -21,6 +22,7 @@ from app.models import (
     utcnow,
 )
 from app.services.finding_lifecycle import DEFAULT_FINDING_RETENTION, parse_int
+from app.services.password_reset import RESET_TOKEN_PRUNE_GRACE_HOURS
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +418,18 @@ async def prune_old_results(db_factory: Any) -> None:
             delete(RiskRecord)
             .where(RiskRecord.closed_at.isnot(None))
             .where(RiskRecord.closed_at < finding_cutoff)
+        )
+
+        # Purge spent password reset tokens. The grace period past expiry is
+        # deliberate: a user clicking a link a little too late should be told
+        # it expired, which needs the row to still exist. Used tokens are
+        # pruned on the same schedule — they are dead either way, and keeping
+        # them briefly gives the same clearer message on a double-click.
+        await session.execute(
+            delete(PasswordResetToken).where(
+                PasswordResetToken.expires_at
+                < utcnow() - timedelta(hours=RESET_TOKEN_PRUNE_GRACE_HOURS)
+            )
         )
 
         await session.commit()

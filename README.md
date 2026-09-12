@@ -16,6 +16,7 @@ Central management server for [package-alert](https://github.com/alslater/packag
 | **User roles** | admin / operator / viewer with appropriate guards throughout |
 | **Scheduled repo scans** | Cron-driven vulnerability scans of Git repos; results ingested by an ephemeral task |
 | **System settings** | SMTP / email config, scan result retention, app base URL — managed in the UI |
+| **Password reset** | Optional self-service reset by emailed link (requires SMTP); otherwise admins generate a password |
 
 ## Architecture
 

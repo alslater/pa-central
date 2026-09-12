@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router'
 import { AuthProvider, useAuth } from '@/hooks/useAuth'
 import Login from '@/pages/Login'
+import ResetPassword from '@/pages/ResetPassword'
 import Dashboard from '@/pages/Dashboard'
 import Hosts from '@/pages/Hosts'
 import HostDetail from '@/pages/HostDetail'
@@ -35,6 +36,7 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/" element={<Guard><Dashboard /></Guard>} />
           <Route path="/hosts" element={<Guard><Hosts /></Guard>} />
           <Route path="/hosts/:id" element={<Guard><HostDetail /></Guard>} />

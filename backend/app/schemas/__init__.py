@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.security import MAX_PASSWORD_BYTES
 from app.models import (
     AlertKind,
     AlertSeverity,
@@ -25,11 +26,39 @@ class OrmBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def _reject_password_over_bcrypt_limit(value: str | None) -> str | None:
+    """Shared by every schema field that carries a password bcrypt will
+    hash or check (login, set, reset — not TOTP codes or tokens).
+
+    bcrypt hashes only the first 72 *bytes* of its input and (since bcrypt
+    4.1) raises ValueError rather than truncating past that — reproduced
+    directly: a 100-character password on POST /auth/login reached
+    bcrypt.checkpw() unvalidated and crashed the request with an unhandled
+    500. A plain `Field(max_length=72)` would count Python characters, not
+    UTF-8 bytes, and so would still let through ordinary-looking non-ASCII
+    input that exceeds the real limit (40 "é" characters, well under 72, is
+    80 bytes). core.security also enforces this independently at the
+    encoding boundary (hash_password/verify_password), since
+    OAuth2PasswordRequestForm — used by the form-based POST /auth/token — is
+    not a Pydantic model this schema layer can validate; the two checks
+    exist for different reasons; this one turns the failure into a clean 422
+    instead of a 500, and that one is what stops it reaching bcrypt at all
+    for callers this file cannot reach.
+    """
+    if value is not None and len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password must be at most {MAX_PASSWORD_BYTES} bytes when UTF-8 encoded"
+        )
+    return value
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+    _validate_password = field_validator("password")(_reject_password_over_bcrypt_limit)
 
 
 class TokenResponse(BaseModel):
@@ -64,10 +93,19 @@ class TotpDisableRequest(BaseModel):
 # ── User ──────────────────────────────────────────────────────────────────────
 
 class UserCreate(BaseModel):
+    """New user, created by an admin.
+
+    `password` is optional because it is only meaningful when self-service
+    reset is off. With it on, the user is emailed a welcome link and sets
+    their own password, and supplying one here is rejected rather than
+    silently ignored — see api/auth.py's register().
+    """
     email: EmailStr
     display_name: str
-    password: str = Field(min_length=12)
+    password: str | None = Field(default=None, min_length=12)
     role: UserRole = UserRole.viewer
+
+    _validate_password = field_validator("password")(_reject_password_over_bcrypt_limit)
 
 
 class UserUpdate(BaseModel):
@@ -75,6 +113,8 @@ class UserUpdate(BaseModel):
     role: UserRole | None = None
     is_active: bool | None = None
     password: str | None = Field(default=None, min_length=12)
+
+    _validate_password = field_validator("password")(_reject_password_over_bcrypt_limit)
 
 
 class UserOut(OrmBase):
@@ -87,9 +127,82 @@ class UserOut(OrmBase):
     created_at: datetime
 
 
+class SelfPasswordChangeOut(UserOut):
+    """PATCH /users/{id}'s own response when the caller changed their own
+    password — UserOut plus a replacement access token.
+
+    set_password bumps token_epoch on every password change (see its own
+    docstring: this is what makes a reset actually revoke sessions already
+    issued). That is exactly right for an admin resetting *someone else's*
+    password, but when the caller changes their *own*, it also invalidates
+    the very bearer token that just authenticated this request — the next
+    API call using it 401s, with nothing in a plain UserOut response
+    telling the frontend that is coming. access_token is populated only for
+    this caller==target case (api/users.py's update_user); every other
+    PATCH still returns a plain UserOut, since only the self-change case
+    invalidates the credential the caller is currently using.
+    """
+    access_token: str
+
+
+class RegisterOut(UserOut):
+    """POST /auth/register's own response — UserOut plus two independent
+    facts about the welcome link, both None when self-service reset is off
+    (no email or token is ever created — the admin supplied a password
+    directly).
+
+    `welcome_email_sent`: was the SMTP send itself confirmed. False does
+    not distinguish a confirmed SMTP failure from an unconfirmed one
+    (timeout, an ambiguous disconnect) — see send_reset_email's own
+    docstring for why that distinction was deliberately given up: the
+    account is created either way, and a human admin decides what to do
+    next (check the inbox, or trigger a fresh reset) rather than the
+    backend guessing from an inherently ambiguous signal.
+
+    `welcome_link_still_valid`: is the token behind that email still the
+    account's live one, independent of whether the send succeeded. A
+    concurrent event can retire it before or after a genuinely successful
+    send — most commonly, self-service reset (or its SMTP configuration)
+    being disabled while the send was in flight, which sweeps every
+    outstanding token system-wide (see api/system_settings.py's
+    turning_off/losing_smtp sweep) without touching whether *this*
+    request's own email happened to go out. `welcome_email_sent=True` and
+    `welcome_link_still_valid=False` together mean exactly that: the email
+    was delivered, and the link inside it is already dead — a state the
+    admin needs to know about even though the account itself survives and
+    nothing here is destructive (see register()'s own docstring).
+    """
+    welcome_email_sent: bool | None = None
+    welcome_link_still_valid: bool | None = None
+
+
 class PasswordResetOut(BaseModel):
-    """Returned once only — the generated password is never stored in plaintext."""
-    password: str
+    """Result of an admin-initiated password reset.
+
+    Which field is populated depends on the self_service_password_reset
+    setting: with it off, a password is generated here and returned once for
+    the admin to relay out-of-band (it is never stored in plaintext); with it
+    on, a reset link is emailed to the user instead and no credential passes
+    through the admin at all.
+    """
+    password: str | None = None
+    reset_link_sent: bool = False
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=12)
+
+    _validate_password = field_validator("new_password")(_reject_password_over_bcrypt_limit)
+
+
+class PasswordResetConfigOut(BaseModel):
+    """Public — tells the login page whether to offer "Forgot password?"."""
+    self_service_enabled: bool
 
 
 # ── API Key ───────────────────────────────────────────────────────────────────
@@ -400,6 +513,26 @@ class SystemSettingOut(OrmBase):
 class SystemSettingPatch(BaseModel):
     """Dict of {key: new_value} pairs to upsert."""
     updates: dict[str, str | None]
+
+
+class PasswordResetReadinessOut(BaseModel):
+    """Whether self-service password reset can actually be enabled right
+    now, and why not if it can't.
+
+    Mirrors the exact checks patch_settings() enforces when enabling the
+    feature and self_service_reset_enabled() enforces at read time — the
+    same shared validators (looks_like_public_url, parse_smtp_port,
+    parse_smtp_tls_mode, parse_smtp_from_addr), applied to the currently
+    stored values rather than a submitted PATCH body. Exists because
+    SystemSettings.tsx previously re-derived its own "is this ready"
+    guess from only smtp_host/app_base_url being non-empty, which agreed
+    with neither gate: a malformed base URL, an out-of-range port, an
+    unrecognised TLS mode, or a From address containing CR/LF all made
+    the toggle appear enableable while the backend would 400 the PATCH or
+    /password-reset-config would report the feature unavailable anyway.
+    """
+    ready: bool
+    reasons: list[str]
 
 
 # ── Repo Scan ─────────────────────────────────────────────────────────────────
