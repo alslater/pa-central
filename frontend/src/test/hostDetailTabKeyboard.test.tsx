@@ -7,6 +7,12 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }))
 
+vi.mock('@/hooks/useLiveAlerts', () => ({
+  useLiveAlertsContext: () => ({
+    count: 0, clear: vi.fn(), Toast: null, registerPendingOp: vi.fn(), getSessionEpoch: () => 0,
+  }),
+}))
+
 vi.mock('@/lib/api', () => ({
   api: {
     hosts:   { get: vi.fn(), latestScans: vi.fn() },

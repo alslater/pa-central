@@ -18,12 +18,18 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }))
 
+vi.mock('@/hooks/useLiveAlerts', () => ({
+  useLiveAlertsContext: () => ({
+    count: 0, clear: vi.fn(), Toast: null, registerPendingOp: vi.fn(), getSessionEpoch: () => 0,
+  }),
+}))
+
 vi.mock('@/lib/api', () => ({
   api: {
     hosts:           { list: vi.fn() },
     alerts:          { list: vi.fn() },
     cooldown:        { list: vi.fn() },
-    configs:         { list: vi.fn(), forHost: vi.fn() },
+    configs:         { list: vi.fn(), forHost: vi.fn(), validate: vi.fn().mockResolvedValue({ valid: true, errors: [], warnings: [] }) },
     repoScans: {
       list:        vi.fn(),
       results:     vi.fn(),
@@ -34,8 +40,9 @@ vi.mock('@/lib/api', () => ({
       trigger:     vi.fn(),
     },
     repoCredentials: { list: vi.fn() },
-    systemSettings:  { list: vi.fn() },
+    systemSettings:  { list: vi.fn(), passwordResetReadiness: vi.fn() },
     users:           { list: vi.fn() },
+    auth:            { passwordResetConfig: vi.fn() },
   },
 }))
 
@@ -57,6 +64,7 @@ function mockUser(role: User['role']): User {
   return {
     id: 1, email: 'test@example.com', display_name: 'Test', role,
     is_active: true, totp_enabled: false, created_at: '2024-01-01T00:00:00Z',
+    has_outstanding_welcome_token: false,
   }
 }
 
@@ -64,9 +72,11 @@ function setRole(role: User['role'] | null) {
   vi.mocked(useAuth).mockReturnValue({
     user: role ? mockUser(role) : null,
     loading: false,
+    token: role ? 'test-token' : null,
     login: vi.fn(),
     completeTotp: vi.fn(),
     logout: vi.fn(),
+    setToken: vi.fn(), getAuthGeneration: vi.fn(() => 0), beginPasswordChange: vi.fn(() => true), endPasswordChange: vi.fn(),
   })
 }
 
@@ -228,6 +238,9 @@ describe('Configs page — assign and delete template buttons', () => {
 describe('Users page — add user button', () => {
   beforeEach(() => {
     vi.mocked(api.users.list).mockResolvedValue([])
+    // Users reads this on mount to decide whether Add User offers a welcome
+    // link or a password field; an unresolved mock throws during render.
+    vi.mocked(api.auth.passwordResetConfig).mockResolvedValue({ self_service_enabled: false })
   })
 
   it('shows Add user for admin', async () => {
@@ -297,6 +310,7 @@ describe('RepoScans page — action buttons', () => {
 describe('SystemSettings page — save button', () => {
   beforeEach(() => {
     vi.mocked(api.systemSettings.list).mockResolvedValue([])
+    vi.mocked(api.systemSettings.passwordResetReadiness).mockResolvedValue({ ready: false, reasons: [] })
   })
 
   it('shows Save for admin', async () => {

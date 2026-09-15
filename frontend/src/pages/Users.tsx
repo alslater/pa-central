@@ -1,9 +1,11 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { api, User, UserRole } from '@/lib/api'
+import { codePointLength, MAX_PASSWORD_BYTES, utf8ByteLength } from '@/lib/text'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, Button, Input, Modal, Select, useToast, Empty, timeAgo } from '@/components/ui'
 import { Plus, Trash2, Copy, AlertCircle } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
+import { useLiveAlertsContext, PendingOp } from '@/hooks/useLiveAlerts'
 
 const COLUMNS = ['Name', 'Email', 'Role', 'Status', 'Joined'] as const
 // Data columns plus the trailing actions column. The expanded edit row spans
@@ -21,9 +23,20 @@ export default function Users() {
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
+  // Governs how a new user is handed their credential: an emailed welcome
+  // link, or a password the admin types.
+  //
+  // Tri-state on purpose. Neither answer is a safe default while this is
+  // unknown: with self-service on the backend *rejects* a supplied password,
+  // and with it off a password is required — so guessing either way sends
+  // the admin into a 400 they cannot act on. Add User stays unavailable
+  // until the mode is known.
+  const [selfServiceReset, setSelfServiceReset] = useState<boolean | null>(null)
+  const [resetConfigError, setResetConfigError] = useState(false)
   const [expandedId, setExpandedId] = useState<number | null>(null)
-  const { show, Toast } = useToast()
+  const { show, dismiss, Toast } = useToast()
   const { user: me } = useAuth()
+  const { registerPendingOp, discardEarlyResult, getSessionEpoch } = useLiveAlertsContext()
   const isAdmin = me?.role === 'admin'
 
   const load = useCallback(() => {
@@ -31,6 +44,34 @@ export default function Users() {
     api.users.list().then(setUsers).catch((e: any) => show(e.message, 'err')).finally(() => setLoading(false))
   }, [show])
   useEffect(() => { load() }, [load]) // eslint-disable-line react-hooks/set-state-in-effect
+
+  // Refreshes the row data without ever touching `loading` — unlike load()
+  // above, which the initial mount and AddUserModal's onSaved use, and
+  // which flips the whole table to a "Loading…" placeholder while in
+  // flight. That placeholder unmounts UserEditPanel entirely, destroying
+  // its local newPassword state — a generated password waiting to be
+  // copied would be silently lost the moment a reset's own row-refresh
+  // fired, reproduced directly with any real network latency (a mocked,
+  // same-tick-resolving fetch in a test can hide this, since React 19
+  // batches the loading flip away when nothing ever renders in between —
+  // but a real fetch always has a window where it doesn't). Used by
+  // doResetPassword, which sets newPassword in the very same call.
+  const reloadSilently = useCallback(() => {
+    api.users.list().then(setUsers).catch((e: any) => show(e.message, 'err'))
+  }, [show])
+
+  // Clearing the error is left to the retry handler rather than done here:
+  // on mount there is nothing to clear, and doing it in the effect body is a
+  // synchronous setState that triggers a cascading render.
+  const loadResetConfig = useCallback(() => {
+    api.auth.passwordResetConfig()
+      .then(cfg => {
+        setSelfServiceReset(cfg.self_service_enabled)
+        setResetConfigError(false)
+      })
+      .catch(() => setResetConfigError(true))
+  }, [])
+  useEffect(() => { loadResetConfig() }, [loadResetConfig])
 
   const handleSaved = (updated: User) => {
     setUsers(prev => prev.map(u => u.id === updated.id ? updated : u))
@@ -56,9 +97,35 @@ export default function Users() {
       <PageHeader
         title="Users"
         subtitle="Manage access to PA Central"
-        action={isAdmin ? <Button variant="primary" onClick={() => setShowAdd(true)}><Plus size={13} />Add user</Button> : undefined}
+        action={isAdmin ? (
+          <Button
+            variant="primary"
+            onClick={() => setShowAdd(true)}
+            // Unavailable until the credential mode is known: the form's
+            // shape depends on it, and either guess produces a request the
+            // backend rejects.
+            disabled={selfServiceReset === null}
+            title={selfServiceReset === null
+              ? (resetConfigError
+                  ? 'Cannot add users — the password reset mode could not be loaded'
+                  : 'Loading…')
+              : undefined}
+          >
+            <Plus size={13} />Add user
+          </Button>
+        ) : undefined}
       />
       <div className="p-6 px-7 overflow-auto">
+        {resetConfigError && isAdmin && (
+          <div className="mb-4 flex items-center gap-3 text-[13px] text-status-fail-text bg-status-fail/10 border border-status-fail/30 rounded-[var(--radius-sm)] px-4 py-3">
+            <span className="flex-1">
+              Could not load the password reset mode, so new users cannot be
+              added yet — the form depends on whether they set their own
+              password or you do.
+            </span>
+            <Button onClick={loadResetConfig}>Retry</Button>
+          </div>
+        )}
         {loading ? <div className="text-muted-foreground text-[13px]">Loading…</div> :
           users.length === 0 ? <Empty message="No users." /> : (
           <Card>
@@ -112,6 +179,11 @@ export default function Users() {
                               onSaved={handleSaved}
                               onDiscard={() => setExpandedId(null)}
                               show={show}
+                              dismiss={dismiss}
+                              registerPendingOp={registerPendingOp}
+                              discardEarlyResult={discardEarlyResult}
+                              getSessionEpoch={getSessionEpoch}
+                              reload={reloadSilently}
                             />
                           </td>
                         </tr>
@@ -124,10 +196,31 @@ export default function Users() {
           </Card>
         )}
       </div>
-      {showAdd && (
+      {showAdd && selfServiceReset !== null && (
         <AddUserModal
+          selfServiceReset={selfServiceReset}
           onClose={() => setShowAdd(false)}
-          onSaved={() => { load(); setShowAdd(false); show('User created') }}
+          registerPendingOp={registerPendingOp}
+          discardEarlyResult={discardEarlyResult}
+          getSessionEpoch={getSessionEpoch}
+          dismiss={dismiss}
+          onSaved={(status) => {
+            load()
+            setShowAdd(false)
+            if (status === 'resolved') {
+              // The outcome already arrived and registerPendingOp already
+              // rendered the real, final toast via the SSE event — showing
+              // "sending…" now would follow it with a stale message.
+            } else if (status === 'pending') {
+              show('Account created — sending welcome link…')
+            } else if (status === 'prep_failed') {
+              show("Account created, but the welcome email could not be prepared — resend from the user's row once the issue is fixed.", 'err')
+            } else if (status === 'admission_refused') {
+              show("Account created, but too many pending admin actions — resend the welcome email from the user's row shortly.", 'err')
+            } else {
+              show('User created')
+            }
+          }}
         />
       )}
       {Toast}
@@ -140,11 +233,24 @@ function UserEditPanel({
   onSaved,
   onDiscard,
   show,
+  dismiss,
+  registerPendingOp,
+  discardEarlyResult,
+  getSessionEpoch,
+  reload,
 }: {
   user: User
   onSaved: (updated: User) => void
   onDiscard: () => void
   show: (msg: string, type?: 'err') => void
+  dismiss: () => void
+  registerPendingOp: (opId: string, entry: PendingOp) => boolean
+  discardEarlyResult: (opId: string) => void
+  getSessionEpoch: () => number
+  // Refreshes this row's data (e.g. has_outstanding_welcome_token) without
+  // unmounting this panel — see reloadSilently's own docstring for why
+  // that distinction matters here specifically.
+  reload: () => void
 }) {
   const [draftRole, setDraftRole] = useState<UserRole>(user.role)
   const [draftActive, setDraftActive] = useState(user.is_active)
@@ -201,10 +307,102 @@ function UserEditPanel({
 
   const doResetPassword = async () => {
     setSaving(true)
+    // Drop any password from a previous reset before starting this one. It is
+    // already dead — every reset invalidates the current credential — so
+    // leaving it on screen invites the admin to copy and relay something that
+    // no longer works. Cleared here rather than per-outcome so it also covers
+    // the emailed-link result and a failure, neither of which sets it.
+    setNewPassword(null)
+    // Captured before the await, not after: a logout mid-request bumps the
+    // session epoch, and registering a pending op under the *new* epoch
+    // would let a stale response from the old session resolve against the
+    // wrong (or a future, coincidentally-reused) session.
+    const opEpoch = getSessionEpoch()
     try {
-      const { password } = await api.users.resetPassword(user.id)
+      // Either way the current password stops working immediately. The
+      // outcomes differ in how the user gets a new one: a link emailed to
+      // them (possibly via a background send this response doesn't wait
+      // on), or a generated password shown once for the admin to relay.
+      const { password, reset_link_sent, op_id } = await api.users.resetPassword(user.id)
       setConfirmPasswordReset(false)
-      setNewPassword(password)
+      // has_outstanding_welcome_token is settled server-side by the time
+      // this response returns, in every branch below: set_password (which
+      // retires the old welcome token, if any) and prepare_reset_email
+      // (which commits any new one) both already ran and committed before
+      // reset_password ever builds its response — the only thing still
+      // pending for the op_id branch is whether the *send* itself
+      // succeeds, which doesn't change whether the token row exists. A
+      // stale `user` prop otherwise keeps showing "Resend welcome email"
+      // (or "Reset password") after the real state has already flipped —
+      // reload() re-fetches the list so this row's button label reflects
+      // the outcome that already happened, not the pre-reset snapshot.
+      // The silent variant specifically: this function sets newPassword
+      // itself, below, and that state lives in this very panel — a
+      // refresh that unmounts the panel to show "Loading…" would destroy
+      // it before the admin ever sees it.
+      reload()
+      // reset_link_sent === false is checked BEFORE op_id: it covers all
+      // three settled-outcome backend branches that return no genuinely
+      // pending send — a generated-password fallback (password set),
+      // preparation failing outright (password null, op_id null), AND
+      // admission being refused (password null, op_id SET —
+      // reset_password's own comment is explicit: "no further SSE outcome
+      // will arrive beyond the attempted=False event it already emitted",
+      // this response IS the settled answer). Checking op_id ahead of
+      // reset_link_sent would treat that already-decided failure as
+      // still-pending whenever the SSE event it refers to was missed
+      // (dropped during a reconnect, or simply not yet delivered when
+      // this response is processed — the two race independently), leaving
+      // a "sending reset link…" toast that can never resolve, since no
+      // second event is ever coming. reset_link_sent is never true on the
+      // wire (every backend branch returns False or None; verified
+      // exhaustively against every PasswordResetOut construction site) —
+      // an emailed-link result is only ever reported later, via the
+      // op_id/SSE path below, never synchronously as True.
+      if (reset_link_sent === false) {
+        if (password) {
+          setNewPassword(password)
+        } else if (op_id) {
+          // Preparation succeeded (a token/message were built) but
+          // dispatch admission was refused — the admin-send queue was
+          // full. Distinct from true preparation failure below: nothing
+          // is misconfigured here, so pointing the admin at SMTP/account
+          // settings would send them chasing a problem that isn't there.
+          // Settled, not pending — reset_password's own comment is
+          // explicit that no further SSE outcome follows this response.
+          //
+          // dispatch_admin_action still emits its own SSE event for this
+          // op_id (the same "attempted=False" notification whichever
+          // caller triggered it); this response already reports the exact
+          // same outcome synchronously, so there's nothing left for that
+          // event to tell us. Drop it if it happens to already be sitting
+          // in earlyResults (arrived before this response did) rather than
+          // leaving it there — it can only ever be discarded, never
+          // consumed, since no registerPendingOp call for this op_id is
+          // ever going to come.
+          discardEarlyResult(op_id)
+          show(
+            'Password invalidated, but too many pending admin actions — try resetting again shortly',
+            'err',
+          )
+        } else {
+          show(
+            'Password invalidated, but no reset email could be prepared — try again, or check the account/SMTP configuration',
+            'err',
+          )
+        }
+      } else if (op_id) {
+        // Reaches here only when reset_link_sent is still null — the one
+        // case genuinely still in flight — so reconcile via the
+        // admin-alerts SSE stream.
+        const stillPending = registerPendingOp(op_id, { action: 'admin_reset', dismiss, epoch: opEpoch })
+        if (stillPending) {
+          show('Password invalidated — sending reset link…')
+        }
+        // else: the outcome had already arrived and registerPendingOp just
+        // rendered the real, final toast — showing "sending…" now would
+        // follow it with a stale message for an operation that's already done.
+      }
     } catch (e: any) {
       show(e.message, 'err')
     } finally {
@@ -270,12 +468,19 @@ function UserEditPanel({
             </div>
           )}
           {!confirmPasswordReset && (
-            <Button onClick={() => setConfirmPasswordReset(true)} disabled={saving}>Reset password</Button>
+            <Button onClick={() => setConfirmPasswordReset(true)} disabled={saving}>
+              {user.has_outstanding_welcome_token ? 'Resend welcome email' : 'Reset password'}
+            </Button>
           )}
           {confirmPasswordReset && (
             <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-              <span>Reset password?</span>
-              <Button variant="primary" onClick={doResetPassword} disabled={saving}>Confirm</Button>
+              {/* The admin needs to know this locks the user out now, not
+                  once they get round to clicking a link — it is the point of
+                  the action, but it is destructive and worth stating. */}
+              <span>Invalidate this password now? {user.display_name} will need the reset to sign in again.</span>
+              <Button variant="danger" onClick={doResetPassword} disabled={saving}>
+                {user.has_outstanding_welcome_token ? 'Resend welcome email' : 'Reset password'}
+              </Button>
               <Button onClick={() => setConfirmPasswordReset(false)} disabled={saving}>Cancel</Button>
             </div>
           )}
@@ -285,19 +490,109 @@ function UserEditPanel({
   )
 }
 
-function AddUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+function AddUserModal({
+  onClose, onSaved, selfServiceReset, registerPendingOp, discardEarlyResult, getSessionEpoch, dismiss,
+}: {
+  onClose: () => void
+  // The exhaustive set of outcomes save() can produce: 'pending'/'resolved'
+  // for a dispatch attempt (still in flight, or already reconciled from an
+  // early SSE event); 'prep_failed' when nothing was ever dispatched (no
+  // op_id — a true preparation failure, e.g. SMTP unconfigured);
+  // 'admission_refused' when preparation succeeded but the admin-send
+  // queue was full (op_id set, but settled — no SSE event is still
+  // pending; see save()'s own comment); 'password-set' when self-service
+  // is off.
+  onSaved: (status: 'pending' | 'resolved' | 'prep_failed' | 'admission_refused' | 'password-set') => void
+  selfServiceReset: boolean
+  registerPendingOp: (opId: string, entry: PendingOp) => boolean
+  discardEarlyResult: (opId: string) => void
+  getSessionEpoch: () => number
+  dismiss: () => void
+}) {
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState<UserRole>('viewer')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  // Mirrors UserCreate's own bcrypt-byte-limit validator (schemas/__init__.py's
+  // _reject_password_over_bcrypt_limit): bcrypt hashes only the first 72
+  // *bytes*, and a password that looks short by character count can still
+  // exceed that — 40 "é" characters is 40 code points (well past the min-12
+  // check below) but 80 UTF-8 bytes, so it passed this form and was rejected
+  // by the backend with no explanation shown here. Checked only when
+  // self-service is off — this field doesn't exist otherwise.
+  const passwordTooLong = !selfServiceReset && utf8ByteLength(password) > MAX_PASSWORD_BYTES
 
   const save = async () => {
     setSaving(true); setError('')
+    // Captured before the await, not after: a logout mid-request bumps the
+    // session epoch, and registering a pending op under the *new* epoch
+    // would let a stale response resolve against the wrong session.
+    const opEpoch = getSessionEpoch()
     try {
-      await api.auth.register({ email, display_name: name, password, role })
-      onSaved()
+      // With self-service on the user sets their own password via an emailed
+      // welcome link, and the backend rejects a supplied one outright — so
+      // the field is omitted rather than sent empty.
+      const result = await api.auth.register({
+        email, display_name: name, role,
+        ...(selfServiceReset ? {} : { password }),
+      })
+      // welcome_email_sent === false is checked BEFORE op_id: it covers
+      // two distinct backend branches that both still carry an op_id —
+      // preparation failing outright (op_id null) AND admission being
+      // refused (op_id set, but register()'s own comment is explicit:
+      // "no further SSE outcome will arrive beyond the attempted=False
+      // event it already emitted" — this response IS the settled answer).
+      // Checking op_id first would treat that already-decided failure as
+      // still-pending whenever the SSE event it refers to was missed
+      // (dropped during a reconnect, or simply not yet delivered when
+      // this response is processed — the two race independently), leaving
+      // a "sending welcome link…" toast that can never resolve, since no
+      // second event is ever coming. welcome_link_still_valid is NOT
+      // checked here at all: on the admission-refused branch it is true
+      // (a live token was already committed before dispatch was ever
+      // attempted, and refused admission never retires it) even though
+      // welcome_email_sent is false — see api.ts's own comment on
+      // RegisterResult — so checking it here couldn't distinguish
+      // anything welcome_email_sent doesn't already, and would be
+      // actively misleading read on its own.
+      if (result?.welcome_email_sent === false) {
+        // op_id distinguishes two settled-failure causes that both report
+        // welcome_email_sent === false: null means preparation itself
+        // never produced anything to dispatch (SMTP unconfigured, rate-
+        // limited, or lock-contention abandonment — see register()'s own
+        // comment); set means preparation succeeded and dispatch admission
+        // was refused (the admin-send queue was full) — a transient
+        // capacity issue with nothing wrong to configure. Conflating them
+        // sent an admin toward checking SMTP/account config for a problem
+        // that was actually "try again in a minute."
+        if (result.op_id) {
+          // register() still emits its own SSE event for this op_id (the
+          // same "attempted=False" notification reset_password's
+          // admission-refused branch produces); this response already
+          // reports the identical outcome synchronously, so there's
+          // nothing left for that event to tell us — drop it if it's
+          // already sitting in earlyResults rather than leaving it there,
+          // since no registerPendingOp call for this op_id is ever coming.
+          discardEarlyResult(result.op_id)
+        }
+        onSaved(result.op_id ? 'admission_refused' : 'prep_failed')
+      } else if (result?.op_id) {
+        // Reaches here only when welcome_email_sent is still null — the
+        // one case genuinely still in flight — so reconcile via the
+        // admin-alerts SSE stream.
+        const stillPending = registerPendingOp(result.op_id, { action: 'welcome_link', dismiss, epoch: opEpoch })
+        // 'resolved': the outcome had already arrived and registerPendingOp
+        // just rendered the real, final toast — the caller must not follow
+        // it with its own "sending…" toast for an operation that's already done.
+        onSaved(stillPending ? 'pending' : 'resolved')
+        return
+      } else {
+        // self-service reset is off entirely: no welcome link was ever
+        // created, and the admin-supplied password is already live.
+        onSaved('password-set')
+      }
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -310,7 +605,23 @@ function AddUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
       <div className="flex flex-col gap-3.5">
         <Input label="Display name *" value={name} onChange={e => setName(e.target.value)} />
         <Input label="Email *" type="email" value={email} onChange={e => setEmail(e.target.value)} />
-        <Input label="Password *" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Min 12 characters" minLength={12} />
+        {selfServiceReset ? (
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            They'll be emailed a link to set their own password. The link is
+            valid for 7 days.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1">
+            <Input label="Password *" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Min 12 characters" minLength={12} />
+            {passwordTooLong && (
+              <span className="text-status-fail-text text-xs">
+                Too long: passwords can be at most {MAX_PASSWORD_BYTES} bytes
+                once encoded — non-ASCII characters (accents, emoji) can use
+                more than one byte each.
+              </span>
+            )}
+          </div>
+        )}
         <Select label="Role" value={role} onChange={e => setRole(e.target.value as UserRole)}>
           <option value="viewer">Viewer — read-only access</option>
           <option value="developer">Developer — own hosts/scans/alerts + API keys</option>
@@ -320,8 +631,9 @@ function AddUserModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         {error && <div className="text-status-fail-text text-xs">{error}</div>}
         <div className="flex gap-2 justify-end">
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={save} disabled={!email || !name || password.length < 12 || saving}>
-            {saving ? 'Creating…' : 'Create user'}
+          <Button variant="primary" onClick={save}
+            disabled={!email || !name || (!selfServiceReset && codePointLength(password) < 12) || passwordTooLong || saving}>
+            {saving ? 'Creating…' : selfServiceReset ? 'Create & send invite' : 'Create user'}
           </Button>
         </div>
       </div>

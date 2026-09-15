@@ -318,6 +318,7 @@ export function useToast() {
   const show = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
     setToast({ msg, kind })
   }, [])
+  const dismiss = useCallback(() => setToast(null), [])
   useEffect(() => {
     if (!toast) return
     const id = setTimeout(() => setToast(null), 3000)
@@ -332,7 +333,7 @@ export function useToast() {
       {toast.msg}
     </div>
   ) : null
-  return { show, Toast }
+  return { show, dismiss, Toast }
 }
 
 // ── Repo scan status badge ────────────────────────────────────────────────────

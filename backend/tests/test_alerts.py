@@ -1,6 +1,10 @@
 """Tests for /api/alerts endpoints."""
+import asyncio
+
 import pytest
 
+from app.api import alerts as alerts_module
+from app.api.alerts import notify_user
 from app.models import Alert, AlertKind, AlertSeverity, Ecosystem
 from tests.conftest import auth
 
@@ -120,3 +124,65 @@ class TestAcknowledgeAlert:
             headers=auth(operator_token),
         )
         assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+class TestNotifyUser:
+    """notify_user: per-connection SSE targeting, added alongside the
+    existing broadcast_alert (which remains untargeted)."""
+
+    @pytest.fixture(autouse=True)
+    def clean_sse_queues(self):
+        """_sse_queues is module-level global state; tests must not leak
+        into each other."""
+        alerts_module._sse_queues.clear()
+        yield
+        alerts_module._sse_queues.clear()
+
+    async def test_notify_user_only_reaches_the_tagged_queue(self):
+        q1: asyncio.Queue = asyncio.Queue(maxsize=10)
+        q2: asyncio.Queue = asyncio.Queue(maxsize=10)
+        alerts_module._sse_queues[q1] = 1
+        alerts_module._sse_queues[q2] = 2
+
+        notify_user(1, {"type": "admin_action_result", "op_id": "x"})
+
+        assert q1.get_nowait() == {"type": "admin_action_result", "op_id": "x"}
+        assert q2.empty()
+
+    async def test_notify_user_reaches_every_queue_tagged_for_that_uid(self):
+        """One admin can have multiple tabs/connections open."""
+        q1: asyncio.Queue = asyncio.Queue(maxsize=10)
+        q2: asyncio.Queue = asyncio.Queue(maxsize=10)
+        alerts_module._sse_queues[q1] = 7
+        alerts_module._sse_queues[q2] = 7
+
+        notify_user(7, {"type": "admin_action_result", "op_id": "y"})
+
+        assert q1.get_nowait()["op_id"] == "y"
+        assert q2.get_nowait()["op_id"] == "y"
+
+    async def test_notify_user_drops_oldest_when_the_target_queue_is_full(self):
+        q: asyncio.Queue = asyncio.Queue(maxsize=1)
+        q.put_nowait({"type": "connected"})
+        alerts_module._sse_queues[q] = 3
+
+        notify_user(3, {"type": "admin_action_result", "op_id": "z"})
+
+        assert q.get_nowait()["op_id"] == "z"
+        assert q.empty()
+
+    async def test_notify_user_never_raises_for_an_unknown_uid(self):
+        notify_user(999, {"type": "admin_action_result", "op_id": "w"})  # no queue tagged 999 — must not raise
+
+    async def test_broadcast_alert_still_reaches_every_connection_regardless_of_uid(self):
+        """broadcast_alert is unchanged — it still fans out to everyone."""
+        q1: asyncio.Queue = asyncio.Queue(maxsize=10)
+        q2: asyncio.Queue = asyncio.Queue(maxsize=10)
+        alerts_module._sse_queues[q1] = 1
+        alerts_module._sse_queues[q2] = 2
+
+        alerts_module.broadcast_alert({"id": 1, "message": "test"})
+
+        assert q1.get_nowait()["id"] == 1
+        assert q2.get_nowait()["id"] == 1

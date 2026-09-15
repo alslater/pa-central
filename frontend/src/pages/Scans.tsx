@@ -154,9 +154,10 @@ export function Scans() {
     })
   }, [show])
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial load on mount; matches FindingsPanel/RisksPanel in RepoScans.tsx
     load()
     return () => { requestSeq.current += 1 }
-  }, [load]) // eslint-disable-line react-hooks/set-state-in-effect -- initial load on mount; matches FindingsPanel/RisksPanel in RepoScans.tsx
+  }, [load])
 
   const loadHeadlinesBackground = useCallback(() => { load(true) }, [load])
 

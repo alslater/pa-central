@@ -1,6 +1,7 @@
 """Tests for /api/auth endpoints."""
 import pytest
 
+from app.main import app
 from tests.conftest import auth
 
 
@@ -52,6 +53,33 @@ class TestLogin:
         assert r.status_code == 200
         assert "access_token" in r.json()
 
+    async def test_login_json_rejects_a_password_over_bcrypt_limit(self, client, admin_user):
+        """bcrypt hashes only the first 72 bytes of its input and raises
+        ValueError past that. Reproduced before the schema-level guard
+        existed: this request reached bcrypt.checkpw() unvalidated and
+        crashed with an unhandled 500 instead of a clean validation error."""
+        r = await client.post(
+            "/api/auth/login",
+            json={"email": "admin@example.com", "password": "a" * 100},
+        )
+        assert r.status_code == 422
+
+    async def test_oauth_token_endpoint_rejects_a_password_over_bcrypt_limit(
+        self, client, admin_user
+    ):
+        """OAuth2PasswordRequestForm is not a Pydantic model this codebase
+        controls, so the schema-level guard above cannot reach this
+        endpoint — core.security's own length check is what stops it
+        reaching bcrypt.checkpw() and crashing here. A too-long password is
+        indistinguishable from any other wrong password: 401, not 500 or a
+        different error that would disclose the length limit."""
+        r = await client.post(
+            "/api/auth/token",
+            data={"username": "admin@example.com", "password": "a" * 100},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert r.status_code == 401
+
 
 @pytest.mark.asyncio
 class TestMe:
@@ -60,6 +88,39 @@ class TestMe:
         assert r.status_code == 200
         assert r.json()["email"] == "admin@example.com"
         assert r.json()["role"] == "admin"
+
+    async def test_me_reports_false_for_has_outstanding_welcome_token_even_with_one_stored(
+        self, client, db, admin_token, admin_user
+    ):
+        """Not a bug, unlike GET /users returning this field's bare False
+        default for an ORM row (see users.py's user_out): being
+        authenticated at all and holding an unused welcome token for that
+        SAME account are mutually exclusive by construction — see me()'s
+        own comment for the full chain (login_json/login_form only ever
+        issue a token to someone who already proved they know the
+        account's CURRENT password hash, and a welcome token's only
+        purpose is setting that first real password; using it, or an
+        admin resetting the password some other way, always retires it
+        first). So the real value here is always False regardless of what
+        computing it from the DB would say — this test stores a welcome
+        token row for the SAME account the bearer token authenticates as
+        (a state that cannot arise through any real code path) specifically
+        to confirm me() doesn't even attempt to compute it, rather than
+        happening to agree by coincidence."""
+        from datetime import timedelta
+
+        from app.models import PasswordResetKind, PasswordResetToken, utcnow
+
+        db.add(PasswordResetToken(
+            token_hash="me-endpoint-welcome-hash", user_id=admin_user.id,
+            kind=PasswordResetKind.welcome,
+            expires_at=utcnow() + timedelta(days=1),
+        ))
+        await db.commit()
+
+        r = await client.get("/api/auth/me", headers=auth(admin_token))
+        assert r.status_code == 200
+        assert r.json()["has_outstanding_welcome_token"] is False
 
     async def test_me_requires_auth(self, client):
         r = await client.get("/api/auth/me")
@@ -90,6 +151,32 @@ class TestRegister:
             "email": "sneaky@example.com", "display_name": "S", "password": "Password1!abcd", "role": "viewer"
         }, headers=auth(viewer_token))
         assert r.status_code == 403
+
+    async def test_register_rejects_a_password_over_the_bcrypt_limit(
+        self, client, admin_token
+    ):
+        """bcrypt hashes only the first 72 bytes of its input and raises
+        ValueError past that. Reproduced before this schema-level guard
+        existed: this request reached hash_password -> bcrypt.hashpw()
+        unvalidated and would have crashed with an unhandled 500 instead of
+        a clean 422."""
+        r = await client.post("/api/auth/register", json={
+            "email": "toolong@example.com", "display_name": "Too Long",
+            "password": "a" * 100, "role": "viewer",
+        }, headers=auth(admin_token))
+        assert r.status_code == 422
+
+    async def test_openapi_documents_the_202_pending_response(self):
+        # response.status_code = 202 is set dynamically inside the handler
+        # when a welcome-link send is genuinely backgrounded — FastAPI only
+        # reflects a status code in the generated schema when it's declared
+        # via the route's own `responses=` metadata, so a generated client
+        # would otherwise never know to expect anything but the decorator's
+        # declared 201 here.
+        responses = app.openapi()["paths"]["/api/auth/register"]["post"]["responses"]
+        assert "202" in responses
+        schema_ref = responses["202"]["content"]["application/json"]["schema"]["$ref"]
+        assert schema_ref == responses["201"]["content"]["application/json"]["schema"]["$ref"]
 
 
 @pytest.mark.asyncio

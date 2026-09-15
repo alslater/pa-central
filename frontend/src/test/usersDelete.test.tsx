@@ -14,6 +14,12 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }))
 
+vi.mock('@/hooks/useLiveAlerts', () => ({
+  useLiveAlertsContext: () => ({
+    count: 0, clear: vi.fn(), Toast: null, registerPendingOp: vi.fn(), getSessionEpoch: () => 0,
+  }),
+}))
+
 vi.mock('@/lib/api', () => ({
   api: {
     users: {
@@ -24,6 +30,9 @@ vi.mock('@/lib/api', () => ({
     },
     auth: {
       register: vi.fn(),
+      // Users mounts a one-off config read to decide whether Add User offers
+      // a welcome link or a password field.
+      passwordResetConfig: vi.fn(),
     },
   },
 }))
@@ -39,11 +48,13 @@ import Users from '@/pages/Users'
 const ADMIN: User = {
   id: 1, email: 'admin@example.com', display_name: 'Admin',
   role: 'admin', is_active: true, totp_enabled: false, created_at: '2024-01-01T00:00:00Z',
+  has_outstanding_welcome_token: false,
 }
 
 const TARGET: User = {
   id: 2, email: 'bob@example.com', display_name: 'Bob',
   role: 'viewer', is_active: true, totp_enabled: false, created_at: '2024-01-01T00:00:00Z',
+  has_outstanding_welcome_token: false,
 }
 
 const TARGET_TOTP: User = {
@@ -54,6 +65,7 @@ const TARGET_TOTP: User = {
 const OTHER: User = {
   id: 3, email: 'carol@example.com', display_name: 'Carol',
   role: 'viewer', is_active: true, totp_enabled: false, created_at: '2024-01-01T00:00:00Z',
+  has_outstanding_welcome_token: false,
 }
 
 // Non-admin signed-in users. TARGET (id 2) is already in the default list, so
@@ -64,12 +76,13 @@ const DEVELOPER: User = { ...TARGET, role: 'developer' }
 
 function setup({ totpEnabled = false, withOther = false, as = ADMIN } = {}) {
   vi.mocked(useAuth).mockReturnValue({
-    user: as, loading: false,
-    login: vi.fn(), completeTotp: vi.fn(), logout: vi.fn(),
+    user: as, loading: false, token: 'test-token',
+    login: vi.fn(), completeTotp: vi.fn(), logout: vi.fn(), setToken: vi.fn(), getAuthGeneration: vi.fn(() => 0), beginPasswordChange: vi.fn(() => true), endPasswordChange: vi.fn(),
   })
   const list = [ADMIN, totpEnabled ? TARGET_TOTP : TARGET]
   if (withOther) list.push(OTHER)
   vi.mocked(api.users.list).mockResolvedValue(list)
+  vi.mocked(api.auth.passwordResetConfig).mockResolvedValue({ self_service_enabled: false })
   // Unexpected fetch calls throw so they surface as real test failures rather
   // than silently becoming "Unauthorized" UI noise.
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: unknown) => {

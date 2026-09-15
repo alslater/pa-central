@@ -185,22 +185,22 @@ async def developer_user(db) -> User:
 
 @pytest_asyncio.fixture
 async def admin_token(admin_user) -> str:
-    return create_access_token(admin_user.id)
+    return create_access_token(admin_user.id, admin_user.token_epoch)
 
 
 @pytest_asyncio.fixture
 async def operator_token(operator_user) -> str:
-    return create_access_token(operator_user.id)
+    return create_access_token(operator_user.id, operator_user.token_epoch)
 
 
 @pytest_asyncio.fixture
 async def viewer_token(viewer_user) -> str:
-    return create_access_token(viewer_user.id)
+    return create_access_token(viewer_user.id, viewer_user.token_epoch)
 
 
 @pytest_asyncio.fixture
 async def developer_token(developer_user) -> str:
-    return create_access_token(developer_user.id)
+    return create_access_token(developer_user.id, developer_user.token_epoch)
 
 
 def auth(token: str) -> dict:

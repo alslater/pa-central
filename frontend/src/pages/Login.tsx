@@ -4,12 +4,12 @@ import { useNavigate } from 'react-router'
 import { Shield, Eye, EyeOff } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { Button, Input } from '@/components/ui'
-import { TotpChallenge } from '@/lib/api'
+import { api, TotpChallenge } from '@/lib/api'
 
-type Step = 'credentials' | 'totp-setup' | 'totp-verify'
+type Step = 'credentials' | 'totp-setup' | 'totp-verify' | 'forgot' | 'forgot-sent'
 
 export default function Login() {
-  const { login, completeTotp } = useAuth()
+  const { user, login, completeTotp } = useAuth()
   const navigate = useNavigate()
 
   const [step, setStep] = useState<Step>('credentials')
@@ -20,13 +20,43 @@ export default function Login() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [secretVisible, setSecretVisible] = useState(false)
+  const [selfServiceReset, setSelfServiceReset] = useState(false)
   const codeRef = useRef<HTMLInputElement>(null)
+
+  // Whether to offer "Forgot password?" is a deployment-wide setting that
+  // needs no authentication to read — a locked-out user can't authenticate to
+  // ask. A failure here just leaves the link hidden, which is the safe
+  // default: the login form itself still works.
+  useEffect(() => {
+    api.auth.passwordResetConfig()
+      .then(cfg => setSelfServiceReset(cfg.self_service_enabled))
+      .catch(() => setSelfServiceReset(false))
+  }, [])
 
   useEffect(() => {
     if (step === 'totp-setup' || step === 'totp-verify') {
       codeRef.current?.focus()
     }
   }, [step])
+
+  // Guard (App.tsx) redirects to /login purely on `user` being falsy — but
+  // nothing symmetric redirects AWAY from /login once `user` becomes
+  // truthy again, so any path that sets it without an explicit navigate()
+  // call of its own leaves this form visible despite a valid session.
+  // Concretely: Guard can render <Navigate to="/login"> during the
+  // stale-401-first ordering of the password-change race (see
+  // useAuth.tsx's own setToken docstring) BEFORE the password-change
+  // response — and its setToken(token, user) call — actually arrives;
+  // that call still runs (it operates on AuthProvider state, which
+  // survives the route change and the unmount of whatever page/modal
+  // triggered it), correctly restoring `user`, but by then the browser is
+  // already sitting on /login with nothing to notice and navigate back.
+  // Also covers the more general case of visiting /login directly while
+  // already authenticated. submitTotp's own explicit navigate('/') below
+  // still fires first for that path; this is what covers every other one.
+  useEffect(() => {
+    if (user) navigate('/', { replace: true })
+  }, [user, navigate])
 
   const submitCredentials = async (e: FormEvent) => {
     e.preventDefault()
@@ -38,6 +68,19 @@ export default function Login() {
       setStep(ch.totp_setup_required ? 'totp-setup' : 'totp-verify')
     } catch (err: any) {
       setError(err.message || 'Login failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitForgot = async (e: FormEvent) => {
+    e.preventDefault()
+    setLoading(true); setError('')
+    try {
+      await api.auth.forgotPassword(email)
+      setStep('forgot-sent')
+    } catch (err: any) {
+      setError(err.message || 'Could not send the reset link')
     } finally {
       setLoading(false)
     }
@@ -70,6 +113,8 @@ export default function Login() {
             {step === 'credentials' && 'package-alert fleet management'}
             {step === 'totp-setup' && 'Set up two-factor authentication'}
             {step === 'totp-verify' && 'Two-factor authentication'}
+            {step === 'forgot' && 'Reset your password'}
+            {step === 'forgot-sent' && 'Check your email'}
           </p>
         </div>
 
@@ -83,7 +128,47 @@ export default function Login() {
             <Button type="submit" variant="primary" disabled={loading} className="w-full justify-center mt-2">
               {loading ? 'Signing in…' : 'Sign in'}
             </Button>
+            {selfServiceReset && (
+              <button type="button" onClick={() => { setStep('forgot'); setError('') }}
+                className="bg-transparent border-none cursor-pointer text-muted-foreground text-xs mt-1">
+                Forgot password?
+              </button>
+            )}
           </form>
+        )}
+
+        {step === 'forgot' && (
+          <form onSubmit={submitForgot} className="flex flex-col gap-4">
+            <p className="text-[13px] text-muted-foreground leading-relaxed">
+              Enter your email address and we'll send you a link to choose a new password.
+            </p>
+            <Input label="Email" type="email" value={email}
+              onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required />
+            {error && <ErrorBox>{error}</ErrorBox>}
+            <Button type="submit" variant="primary" disabled={loading} className="w-full justify-center mt-1">
+              {loading ? 'Sending…' : 'Send reset link'}
+            </Button>
+            <button type="button" onClick={() => { setStep('credentials'); setError('') }}
+              className="bg-transparent border-none cursor-pointer text-muted-foreground text-xs mt-1">
+              ← Back to sign in
+            </button>
+          </form>
+        )}
+
+        {step === 'forgot-sent' && (
+          <div className="flex flex-col gap-4">
+            {/* Deliberately does not say whether the address matched an
+                account — the backend returns the same response either way to
+                avoid confirming which addresses are registered. */}
+            <p className="text-[13px] text-muted-foreground leading-relaxed">
+              If an account exists for <span className="text-foreground">{email}</span>, a reset
+              link is on its way. The link can be used once and expires in an hour.
+            </p>
+            <Button variant="secondary" className="w-full justify-center"
+              onClick={() => { setStep('credentials'); setError('') }}>
+              Back to sign in
+            </Button>
+          </div>
         )}
 
         {step === 'totp-setup' && challenge?.totp_uri && (
