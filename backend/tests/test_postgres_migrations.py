@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "32fdcda2b0de"
+HEAD_REVISION = "594fb09ecdfc"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -68,6 +68,9 @@ EXPECTED_ONDELETE = {
     ("finding_acceptance_events", "by_user_id"): "n",
     ("risk_acceptance_events", "risk_record_id"): "c",
     ("risk_acceptance_events", "by_user_id"): "n",
+    # A reset token is meaningless without its user, and leaving orphans
+    # behind would be a standing credential for a deleted account.
+    ("password_reset_tokens", "user_id"): "c",
 }
 
 MIGRATED_TABLES = sorted({t for t, _ in EXPECTED_ONDELETE})
@@ -80,6 +83,7 @@ _POST_BASE_REVISION_TABLES = {
     "risk_records",
     "finding_acceptance_events",
     "risk_acceptance_events",
+    "password_reset_tokens",
 }
 DOWNGRADE_EXPECTED_ONDELETE = {
     k: v for k, v in EXPECTED_ONDELETE.items() if k[0] not in _POST_BASE_REVISION_TABLES
@@ -772,10 +776,10 @@ class TestDowngradeRepairsOrphanedAudit:
             # admin rather than simply taking the lowest id.
             conn.execute(sa.text(
                 "INSERT INTO users (id,email,display_name,hashed_password,role,"
-                "is_active,totp_enabled,created_at) VALUES "
-                "(1,'v@x','V','h','viewer',true,false,now()),"
-                "(2,'a@x','A','h','admin',true,false,now()),"
-                "(3,'d@x','D','h','developer',true,false,now())"
+                "is_active,totp_enabled,created_at,token_epoch) VALUES "
+                "(1,'v@x','V','h','viewer',true,false,now(),0),"
+                "(2,'a@x','A','h','admin',true,false,now(),0),"
+                "(3,'d@x','D','h','developer',true,false,now(),0)"
             ))
             conn.execute(sa.text(
                 "INSERT INTO config_templates (id,name,toml_content,created_by_id,"
@@ -1085,6 +1089,447 @@ class TestRepoScansEnabledAtBackfill:
         )
 
 
+class TestPasswordResetKindBackfill:
+    """c7a2e5f01d38 adds password_reset_tokens.kind, backfills existing rows
+    to 'self_service', and makes the column NOT NULL.
+
+    Seeded before the migration under test, for the reason CLAUDE.md gives:
+    an upgrade against an empty database backfills nothing and adds NOT NULL
+    trivially, so it would pass no matter how the logic behaves. The
+    dialect-divergent part is the batch_alter_table that sets NOT NULL —
+    SQLite rebuilds the table there, PostgreSQL emits a plain ALTER, and only
+    this test exercises the PostgreSQL path against rows that actually exist.
+
+    The backfill value matters: 'self_service' is the most restricted kind, so
+    a token issued before the distinction existed cannot acquire the longer
+    TTL or the throttle exemption of an admin or welcome link.
+    """
+
+    PRE_KIND_REVISION = "b3f81c4d9e27"
+
+    @staticmethod
+    def _seed_pre_migration_rows(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,"
+                    "role,is_active,totp_enabled,created_at) VALUES "
+                    "(1,'kind@example.invalid','Kind','x','viewer',true,false,now())"
+                ))
+                # One live token and one already used: both predate `kind`, and
+                # both must come out of the migration usable-as-before rather
+                # than NULL (which the NOT NULL would reject outright).
+                conn.execute(sa.text(
+                    "INSERT INTO password_reset_tokens "
+                    "(token_hash,user_id,created_at,expires_at,used_at) VALUES "
+                    "('live','1',now(),now() + interval '1 hour',NULL)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO password_reset_tokens "
+                    "(token_hash,user_id,created_at,expires_at,used_at) VALUES "
+                    "('spent','1',now() - interval '2 hours',"
+                    "now() - interval '1 hour',now() - interval '90 minutes')"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def backfilled(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_KIND_REVISION).returncode == 0
+        self._seed_pre_migration_rows(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_existing_rows_are_backfilled_to_self_service(self, backfilled):
+        with backfilled.connect() as conn:
+            rows = conn.execute(sa.text(
+                "SELECT token_hash, kind FROM password_reset_tokens ORDER BY token_hash"
+            )).all()
+        assert [(r.token_hash, r.kind) for r in rows] == [
+            ("live", "self_service"),
+            ("spent", "self_service"),
+        ]
+
+    def test_the_column_is_not_null_after_the_backfill(self, backfilled):
+        """The batch_alter_table step. Adding NOT NULL to a table that already
+        holds rows is exactly what fails if the backfill is wrong or skipped,
+        and it is a no-op against the empty database the smoke test uses."""
+        with backfilled.connect() as conn:
+            nullable = conn.execute(sa.text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'password_reset_tokens' AND column_name = 'kind'"
+            )).scalar_one()
+        assert nullable == "NO"
+
+    def test_a_null_kind_is_rejected_after_the_migration(self, backfilled):
+        with backfilled.connect() as conn, pytest.raises(sa.exc.IntegrityError):
+            conn.execute(sa.text(
+                "INSERT INTO password_reset_tokens "
+                "(token_hash,user_id,created_at,expires_at,kind) VALUES "
+                "('nokind','1',now(),now() + interval '1 hour',NULL)"
+            ))
+
+    def test_the_enum_rejects_a_value_outside_the_three_kinds(self, backfilled):
+        """PostgreSQL gets a real enum type here; SQLite renders it as VARCHAR
+        + CHECK. Only this side can confirm the type was actually created."""
+        with backfilled.connect() as conn, pytest.raises(sa.exc.DataError):
+            conn.execute(sa.text(
+                "INSERT INTO password_reset_tokens "
+                "(token_hash,user_id,created_at,expires_at,kind) VALUES "
+                "('bogus','1',now(),now() + interval '1 hour','not_a_kind')"
+            ))
+
+    @staticmethod
+    def _interrupt_after(url: str, stage: str) -> None:
+        """Leave the database as an upgrade that died partway would.
+
+        'type'   — enum created, nothing else.
+        'column' — enum + nullable column, no backfill, no NOT NULL.
+        'backfill' — enum + column + backfill, but still nullable.
+        """
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "CREATE TYPE passwordresetkind AS ENUM "
+                    "('self_service','admin','welcome')"
+                ))
+                if stage == "type":
+                    return
+                conn.execute(sa.text(
+                    "ALTER TABLE password_reset_tokens ADD COLUMN kind passwordresetkind"
+                ))
+                if stage == "column":
+                    return
+                conn.execute(sa.text(
+                    "UPDATE password_reset_tokens SET kind = 'self_service'"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.mark.parametrize("stage", ["type", "column", "backfill"])
+    def test_replay_over_a_partially_applied_migration_completes_it(
+        self, postgres_url, stage
+    ):
+        """A run interrupted between steps must be repaired by the next one.
+
+        This migration has three parts — create the type, add the column,
+        backfill, enforce NOT NULL — and replay is a real scenario: the
+        stranded-database recovery in CLAUDE.md rewinds the alembic_version
+        stamp without touching the schema.
+
+        Guarding the whole upgrade on "does the column exist" made steps after
+        add_column unreachable, so replay reported success while leaving NULL
+        values and a nullable column — a shape the ORM's nullable=False
+        mapping cannot load. Measured before the fix: exit 0, one NULL row,
+        is_nullable = YES.
+        """
+        assert alembic(postgres_url, "upgrade", self.PRE_KIND_REVISION).returncode == 0
+        self._seed_pre_migration_rows(postgres_url)
+        self._interrupt_after(postgres_url, stage)
+
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                nulls = conn.execute(sa.text(
+                    "SELECT count(*) FROM password_reset_tokens WHERE kind IS NULL"
+                )).scalar_one()
+                nullable = conn.execute(sa.text(
+                    "SELECT is_nullable FROM information_schema.columns WHERE "
+                    "table_name = 'password_reset_tokens' AND column_name = 'kind'"
+                )).scalar_one()
+                rows = conn.execute(sa.text(
+                    "SELECT token_hash, kind FROM password_reset_tokens "
+                    "ORDER BY token_hash"
+                )).all()
+        finally:
+            engine.dispose()
+
+        assert nulls == 0, (
+            f"replay after interruption at '{stage}' left {nulls} NULL kind "
+            "values — the ORM cannot load them"
+        )
+        assert nullable == "NO", (
+            f"replay after interruption at '{stage}' left the column nullable"
+        )
+        assert [(r.token_hash, r.kind) for r in rows] == [
+            ("live", "self_service"),
+            ("spent", "self_service"),
+        ]
+
+    def test_downgrade_with_representative_data_keeps_the_rows(self, postgres_url):
+        """Downgrading against a populated table, not an empty one: dropping
+        a column is where a rebuild-style migration loses rows, and an empty
+        table hides that entirely."""
+        assert alembic(postgres_url, "upgrade", self.PRE_KIND_REVISION).returncode == 0
+        self._seed_pre_migration_rows(postgres_url)
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+
+        r = alembic(postgres_url, "downgrade", self.PRE_KIND_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(sa.text(
+                    "SELECT token_hash FROM password_reset_tokens ORDER BY token_hash"
+                )).all()
+                columns = {
+                    c.column_name for c in conn.execute(sa.text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'password_reset_tokens'"
+                    )).all()
+                }
+                # The enum type must go with the column, or re-upgrading hits
+                # "type already exists".
+                remaining = conn.execute(sa.text(
+                    "SELECT count(*) FROM pg_type WHERE typname = 'passwordresetkind'"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+
+        assert [r.token_hash for r in rows] == ["live", "spent"]
+        assert "kind" not in columns
+        assert remaining == 0
+
+    def test_upgrade_downgrade_upgrade_round_trips_with_data(self, postgres_url):
+        """The replay path. Rewinding and re-applying must land the same
+        rows in the same state — this is what catches an enum left behind by
+        the downgrade, or a backfill that only works on a virgin table."""
+        assert alembic(postgres_url, "upgrade", self.PRE_KIND_REVISION).returncode == 0
+        self._seed_pre_migration_rows(postgres_url)
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        assert alembic(postgres_url, "downgrade", self.PRE_KIND_REVISION).returncode == 0
+
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(sa.text(
+                    "SELECT token_hash, kind FROM password_reset_tokens "
+                    "ORDER BY token_hash"
+                )).all()
+        finally:
+            engine.dispose()
+        assert [(r.token_hash, r.kind) for r in rows] == [
+            ("live", "self_service"),
+            ("spent", "self_service"),
+        ]
+
+
+class TestUsersTokenEpochMigration:
+    """594fb09ecdfc adds users.token_epoch: NOT NULL, defaulted to 0 for
+    existing rows, with no server default left behind afterwards.
+
+    The dialect-divergent part is the batch_alter_table that drops the
+    server default — SQLite rebuilds the table there, PostgreSQL emits a
+    plain ALTER TABLE ... ALTER COLUMN, and only this test exercises the
+    PostgreSQL path. Seeded before the migration under test, for the reason
+    CLAUDE.md gives: an upgrade against an empty database never has an
+    existing row to backfill, so the server-default-drop step is exercised
+    against zero rows either way and would pass however that step behaves.
+
+    Existing-row backfill matters for the feature this column supports: a
+    bearer token issued before the migration carries no `epc` claim, and
+    decode_access_token treats that as epoch 0 — so an existing user must
+    actually be backfilled to 0, not left NULL (which NOT NULL would reject)
+    or some other value, or their pre-existing sessions would be rejected by
+    a deploy that was never supposed to force a logout.
+    """
+
+    PRE_EPOCH_REVISION = "c7a2e5f01d38"
+
+    @staticmethod
+    def _seed_pre_migration_user(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,"
+                    "role,is_active,totp_enabled,created_at) VALUES "
+                    "(1,'epoch@example.invalid','Epoch','x','viewer',true,false,now())"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def migrated(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_EPOCH_REVISION).returncode == 0
+        self._seed_pre_migration_user(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_an_existing_user_is_backfilled_to_epoch_zero(self, migrated):
+        with migrated.connect() as conn:
+            epoch = conn.execute(sa.text(
+                "SELECT token_epoch FROM users WHERE id = 1"
+            )).scalar_one()
+        assert epoch == 0
+
+    def test_the_column_is_not_null(self, migrated):
+        with migrated.connect() as conn:
+            nullable = conn.execute(sa.text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'users' AND column_name = 'token_epoch'"
+            )).scalar_one()
+        assert nullable == "NO"
+
+    def test_no_server_default_is_left_on_the_column(self, migrated):
+        """The step the naive version of this migration skipped on replay:
+        guarding the default-drop on the same 'column already exists' check
+        as add_column left a stray `DEFAULT 0` in place whenever the
+        migration was interrupted between the two steps and then re-run.
+        Reproduced directly against SQLite before this test existed; asserted
+        here against PostgreSQL's own catalog, not re-derived behaviour, so a
+        regression shows up as a column_default value rather than requiring
+        an insert to omit the column and observe what happens.
+        """
+        with migrated.connect() as conn:
+            default = conn.execute(sa.text(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = 'users' AND column_name = 'token_epoch'"
+            )).scalar_one()
+        assert default is None
+
+    def test_an_insert_omitting_the_column_is_rejected(self, migrated):
+        """The point of dropping the server default: a caller that forgets
+        to set token_epoch must fail loudly, not silently get 0 from the
+        database. The ORM always sets it (User.token_epoch has an
+        application-level default), so only a caller bypassing the ORM
+        entirely — exactly what this raw INSERT simulates — would ever hit
+        this."""
+        with migrated.connect() as conn, pytest.raises(sa.exc.IntegrityError):
+            conn.execute(sa.text(
+                "INSERT INTO users "
+                "(id,email,display_name,hashed_password,role,is_active,"
+                "totp_enabled,created_at) VALUES "
+                "(2,'noepoch@example.invalid','NoEpoch','x','viewer',true,"
+                "false,now())"
+            ))
+
+    def test_upgrade_downgrade_upgrade_round_trips_with_data(self, postgres_url):
+        """The replay path this migration's own docstring is about: a
+        partial failure that leaves the server default behind must not
+        survive a second upgrade, and the column must still be usable
+        end to end afterwards."""
+        assert alembic(postgres_url, "upgrade", self.PRE_EPOCH_REVISION).returncode == 0
+        self._seed_pre_migration_user(postgres_url)
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        assert alembic(postgres_url, "downgrade", self.PRE_EPOCH_REVISION).returncode == 0
+
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                epoch = conn.execute(sa.text(
+                    "SELECT token_epoch FROM users WHERE id = 1"
+                )).scalar_one()
+                default = conn.execute(sa.text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_name = 'users' AND column_name = 'token_epoch'"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+        assert epoch == 0
+        assert default is None
+
+    def test_downgrade_drops_the_column(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        assert alembic(postgres_url, "downgrade", self.PRE_EPOCH_REVISION).returncode == 0
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                columns = {
+                    c.column_name for c in conn.execute(sa.text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'users'"
+                    )).all()
+                }
+        finally:
+            engine.dispose()
+        assert "token_epoch" not in columns
+
+    @staticmethod
+    def _interrupt_after_add_column(url: str) -> None:
+        """Leave the database exactly as a run that died between `add_column`
+        and the server-default-drop would: the column exists, still carrying
+        `server_default='0'`, with `alembic_version` stamped at the *prior*
+        revision (as the stranded-database recovery in CLAUDE.md leaves it).
+        """
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "ALTER TABLE users ADD COLUMN token_epoch INTEGER "
+                    "NOT NULL DEFAULT 0"
+                ))
+        finally:
+            engine.dispose()
+
+    def test_replay_over_an_interrupted_migration_drops_the_stray_default(
+        self, postgres_url
+    ):
+        """The regression this migration's own docstring describes: guarding
+        the default-drop on the same 'column already exists' check as
+        add_column made the drop step unreachable on replay, since the
+        column already existing skipped the whole block — reproduced
+        directly against SQLite (a DEFAULT 0 survived a second
+        `upgrade head`) before this migration's guards were split. This is
+        the PostgreSQL side of the same replay, which
+        `test_upgrade_downgrade_upgrade_round_trips_with_data` above cannot
+        exercise: a full `downgrade` drops the column outright, so the
+        subsequent upgrade re-adds it from scratch and never reaches the
+        half-migrated state a genuine crash leaves behind — only directly
+        forcing that state (as this test does) reaches it.
+        """
+        assert alembic(postgres_url, "upgrade", self.PRE_EPOCH_REVISION).returncode == 0
+        self._seed_pre_migration_user(postgres_url)
+        self._interrupt_after_add_column(postgres_url)
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    f"UPDATE alembic_version SET version_num = "
+                    f"'{self.PRE_EPOCH_REVISION}'"
+                ))
+        finally:
+            engine.dispose()
+
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                default = conn.execute(sa.text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_name = 'users' AND column_name = 'token_epoch'"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+        assert default is None, (
+            f"replay over an interrupted migration left column_default="
+            f"{default!r} — the naive single-guard version of this migration "
+            "left DEFAULT 0 in place here"
+        )
+
+
 class TestDeleteCascadeBehaviour:
     """End-to-end delete behaviour, enforced by PostgreSQL rather than a PRAGMA."""
 
@@ -1099,9 +1544,9 @@ class TestDeleteCascadeBehaviour:
         with migrated.connect() as conn:
             conn.execute(sa.text(
                 "INSERT INTO users (id,email,display_name,hashed_password,role,"
-                "is_active,totp_enabled,created_at) VALUES "
-                "(1,'a@x','A','h','admin',true,false,now()),"
-                "(2,'o@x','O','h','developer',true,false,now())"
+                "is_active,totp_enabled,created_at,token_epoch) VALUES "
+                "(1,'a@x','A','h','admin',true,false,now(),0),"
+                "(2,'o@x','O','h','developer',true,false,now(),0)"
             ))
             conn.execute(sa.text(
                 "INSERT INTO hosts (id,owner_user_id,name,daemon_status,created_at) "
@@ -1133,8 +1578,8 @@ class TestDeleteCascadeBehaviour:
         with migrated.connect() as conn:
             conn.execute(sa.text(
                 "INSERT INTO users (id,email,display_name,hashed_password,role,"
-                "is_active,totp_enabled,created_at) "
-                "VALUES (1,'a@x','A','h','admin',true,false,now())"
+                "is_active,totp_enabled,created_at,token_epoch) "
+                "VALUES (1,'a@x','A','h','admin',true,false,now(),0)"
             ))
             conn.execute(sa.text(
                 "INSERT INTO hosts (id,owner_user_id,name,daemon_status,created_at) "

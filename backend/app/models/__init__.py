@@ -96,6 +96,33 @@ class Ecosystem(str, enum.Enum):
     other = "other"
 
 
+# Values accepted as true for a SettingValueType.bool setting. PATCH
+# canonicalises writes to "true"/"false", so anything else is a row predating
+# that or written directly to the database — still readable, never produced.
+# Defined here so the write path and every runtime reader share one set
+# rather than each restating it.
+BOOL_TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
+
+
+def setting_is_true(value: str | None) -> bool:
+    return (value or "").strip().lower() in BOOL_TRUE_VALUES
+
+
+class PasswordResetKind(str, enum.Enum):
+    """Why a reset token was issued.
+
+    The three flows have materially different rules — TTL, and whether the
+    public per-account throttle applies — so the row has to record which one
+    created it. Without this the public forgot-password quota counts admin
+    and welcome tokens too (five admin resets lock a user out of self-service
+    recovery), and a self-service link can inherit a 24-hour or 7-day expiry
+    from whichever token happened to be outstanding.
+    """
+    self_service = "self_service"
+    admin = "admin"
+    welcome = "welcome"
+
+
 class SettingValueType(str, enum.Enum):
     string = "string"
     int = "int"
@@ -136,6 +163,12 @@ class User(Base):
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
+    # Bumped by set_password. Embedded in every access token issued
+    # afterwards; get_current_user rejects a token carrying an older value.
+    # This is what makes a password reset actually revoke sessions — without
+    # it, a JWT issued before the reset (sub/exp only) keeps working for its
+    # full lifetime regardless of the password changing underneath it.
+    token_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     api_keys: Mapped[list[ApiKey]] = relationship("ApiKey", back_populates="user", cascade="all, delete-orphan")
 
@@ -567,4 +600,49 @@ class RiskAcceptanceEvent(Base):
 
     __table_args__ = (
         Index("ix_risk_acceptance_events_record_at", "risk_record_id", "at"),
+    )
+
+
+# ── Password reset ────────────────────────────────────────────────────────────
+
+class PasswordResetToken(Base):
+    """A single-use, expiring token backing the self-service password reset flow.
+
+    Only the SHA-256 hash of the token is stored, never the raw value — the raw
+    token exists only inside the emailed link, so a database read cannot be
+    escalated into a password reset for an arbitrary account. This mirrors how
+    ApiKey stores key_hash rather than the key itself.
+
+    Rows are kept (not deleted) after use — not to distinguish "already
+    used" from "unknown" at read time; consume_reset_token deliberately
+    collapses used, expired, unknown and deactivated-account tokens to the
+    same None, and POST /auth/reset-password returns the identical "invalid
+    or expired" response for all of them, so no such distinction is ever
+    surfaced. Kept because self-service throttling (see
+    prepare_reset_email's RESET_REQUESTS_PER_HOUR check) uses these rows as
+    its own ledger: deleting a token on use would erase the count the public
+    rate limit reads, letting an attacker request unlimited links by
+    exhausting each one. The scheduler prunes rows once they are well past
+    expiry.
+    """
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    # Which flow issued this token. Governs its TTL and whether it counts
+    # against the public forgot-password throttle — see PasswordResetKind.
+    kind: Mapped[PasswordResetKind] = mapped_column(
+        Enum(PasswordResetKind, create_constraint=True),
+        default=PasswordResetKind.self_service,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_password_reset_tokens_user_expires", "user_id", "expires_at"),
     )

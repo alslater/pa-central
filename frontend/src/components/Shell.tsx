@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState, useRef } from 'react'
+import { ReactNode, useState } from 'react'
 import { NavLink, useNavigate } from 'react-router'
 import {
   LayoutDashboard, Server, Bell, ScanSearch, Settings2,
@@ -6,9 +6,11 @@ import {
   Sun, Moon, Monitor,
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
+import { useLiveAlertsContext } from '@/hooks/useLiveAlerts'
 import { api } from '@/lib/api'
 import { Modal, Input, Button, useToast } from '@/components/ui'
 import { useTheme, ThemeMode } from '@/hooks/useTheme'
+import { codePointLength, MAX_PASSWORD_BYTES, utf8ByteLength } from '@/lib/text'
 
 const NAV = [
   { to: '/',          label: 'Dashboard',   icon: LayoutDashboard },
@@ -24,54 +26,7 @@ const NAV = [
 ]
 
 
-function useLiveAlerts() {
-  const [count, setCount] = useState(0)
-  const abortRef = useRef<AbortController | null>(null)
-
-  useEffect(() => {
-    const token = localStorage.getItem('token')
-    if (!token) return
-
-    const controller = new AbortController()
-    abortRef.current = controller
-
-    ;(async () => {
-      try {
-        const res = await fetch('/api/alerts/stream', {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: controller.signal,
-        })
-        if (!res.ok || !res.body) return
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buf = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buf += decoder.decode(value, { stream: true })
-          const lines = buf.split('\n')
-          buf = lines.pop() ?? ''
-          for (const line of lines) {
-            if (!line.startsWith('data:')) continue
-            try {
-              const data = JSON.parse(line.slice(5).trim())
-              if (data.type === 'connected') continue
-              setCount(n => n + 1)
-            } catch { /* ignore malformed SSE data */ }
-          }
-        }
-      } catch {
-        // AbortError on unmount — ignore
-      }
-    })()
-
-    return () => { controller.abort() }
-  }, [])
-
-  return { count, clear: () => setCount(0) }
-}
-
-function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show }: {
+export function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show }: {
   userId: number
   totpEnabled: boolean
   onClose: () => void
@@ -87,19 +42,71 @@ function SecurityModal({ userId, totpEnabled: initialTotpEnabled, onClose, show 
   const [totpSaving, setTotpSaving] = useState(false)
   const [totpError, setTotpError] = useState<string | null>(null)
 
+  const { setToken, getAuthGeneration, beginPasswordChange, endPasswordChange } = useAuth()
+
   const savePassword = async () => {
-    if (next.length < 12) { setPwError('Password must be at least 12 characters'); return }
+    // codePointLength, not next.length (UTF-16 code units): a surrogate
+    // pair (most emoji) counts as 2 in .length but 1 code point, which is
+    // what Pydantic's min_length actually measures — four emoji plus
+    // "Aa1!" is .length === 12 here but only 8 code points, passing this
+    // check while the backend's 422 rejected it with nothing shown here.
+    if (codePointLength(next) < 12) { setPwError('Password must be at least 12 characters'); return }
     const complexity = [/[A-Z]/, /[a-z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(r => r.test(next)).length
     if (complexity < 3) { setPwError('Password must contain at least 3 of: uppercase, lowercase, digits, symbols'); return }
+    // Mirrors the backend's own bcrypt-byte-limit validator
+    // (_reject_password_over_bcrypt_limit, schemas/__init__.py): bcrypt
+    // hashes only the first 72 UTF-8 *bytes* and rejects anything longer —
+    // "Aa1" plus 35 "é" is 38 code points (comfortably past the minimum
+    // above) but 73 UTF-8 bytes, over the limit, and previously passed
+    // this modal's checks entirely.
+    if (utf8ByteLength(next) > MAX_PASSWORD_BYTES) {
+      setPwError(`Password must be at most ${MAX_PASSWORD_BYTES} bytes once encoded — non-ASCII characters (accents, emoji) can use more than one byte each.`)
+      return
+    }
     if (next !== confirm) { setPwError('Passwords do not match'); return }
+    // Reserves the single shared slot BEFORE this component's own
+    // pwSaving is even set — pwSaving is local to this mount and resets
+    // to false on remount, so it cannot by itself stop a second,
+    // independent savePassword() (a closed-and-reopened modal is a fresh
+    // component instance) from starting a second request while this
+    // one's is still in flight. See beginPasswordChange's own docstring
+    // for why serializing at the source, not picking a winner after the
+    // fact via the generation guard alone, is what this needs: set_
+    // password bumps token_epoch unconditionally on every call, and the
+    // epoch check is exact equality, so only the LATEST commit's token is
+    // ever valid — an ordering the browser cannot infer from which
+    // response merely arrived first.
+    if (!beginPasswordChange()) {
+      setPwError('A password change is already in progress — please wait for it to finish.')
+      return
+    }
     setPwSaving(true); setPwError(null)
+    // Captured before the await, at this call's true start — not after.
+    // Passed to setToken below, which silently ignores this call if the
+    // generation has since moved on (an explicit logout, or a fresh
+    // login, landing while this request was in flight) — see its own
+    // docstring for that separate race, which beginPasswordChange above
+    // does not cover (it only serializes two overlapping password
+    // changes against EACH OTHER, not against a logout).
+    const authGeneration = getAuthGeneration()
     try {
-      await api.users.update(userId, { password: next } as any)
+      const result = await api.users.update(userId, { password: next })
+      // This is always a self-change (SecurityModal is only ever opened for
+      // the logged-in user's own account) — the backend bumped this
+      // account's token_epoch, invalidating the very token that just
+      // authenticated this request. Without installing the replacement, the
+      // next API call using the stale token 401s and silently logs the user
+      // out straight after being told "Password changed". Passing `result`
+      // itself (not just its access_token) lets setToken restore `user` in
+      // the same call — see its own docstring for why that matters: an
+      // older in-flight request's stale 401 for the pre-change token can
+      // otherwise clear `user` in the window before this line runs.
+      if ('access_token' in result) setToken(result.access_token, result, authGeneration)
       show('Password changed')
       setNext(''); setConfirm('')
       onClose()
     } catch (e: any) { setPwError(e.message) }
-    finally { setPwSaving(false) }
+    finally { setPwSaving(false); endPasswordChange() }
   }
 
   const disableTotp = async () => {
@@ -178,7 +185,7 @@ const THEME_LABEL: Record<ThemeMode, string> = { dark: 'Dark', light: 'Light', s
 export function Shell({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
-  const { count, clear } = useLiveAlerts()
+  const { count, clear, Toast: liveAlertsToast } = useLiveAlertsContext()
   const [showSecurity, setShowSecurity] = useState(false)
   const { mode, setMode } = useTheme()
   const { show, Toast } = useToast()
@@ -258,6 +265,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <SecurityModal userId={user.id} totpEnabled={user.totp_enabled} onClose={() => setShowSecurity(false)} show={show} />
       )}
       {Toast}
+      {liveAlertsToast}
 
       {/* Main */}
       <main className="flex-1 overflow-auto flex flex-col">

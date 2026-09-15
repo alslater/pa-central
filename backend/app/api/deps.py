@@ -29,9 +29,10 @@ async def get_current_user(
 ) -> User:
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    user_id = decode_access_token(token)
-    if not user_id:
+    decoded = decode_access_token(token)
+    if not decoded:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    user_id, token_epoch = decoded
     try:
         uid = int(user_id)
     except ValueError:
@@ -39,6 +40,12 @@ async def get_current_user(
     user = await db.get(User, uid)
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # A password change bumps User.token_epoch (see set_password), so a
+    # token issued before that change carries a stale value here and must be
+    # rejected even though it has not expired — otherwise a reset does not
+    # actually revoke a session an attacker already holds.
+    if token_epoch != user.token_epoch:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return user
 
 
@@ -62,9 +69,10 @@ async def get_current_user_or_api_key(
 ) -> User:
     """Accept either a JWT bearer token or an X-API-Key. Returns the owning User."""
     if token:
-        user_id = decode_access_token(token)
-        if not user_id:
+        decoded = decode_access_token(token)
+        if not decoded:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        user_id, token_epoch = decoded
         try:
             uid = int(user_id)
         except ValueError:
@@ -72,6 +80,10 @@ async def get_current_user_or_api_key(
         user = await db.get(User, uid)
         if not user or not user.is_active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        # See get_current_user above — same reasoning, duplicated because
+        # this path also accepts an API key and cannot simply delegate to it.
+        if token_epoch != user.token_epoch:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
         return user
     if api_key:
         key_hash = hash_api_key(api_key)

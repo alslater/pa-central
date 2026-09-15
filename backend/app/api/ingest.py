@@ -191,20 +191,17 @@ async def _send_result_email(result_id: int) -> None:
     from app.core.db_config import async_connect_args, async_url
     from app.core.email import (
         EmailService,
-        SmtpConfig,
         build_failure_email,
         build_findings_email,
         filter_deliverable_recipients,
         filter_findings_by_severity,
     )
-    from app.core.encryption import decrypt_value
+    from app.core.smtp_settings import build_smtp_config, load_settings_map
     from app.core.valkey import get_valkey
     from app.models import (
         RepoScan,
         RepoScanResult,
         RepoScanStatus,
-        SettingValueType,
-        SystemSetting,
         User,
         UserRole,
     )
@@ -223,31 +220,10 @@ async def _send_result_email(result_id: int) -> None:
                 return
 
             # Load SMTP config from system settings
-            sm_result = await session.execute(select(SystemSetting))
-            settings_map: dict[str, str] = {}
-            for s in sm_result.scalars().all():
-                if s.value is None:
-                    settings_map[s.key] = ""
-                elif s.value_type == SettingValueType.secret:
-                    try:
-                        settings_map[s.key] = decrypt_value(s.value, app_settings.settings_encryption_key)
-                    except Exception:  # noqa: BLE001
-                        settings_map[s.key] = ""
-                else:
-                    settings_map[s.key] = s.value
-
-            smtp_host = settings_map.get("smtp_host")
-            if not smtp_host:
+            settings_map = await load_settings_map(session)
+            smtp_cfg = build_smtp_config(settings_map)
+            if not smtp_cfg:
                 return  # SMTP not configured
-
-            smtp_cfg = SmtpConfig(
-                host=smtp_host,
-                port=int(settings_map.get("smtp_port") or "587"),
-                username=settings_map.get("smtp_username") or None,
-                password=settings_map.get("smtp_password") or None,
-                from_addr=settings_map.get("smtp_from", "pa-central@localhost"),
-                tls_mode=settings_map.get("smtp_tls_mode", "starttls"),
-            )
             svc = EmailService(smtp_cfg)
 
             admins = await session.execute(

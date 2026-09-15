@@ -13,7 +13,15 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
     },
   })
   if (res.status === 401) {
-    window.dispatchEvent(new Event('auth:unauthorized'))
+    // Carries the token THIS request actually authenticated with — a
+    // concurrent self-password-change (setToken) can install a brand new
+    // token in localStorage while an older request (already in flight
+    // with the pre-change token) is still pending; that old request's 401
+    // is real (its token's epoch was just bumped server-side) but says
+    // nothing about the NEW token's validity. The listener compares this
+    // against the current stored token before deciding to clear anything,
+    // rather than treating every 401 as "the active session is dead."
+    window.dispatchEvent(new CustomEvent('auth:unauthorized', { detail: { token } }))
     throw new Error('Unauthorized')
   }
   if (!res.ok) {
@@ -39,6 +47,57 @@ export type Ecosystem = 'pypi' | 'npm' | 'packagist' | 'other'
 export interface User {
   id: number; email: string; display_name: string
   role: UserRole; is_active: boolean; totp_enabled: boolean; created_at: string
+  has_outstanding_welcome_token: boolean
+}
+
+/** POST /auth/register's own response — User plus two independent facts
+ *  about the welcome link, both null when self-service reset is off (no
+ *  email or token is ever created).
+ *
+ *  `welcome_email_sent`: was the SMTP send itself confirmed. `false` does
+ *  not distinguish a confirmed SMTP failure from a merely unconfirmed one
+ *  (a timeout, an ambiguous disconnect) — the backend never rolls the
+ *  account back on either, so this is informational only: check with the
+ *  user, or trigger a fresh reset once the situation is understood.
+ *
+ *  `welcome_link_still_valid`: is the token behind that email still the
+ *  account's live one, independent of whether the send succeeded. A
+ *  concurrent event (most commonly, an admin disabling self-service reset
+ *  or clearing its SMTP config while this send was in flight) can retire
+ *  it even when `welcome_email_sent` is `true` — the message really was
+ *  delivered, but the link inside it is already dead.
+ *
+ *  `op_id`: present whenever a dispatch was *attempted*, including when
+ *  admission was refused — pair with `registerPendingOp` (see
+ *  useLiveAlerts) to reconcile the eventual outcome via the admin-alerts
+ *  SSE stream. Null when the send (or non-send, for self-service-off)
+ *  completed synchronously. Note that `welcome_email_sent`/
+ *  `welcome_link_still_valid` are null only when a send is genuinely in
+ *  flight; on the admission-refused path `welcome_email_sent` is `false`
+ *  (nothing is running) but `welcome_link_still_valid` is `true` — a live
+ *  token was already committed before dispatch was ever attempted, and
+ *  refused admission never retires it. The two booleans are therefore NOT
+ *  always equal — `welcome_email_sent` is the one that distinguishes
+ *  every settled-failure branch from the genuinely-in-flight case, so the
+ *  code below checks it first, then `op_id` (never `welcome_link_still_
+ *  valid`) to tell the settled-failure branches apart from each other. */
+export interface RegisterResult extends User {
+  welcome_email_sent: boolean | null
+  welcome_link_still_valid: boolean | null
+  op_id: string | null
+}
+
+/** PATCH /users/{id}'s own response when the caller changed their own
+ *  password — User plus a replacement access token.
+ *
+ *  A password change bumps the account's token_epoch (see the backend's
+ *  set_password), which invalidates every bearer token already issued to
+ *  it — including the one that just authenticated this very request, when
+ *  the caller changed their *own* password. `access_token` is present only
+ *  in that case; every other PATCH (a different field, or an admin
+ *  changing someone else's password) returns a plain `User`. */
+export interface SelfPasswordChangeResult extends User {
+  access_token: string
 }
 
 export interface TotpChallenge {
@@ -212,6 +271,16 @@ export interface SystemSetting {
   is_default: boolean
 }
 
+// Whether self-service password reset can actually be enabled right now,
+// per the backend's own validation contract (SMTP host/port/TLS mode/From
+// address, App Base URL shape and scheme) — not a re-derived frontend
+// guess, which previously only checked smtp_host/app_base_url non-empty
+// and disagreed with the backend for every other precondition.
+export interface PasswordResetReadiness {
+  ready: boolean
+  reasons: string[]
+}
+
 export interface LintResult {
   valid: boolean
   errors: string[]
@@ -267,6 +336,33 @@ export interface PaginatedRisks {
   page_size: number
 }
 
+export interface PasswordResetConfig {
+  self_service_enabled: boolean
+}
+
+/** Admin-initiated reset. With self-service enabled a link is emailed and
+ *  `password` is null; otherwise a generated password is returned once.
+ *
+ *  `op_id`: present whenever a dispatch was *attempted*, including when
+ *  admission was refused — pair with `registerPendingOp` (see
+ *  useLiveAlerts) to reconcile the eventual outcome via the admin-alerts
+ *  SSE stream. Null when the send (or non-send, for self-service-off)
+ *  completed synchronously.
+ *
+ *  `reset_link_sent` is null (rather than a confirmed true/false) only
+ *  when a send was genuinely admitted and is still running — the outcome
+ *  isn't known yet at response time and arrives via SSE. `op_id` being
+ *  set is *not* sufficient: an `op_id` is also issued when admission was
+ *  refused, and that path returns `false`, since nothing is running and
+ *  no further outcome will ever arrive. Read `op_id` first regardless
+ *  (the code below does); this field is the settled synchronous answer
+ *  only when `op_id` is null. */
+export interface PasswordResetResult {
+  password: string | null
+  reset_link_sent: boolean | null
+  op_id: string | null
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -283,8 +379,21 @@ export const api = {
       request<void>('/auth/totp/disable', { method: 'POST', body: JSON.stringify({ code }) }),
     totpStatus: () => request<{ totp_enabled: boolean }>('/auth/totp/status'),
     me: () => request<User>('/auth/me'),
-    register: (data: { email: string; display_name: string; password: string; role: UserRole }) =>
-      request<User>('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+    /** `password` is omitted when self-service reset is enabled — the user
+     *  is emailed a welcome link and sets their own; the backend rejects a
+     *  supplied password in that mode. */
+    register: (data: { email: string; display_name: string; password?: string; role: UserRole }) =>
+      request<RegisterResult>('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+    passwordResetConfig: () =>
+      request<PasswordResetConfig>('/auth/password-reset-config'),
+    forgotPassword: (email: string) =>
+      request<{ ok: boolean }>('/auth/forgot-password', {
+        method: 'POST', body: JSON.stringify({ email })
+      }),
+    resetPassword: (token: string, new_password: string) =>
+      request<void>('/auth/reset-password', {
+        method: 'POST', body: JSON.stringify({ token, new_password })
+      }),
   },
 
   dashboard: {
@@ -372,19 +481,21 @@ export const api = {
   users: {
     list: () => request<User[]>('/users'),
     update: (id: number, data: Partial<User & { password: string }>) =>
-      request<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      request<User | SelfPasswordChangeResult>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: number) =>
       request<void>(`/users/${id}`, { method: 'DELETE' }),
     resetTotp: (id: number) =>
       request<User>(`/users/${id}/reset-totp`, { method: 'POST' }),
     resetPassword: (id: number) =>
-      request<{ password: string }>(`/users/${id}/reset-password`, { method: 'POST' }),
+      request<PasswordResetResult>(`/users/${id}/reset-password`, { method: 'POST' }),
   },
 
   systemSettings: {
     list: () => request<SystemSetting[]>('/system-settings'),
     update: (updates: Record<string, string | null>) =>
       request<SystemSetting[]>('/system-settings', { method: 'PATCH', body: JSON.stringify({ updates }) }),
+    passwordResetReadiness: () =>
+      request<PasswordResetReadiness>('/system-settings/password-reset-readiness'),
   },
 
   repoCredentials: {

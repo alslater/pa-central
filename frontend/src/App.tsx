@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router'
 import { AuthProvider, useAuth } from '@/hooks/useAuth'
+import { LiveAlertsProvider } from '@/hooks/useLiveAlerts'
 import Login from '@/pages/Login'
+import ResetPassword from '@/pages/ResetPassword'
 import Dashboard from '@/pages/Dashboard'
 import Hosts from '@/pages/Hosts'
 import HostDetail from '@/pages/HostDetail'
@@ -32,23 +34,26 @@ export default function App() {
   return (
     <ErrorBoundary>
     <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/" element={<Guard><Dashboard /></Guard>} />
-          <Route path="/hosts" element={<Guard><Hosts /></Guard>} />
-          <Route path="/hosts/:id" element={<Guard><HostDetail /></Guard>} />
-          <Route path="/alerts" element={<Guard><Alerts /></Guard>} />
-          <Route path="/scans" element={<Guard><AdminGuard><Scans /></AdminGuard></Guard>} />
-          <Route path="/cooldown" element={<Guard><Cooldown /></Guard>} />
-          <Route path="/configs" element={<Guard><Configs /></Guard>} />
-          <Route path="/api-keys" element={<Guard><ApiKeys /></Guard>} />
-          <Route path="/users" element={<Guard><AdminGuard><Users /></AdminGuard></Guard>} />
-          <Route path="/repo-scans" element={<Guard><AdminGuard><RepoScans /></AdminGuard></Guard>} />
-          <Route path="/settings" element={<Guard><AdminGuard><SystemSettings /></AdminGuard></Guard>} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
+      <LiveAlertsProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/" element={<Guard><Dashboard /></Guard>} />
+            <Route path="/hosts" element={<Guard><Hosts /></Guard>} />
+            <Route path="/hosts/:id" element={<Guard><HostDetail /></Guard>} />
+            <Route path="/alerts" element={<Guard><Alerts /></Guard>} />
+            <Route path="/scans" element={<Guard><AdminGuard><Scans /></AdminGuard></Guard>} />
+            <Route path="/cooldown" element={<Guard><Cooldown /></Guard>} />
+            <Route path="/configs" element={<Guard><Configs /></Guard>} />
+            <Route path="/api-keys" element={<Guard><ApiKeys /></Guard>} />
+            <Route path="/users" element={<Guard><AdminGuard><Users /></AdminGuard></Guard>} />
+            <Route path="/repo-scans" element={<Guard><AdminGuard><RepoScans /></AdminGuard></Guard>} />
+            <Route path="/settings" element={<Guard><AdminGuard><SystemSettings /></AdminGuard></Guard>} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </LiveAlertsProvider>
     </AuthProvider>
     </ErrorBoundary>
   )
