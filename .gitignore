@@ -69,3 +69,4 @@ backend/backfill_findings.py
 .serena/
 docs/plans
 docs/specs
+docs/deployment

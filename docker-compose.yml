@@ -60,7 +60,7 @@ services:
     volumes:
       - pa_central_data:/app/data   # persists the SQLite file across restarts
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/docs')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')"]
       interval: 30s
       timeout: 5s
       retries: 3

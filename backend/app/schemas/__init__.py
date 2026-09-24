@@ -926,6 +926,26 @@ class PaginatedRisksOut(BaseModel):
     page_size: int
 
 
+class PingOut(BaseModel):
+    """GET /ping — pure liveness, no dependency checks. Always `status: "ok"`
+    if the process is up and serving HTTP at all; this is deliberately the
+    ONLY signal ECS/ALB health checks gate deployments and routing on (see
+    AWS_FARGATE_DEPLOYMENT.md §8) — a DB outage must not take a live,
+    otherwise-healthy process out of rotation or block a rollout."""
+    status: Literal["ok"] = "ok"
+
+
+class HealthOut(BaseModel):
+    """GET /health — informational reachability check, NOT wired into any
+    ECS/ALB pass/fail gate (see PingOut's own docstring for why that's
+    /ping's job instead). Always returns HTTP 200 regardless of `database`,
+    so a DB outage is visible to whatever reads this body (monitoring,
+    dashboards, a human debugging) without also failing a health check that
+    infra treats as a deploy/routing gate."""
+    status: Literal["ok"] = "ok"
+    database: Literal["ok", "unreachable"]
+
+
 class RiskAcceptBody(BaseModel):
     reason: str = Field(..., max_length=1000)
     accepted_until: date | None = None

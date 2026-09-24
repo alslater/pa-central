@@ -21,6 +21,7 @@ from app.api import (
     cooldown,
     dashboard,
     findings,
+    health,
     hosts,
     ingest,
     repo_credentials,
@@ -404,6 +405,10 @@ for router in [
     risks.router,
 ]:
     app.include_router(router, prefix="/api")
+
+# Unauthenticated, no /api prefix — matches standard ALB/ECS health-check
+# convention and AWS_FARGATE_DEPLOYMENT.md §8's own path references.
+app.include_router(health.router)
 
 # Serve React SPA in production (when frontend/dist exists)
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
