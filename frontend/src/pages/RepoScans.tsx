@@ -218,6 +218,7 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
         const hasFindings = r.findings && r.findings.length > 0
         const hasRisks = r.risks && r.risks.length > 0
         const hasRiskFailures = (r.risk_failures ?? 0) > 0
+        const hasOsvFailures = (r.osv_failures ?? 0) > 0
         const isExpanded = expandedId === r.id
         return (
           <div key={r.id} className="result-row">
@@ -256,6 +257,14 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
                   title={`Risk scoring was unavailable for ${r.risk_failures} package(s) — an empty or short risk list may not mean the scan is clean`}
                 >
                   ⚠ {r.risk_failures} unscored
+                </span>
+              )}
+              {hasOsvFailures && (
+                <span
+                  className="result-finding-count has-findings"
+                  title={`OSV lookups failed for ${r.osv_failures} package(s) — an empty findings list may not mean the scan is clean`}
+                >
+                  ⚠ {r.osv_failures} unchecked
                 </span>
               )}
               {r.pa_version && (

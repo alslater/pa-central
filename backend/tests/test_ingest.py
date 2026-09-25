@@ -2,7 +2,7 @@
 import pytest
 from sqlalchemy import select
 
-from app.models import Alert, Host, Scan
+from app.models import Alert, Host, Scan, ScanStatus
 
 
 def api_key_header(raw: str) -> dict:
@@ -222,6 +222,41 @@ class TestIngestScan:
             "status": "findings",
             "finding_count": 0,
             "risk_failures": -1,
+        }, headers=api_key_header(raw))
+        assert r.status_code == 422
+
+    async def test_scan_osv_failures_are_saved(self, client, api_key, db):
+        """Mirrors risk_failures: an OSV outage during a host scan must be
+        recorded, not silently dropped, so it isn't misread as clean."""
+        raw, _ = api_key
+        r = await client.post("/api/ingest/scans", json={
+            "hostname": "osv-failure-host",
+            "project_path": "/app/degradedscan",
+            "scan_type": "project",
+            "status": "degraded",
+            "finding_count": 0,
+            "osv_failures": 3,
+        }, headers=api_key_header(raw))
+        assert r.status_code == 201
+        data = r.json()
+        assert data["osv_failures"] == 3
+        assert data["status"] == "degraded"
+
+        result = await db.execute(select(Scan).where(Scan.project_path == "/app/degradedscan"))
+        scan = result.scalar_one_or_none()
+        assert scan is not None
+        assert scan.osv_failures == 3
+        assert scan.status == ScanStatus.degraded
+
+    async def test_scan_negative_osv_failures_is_rejected(self, client, api_key):
+        raw, _ = api_key
+        r = await client.post("/api/ingest/scans", json={
+            "hostname": "bad-osv-failure-host",
+            "project_path": "/app/badosvscan",
+            "scan_type": "project",
+            "status": "degraded",
+            "finding_count": 0,
+            "osv_failures": -1,
         }, headers=api_key_header(raw))
         assert r.status_code == 422
 

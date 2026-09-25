@@ -21,6 +21,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 PRE_KIND_REVISION = "b3f81c4d9e27"
 KIND_REVISION = "c7a2e5f01d38"
+PRE_OSV_FAILURES_REVISION = "594fb09ecdfc"
 
 
 def alembic(db_path: str, *args: str) -> subprocess.CompletedProcess:
@@ -222,3 +223,150 @@ class TestPasswordResetKindOnSqlite:
                 )
         finally:
             engine.dispose()
+
+
+def _seed_pre_osv_failures_rows(db_path: str) -> None:
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO users (id,email,display_name,hashed_password,"
+                "role,is_active,totp_enabled,token_epoch,created_at) VALUES "
+                "(1,'osv@example.invalid','Osv','x','viewer',1,0,0,'2026-01-01')"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO hosts (id,owner_user_id,name,daemon_status,"
+                "created_at) VALUES (1,1,'host-1','running','2026-01-01')"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                "finding_count,scanned_at,received_at) VALUES "
+                "(1,1,'/app','project','clean',0,'2026-01-01','2026-01-01')"
+            ))
+    finally:
+        engine.dispose()
+
+
+class TestOsvFailuresAndDegradedStatusOnSqlite:
+    """7b0e9bd83541's ScanStatus.degraded value needs no CHECK-constraint
+    change on SQLite, because scans.status is sa.Enum(ScanStatus) *without*
+    create_constraint=True (unlike password_reset_tokens.kind above) — it
+    renders as a bare VARCHAR with no constraint at all, so any string
+    already passes. The claim this test exists to verify: 'degraded' is
+    actually accepted by a real migrated SQLite database, not just assumed
+    from reading the model. See TestDegradedStatusOnPostgres in
+    test_postgres_migrations.py for the PostgreSQL-side equivalent, where
+    the enum *is* natively enforced and needs an explicit ALTER TYPE.
+    """
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        path = str(tmp_path / "scratch.db")
+        assert alembic(path, "upgrade", PRE_OSV_FAILURES_REVISION).returncode == 0
+        _seed_pre_osv_failures_rows(path)
+        return path
+
+    def test_degraded_status_is_accepted_after_upgrade(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,"
+                    "status,finding_count,osv_failures,scanned_at,received_at) "
+                    "VALUES (2,1,'/app2','project','degraded',0,3,"
+                    "'2026-01-02','2026-01-02')"
+                ))
+            with engine.connect() as conn:
+                row = conn.execute(sa.text(
+                    "SELECT status, osv_failures FROM scans WHERE id=2"
+                )).one()
+        finally:
+            engine.dispose()
+        assert row.status == "degraded"
+        assert row.osv_failures == 3
+
+    def test_osv_failures_columns_default_to_zero_for_existing_rows(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                value = conn.execute(sa.text(
+                    "SELECT osv_failures FROM scans WHERE id=1"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+        assert value == 0
+
+    def test_downgrade_removes_osv_failures_columns_keeping_rows(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        r = alembic(db_path, "downgrade", PRE_OSV_FAILURES_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                ddl = conn.execute(sa.text(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='scans'"
+                )).scalar_one()
+                rows = conn.execute(sa.text("SELECT id FROM scans")).all()
+        finally:
+            engine.dispose()
+        assert "osv_failures" not in ddl
+        assert [row.id for row in rows] == [1]
+
+    def test_downgrade_refuses_when_a_degraded_row_exists(self, db_path):
+        """The prior ScanStatus enum has no 'degraded' member — a row left
+        in that state after downgrade would raise LookupError the moment
+        the older application code tried to read it via the ORM (reproduced
+        directly; see the migration's own downgrade() docstring). The
+        downgrade must refuse rather than silently leave that row behind."""
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,"
+                    "status,finding_count,osv_failures,scanned_at,received_at) "
+                    "VALUES (2,1,'/app2','project','degraded',0,4,"
+                    "'2026-01-02','2026-01-02')"
+                ))
+        finally:
+            engine.dispose()
+
+        r = alembic(db_path, "downgrade", PRE_OSV_FAILURES_REVISION)
+        assert r.returncode != 0
+        assert "degraded" in r.stderr
+
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                ddl = conn.execute(sa.text(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='scans'"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+        assert "osv_failures" in ddl, "a refused downgrade must not partially drop columns"
+
+    def test_downgrade_succeeds_once_the_degraded_row_is_reclassified(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,"
+                    "status,finding_count,osv_failures,scanned_at,received_at) "
+                    "VALUES (2,1,'/app2','project','degraded',0,4,"
+                    "'2026-01-02','2026-01-02')"
+                ))
+            assert alembic(db_path, "downgrade", PRE_OSV_FAILURES_REVISION).returncode != 0
+
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "UPDATE scans SET status = 'error' WHERE id = 2"
+                ))
+        finally:
+            engine.dispose()
+
+        r = alembic(db_path, "downgrade", PRE_OSV_FAILURES_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"

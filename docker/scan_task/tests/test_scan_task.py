@@ -170,7 +170,7 @@ def test_run_pa_scan_parses_json_output(tmp_path):
     output = json.dumps({"findings": findings, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout=output, stderr="")
-        count, result, risks, risk_failures, sources = scan_task.run_pa_scan(tmp_path, "")
+        count, result, risks, risk_failures, osv_failures, sources = scan_task.run_pa_scan(tmp_path, "")
     assert count == 1
     assert result[0]["package"] == "requests"
     assert risks is None
@@ -187,7 +187,7 @@ def test_run_pa_scan_missing_risks_key_is_none_not_empty_list(tmp_path):
     output = json.dumps({"findings": [], "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        _, _, risks, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        _, _, risks, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert risks is None
 
 
@@ -196,7 +196,7 @@ def test_run_pa_scan_parses_risks(tmp_path):
     output = json.dumps({"findings": [], "risks": risks, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        count, result, result_risks, risk_failures, sources = scan_task.run_pa_scan(tmp_path, "")
+        count, result, result_risks, risk_failures, osv_failures, sources = scan_task.run_pa_scan(tmp_path, "")
     assert count == 0
     assert result == []
     assert result_risks == risks
@@ -207,15 +207,31 @@ def test_run_pa_scan_parses_risk_failures(tmp_path):
     output = json.dumps({"findings": [], "risks": [], "risk_failures": 3, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        count, result, risks, risk_failures, sources = scan_task.run_pa_scan(tmp_path, "")
+        count, result, risks, risk_failures, osv_failures, sources = scan_task.run_pa_scan(tmp_path, "")
     assert risks == []
     assert risk_failures == 3
+
+
+def test_run_pa_scan_parses_osv_failures(tmp_path):
+    output = json.dumps({"findings": [], "osv_failures": 5, "sources": []})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
+        _, _, _, _, osv_failures, _ = scan_task.run_pa_scan(tmp_path, "")
+    assert osv_failures == 5
+
+
+def test_run_pa_scan_missing_osv_failures_defaults_to_zero(tmp_path):
+    output = json.dumps({"findings": [], "sources": []})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
+        _, _, _, _, osv_failures, _ = scan_task.run_pa_scan(tmp_path, "")
+    assert osv_failures == 0
 
 
 def test_run_pa_scan_empty_findings(tmp_path):
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = _fake_run()
-        count, result, risks, risk_failures, sources = scan_task.run_pa_scan(tmp_path, "")
+        count, result, risks, risk_failures, osv_failures, sources = scan_task.run_pa_scan(tmp_path, "")
     assert count == 0
     assert result == []
     assert risks is None
@@ -371,7 +387,7 @@ def test_main_success_posts_success_result(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(1, findings, [], 0, [])), \
+         patch("scan_task.run_pa_scan", return_value=(1, findings, [], 0, 0, [])), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -387,7 +403,7 @@ def test_main_success_forwards_risks(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], risks, 0, [])), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], risks, 0, 0, [])), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -400,7 +416,7 @@ def test_main_success_forwards_risk_failures(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], [], 2, [])), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 2, 0, [])), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -408,12 +424,25 @@ def test_main_success_forwards_risk_failures(tmp_path):
     assert mock_post.call_args[1]["risk_failures"] == 2
 
 
+def test_main_success_forwards_osv_failures(tmp_path):
+    with patch.dict(os.environ, BASE_ENV), \
+         patch("scan_task.install_pa"), \
+         patch("scan_task.fetch_secret", return_value="token"), \
+         patch("scan_task.clone_repo"), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 5, [])), \
+         patch("scan_task.post_result") as mock_post, \
+         patch("tempfile.mkdtemp", return_value=str(tmp_path)):
+        scan_task.main()
+    mock_post.assert_called_once()
+    assert mock_post.call_args[1]["osv_failures"] == 5
+
+
 def test_main_cleans_up_tempdir_on_success(tmp_path):
     with patch.dict(os.environ, BASE_ENV), \
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, [])), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 0, [])), \
          patch("scan_task.post_result"), \
          patch("shutil.rmtree") as mock_rm, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):

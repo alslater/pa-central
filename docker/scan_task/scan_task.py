@@ -63,6 +63,7 @@ def post_result(
     findings: list[dict] | None = None,
     risks: list[dict] | None = None,
     risk_failures: int = 0,
+    osv_failures: int = 0,
     sources: list[str] | None = None,
     error_message: str | None = None,
 ) -> None:
@@ -72,6 +73,7 @@ def post_result(
         "status": status,
         "finding_count": finding_count,
         "risk_failures": risk_failures,
+        "osv_failures": osv_failures,
     }
     if pa_version:
         payload["pa_version"] = pa_version
@@ -185,8 +187,9 @@ def run_pa_scan(
     config_toml: str,
     scan_flags: str = "",
     subfolder: str = "",
-) -> tuple[int, list[dict], list[dict] | None, int, list[str]]:
-    """Run pa scan-project. Returns (finding_count, findings, risks, risk_failures, sources).
+) -> tuple[int, list[dict], list[dict] | None, int, int, list[str]]:
+    """Run pa scan-project. Returns (finding_count, findings, risks, risk_failures,
+    osv_failures, sources).
 
     risks is None (not []) when the key is absent from pa's JSON output — an
     older package-alert binary that predates risk scoring — so the backend
@@ -194,6 +197,12 @@ def run_pa_scan(
     nothing". package-alert 0.7.0+ always includes the key, even for a clean
     scan, so only a missing key carries this ambiguity; the value itself is
     passed through unchanged otherwise.
+
+    osv_failures counts packages package-alert could not check against OSV
+    (network/429/503 exhaustion, malformed response) — unlike risks, an
+    older package-alert binary that predates this simply omits the key, so
+    a missing key defaults to 0 (the pre-existing "checked, clean" meaning),
+    matching risk_failures' own default-to-0 behaviour for the same reason.
     """
     import shlex
     cmd = [str(Path(sys.executable).parent / "pa"), "scan-project", "--format", "json"]
@@ -250,8 +259,9 @@ def run_pa_scan(
     findings = data.get("findings", [])
     risks = data.get("risks")
     risk_failures = data.get("risk_failures", 0)
+    osv_failures = data.get("osv_failures", 0)
     sources = data.get("sources", [])
-    return len(findings), findings, risks, risk_failures, sources
+    return len(findings), findings, risks, risk_failures, osv_failures, sources
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -307,7 +317,7 @@ def main() -> None:
         try:
             scan_flags = get_env("PA_SCAN_FLAGS", "")
             subfolder = get_env("PA_SUBFOLDER", "")
-            finding_count, findings, risks, risk_failures, sources = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
+            finding_count, findings, risks, risk_failures, osv_failures, sources = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
         except RuntimeError as exc:
             post_result(fleet_url, fleet_key, result_id, "failed",
                         pa_version=pa_version, error_message=str(exc))
@@ -321,6 +331,7 @@ def main() -> None:
             findings=findings,
             risks=risks,
             risk_failures=risk_failures,
+            osv_failures=osv_failures,
             sources=sources or None,
         )
 

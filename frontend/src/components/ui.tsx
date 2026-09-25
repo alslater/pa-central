@@ -71,6 +71,7 @@ export function ScanBadge({ status }: { status: ScanStatus }) {
   const classes: Record<ScanStatus, string> = {
     clean:    'bg-status-pass/12 text-status-pass-text',
     findings: 'bg-status-review/12 text-status-review-text',
+    degraded: 'bg-status-info/12 text-status-info-text',
     error:    'bg-status-fail/12 text-status-fail-text',
   }
   return (

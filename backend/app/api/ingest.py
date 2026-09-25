@@ -113,6 +113,7 @@ async def ingest_scan(
         findings=body.findings,
         risks=body.risks,
         risk_failures=body.risk_failures,
+        osv_failures=body.osv_failures,
         sources=body.sources,
         scanned_at=body.scanned_at or utcnow(),
         raw=body.raw,
@@ -298,6 +299,7 @@ async def ingest_repo_scan_result(
     result.findings = body.findings
     result.risks = body.risks
     result.risk_failures = body.risk_failures
+    result.osv_failures = body.osv_failures
     result.sources = body.sources
     result.error_message = body.error_message
     result.completed_at = utcnow()
