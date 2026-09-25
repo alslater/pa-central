@@ -416,15 +416,35 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
     eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium) if scan else (global_high, global_medium)
 
     # Detect config change: compare this result's hash against the most recent
-    # prior successful result. NULL hashes are treated as "unknown" — no reset
-    # (conservative; covers pre-upgrade rows).
-    if result.scan_config_hash is not None:
+    # prior successful result that itself had a clean OSV pass. NULL hashes
+    # are treated as "unknown" — no reset (conservative; covers pre-upgrade
+    # rows). The reset itself is skipped entirely when THIS scan's OSV pass
+    # didn't complete cleanly (osv_failures > 0) — same reasoning as the
+    # absence-close loop below: an empty or short findings list under the
+    # new config may just mean OSV lookups failed, not that those findings
+    # genuinely don't apply under the new config.
+    #
+    # The baseline query is *also* filtered to osv_failures == 0 — not just
+    # the "fire the reset" check above — because the comparison needs a
+    # trustworthy prior hash to diff against, not merely the most recent
+    # result of any kind. Without this filter, a degraded scan that changed
+    # the config (reset skipped, per the guard above) would itself become
+    # "the most recent successful result" for every later scan's comparison.
+    # A later scan that stayed on that same (by-then-stable) new hash would
+    # then compare equal to it and never detect a change at all — silently
+    # losing the transition forever, not merely deferring it. Reproduced
+    # directly. Filtering the baseline to clean results means a later scan
+    # still compares against the last genuinely-trustworthy hash (from
+    # before the degraded scan), so the reset correctly fires on the first
+    # clean scan under the new config instead.
+    if result.scan_config_hash is not None and not result.osv_failures:
         prev_hash_row = await db.execute(
             select(RepoScanResult.scan_config_hash)
             .where(RepoScanResult.repo_scan_id == result.repo_scan_id)
             .where(RepoScanResult.id != result.id)
             .where(RepoScanResult.status == RepoScanStatus.success)
             .where(RepoScanResult.scan_config_hash.isnot(None))
+            .where(RepoScanResult.osv_failures == 0)
             .order_by(RepoScanResult.completed_at.desc())
             .limit(1)
         )
@@ -451,10 +471,16 @@ async def update_finding_records(db: AsyncSession, result: RepoScanResult) -> No
 
     now = result.completed_at or datetime.now(UTC)
 
-    # Close findings no longer present
-    for key, record in open_records.items():
-        if key not in incoming:
-            record.closed_at = now
+    # Close findings no longer present — but only when this scan's OSV pass
+    # completed cleanly. A nonzero osv_failures means some packages could not
+    # be checked against OSV, and package-alert gives no way to tell which
+    # ones; closing here could misread "could not be checked" as "no longer
+    # malicious" and silently resolve a still-active finding. Mirrors
+    # risk_lifecycle.update_risk_records' identical guard on risk_failures.
+    if not result.osv_failures:
+        for key, record in open_records.items():
+            if key not in incoming:
+                record.closed_at = now
 
     # For all truly new findings, fetch the max reopen_count from prior closed
     # episodes in a single query, then look up per-key in Python.

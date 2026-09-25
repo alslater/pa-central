@@ -146,6 +146,32 @@ describe('HostDetail scan row — risks', () => {
     expect(screen.queryByText(/unscored/)).not.toBeInTheDocument()
   })
 
+  it('shows an unchecked warning when osv_failures is nonzero', async () => {
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
+      id: 8, host_id: 1, project_path: '/app/osvoutage', scan_type: 'project',
+      status: 'degraded', finding_count: 0, findings: [],
+      risks: null, osv_failures: 12,
+      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+    }] as any)
+    await openScansTab()
+
+    await screen.findByText('/app/osvoutage')
+    expect(screen.getByText(/⚠ 12 unchecked/)).toBeInTheDocument()
+  })
+
+  it('does not show an unchecked warning when osv_failures is zero', async () => {
+    vi.mocked(api.hosts.latestScans).mockResolvedValue([{
+      id: 9, host_id: 1, project_path: '/app/cleanosvscan', scan_type: 'project',
+      status: 'clean', finding_count: 0, findings: [],
+      risks: null, osv_failures: 0,
+      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+    }] as any)
+    await openScansTab()
+
+    await screen.findByText('/app/cleanosvscan')
+    expect(screen.queryByText(/unchecked/)).not.toBeInTheDocument()
+  })
+
   it('a scan with neither findings nor risks renders as a static, non-expandable row', async () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 2, host_id: 1, project_path: '/app/cleanproject', scan_type: 'project',

@@ -172,6 +172,18 @@ async def _ingest_with_risk_failures(client, result_id, risks, risk_failures, he
     return r
 
 
+async def _ingest_with_osv_failures(client, result_id, findings, osv_failures, headers):
+    r = await client.post("/api/ingest/repo-scan-result", json={
+        "repo_scan_result_id": result_id,
+        "status": "success",
+        "finding_count": len(findings),
+        "findings": findings,
+        "osv_failures": osv_failures,
+    }, headers=headers)
+    assert r.status_code == 204
+    return r
+
+
 @pytest.mark.asyncio
 class TestFindingLifecycleIngest:
     async def test_first_scan_opens_finding_records(self, client, db, repo_scan, pending_result):
@@ -243,11 +255,12 @@ class TestFindingLifecycleIngest:
         await db.refresh(r2)
         await _ingest(client, r2.id, [], headers)
 
-        open_rows = (await db.execute(select(FindingRecord).where(FindingRecord.closed_at.is_(None)))).scalars().all()
-        assert open_rows == []
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert len(rows) == 3
+        assert all(r.closed_at is not None for r in rows)
 
     async def test_other_repos_records_unaffected(self, client, db, admin_user, pending_result):
-        other = RepoScan(name="other", url="https://github.com/other/r", branch="main",
+        other = RepoScan(name="other-repo", url="https://github.com/test/other", branch="main",
                          min_notify_severity="medium", created_by_id=admin_user.id)
         db.add(other)
         await db.commit()
@@ -259,8 +272,7 @@ class TestFindingLifecycleIngest:
 
         headers = system_key_header()
         await _ingest(client, other_result.id, [_finding()], headers)
-        # clean scan on original repo
-        await _ingest(client, pending_result.id, [], headers)
+        await _ingest(client, pending_result.id, [], headers)  # clean scan on original repo
 
         other_rows = (await db.execute(
             select(FindingRecord).where(FindingRecord.repo_scan_id == other.id)
@@ -270,9 +282,10 @@ class TestFindingLifecycleIngest:
 
     async def test_missing_ecosystem_stored_as_empty_string(self, client, db, repo_scan, pending_result):
         headers = system_key_header()
-        finding = {"advisory_id": "GHSA-y", "package": "flask", "severity": "medium"}  # no ecosystem
+        finding = {"advisory_id": "GHSA-noeco", "package": "requests", "severity": "high"}
         await _ingest(client, pending_result.id, [finding], headers)
         rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert len(rows) == 1
         assert rows[0].ecosystem == ""
 
     async def test_findings_missing_required_identity_fields_are_skipped(self, client, db, repo_scan, pending_result):
@@ -290,8 +303,9 @@ class TestFindingLifecycleIngest:
 
     async def test_unknown_severity_falls_back_to_info(self, client, db, repo_scan, pending_result):
         headers = system_key_header()
-        await _ingest(client, pending_result.id, [_finding(severity="bogus")], headers)
-        rows = (await db.execute(select(FindingRecord).where(FindingRecord.closed_at.is_(None)))).scalars().all()
+        finding = _finding(severity="bogus")
+        await _ingest(client, pending_result.id, [finding], headers)
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
         assert len(rows) == 1
         assert rows[0].severity.value == "info"
 
@@ -303,20 +317,18 @@ class TestFindingLifecycleIngest:
         db.add(r2)
         await db.commit()
         await db.refresh(r2)
-        # severity changed to critical in subsequent scan — open record unchanged
         await _ingest(client, r2.id, [_finding(severity="critical")], headers)
 
-        rows = (await db.execute(select(FindingRecord).where(FindingRecord.closed_at.is_(None)))).scalars().all()
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert len(rows) == 1
         assert rows[0].severity.value == "high"
 
     async def test_long_package_name_persists_across_scans(self, client, db, repo_scan, pending_result):
-        """A package/ecosystem value longer than the column width must not be
-        misread as a new finding on the next scan. If the identity key were
-        built from the untruncated value, it would never match the open row's
-        (already-truncated) package/ecosystem, closing and recreating the
-        record every scan instead of recognizing it as persisting."""
+        """A package name exceeding FindingRecord.package's 200-char column
+        must not be misread as a new finding on the next scan just because
+        the identity key was built from the untruncated value."""
         headers = system_key_header()
-        long_package = "p" * 250  # exceeds FindingRecord.package's 200-char column
+        long_package = "p" * 250
         finding = _finding(package=long_package)
         await _ingest(client, pending_result.id, [finding], headers)
 
@@ -338,9 +350,7 @@ class TestFindingLifecycleIngest:
         assert rows[0].reopen_count == 0
 
     async def test_duplicate_ingest_does_not_create_extra_open_record(self, client, db, repo_scan, pending_result):
-        """Ingesting the same finding twice must not produce two open records.
-
-        Simulates a repeated ingest (e.g. after a crash-and-retry) by calling
+        """Regression: a duplicate/retried ingest must not call
         update_finding_records twice with the same payload on the same scan.
         The partial unique index + savepoint guard should keep the count at 1.
         """
@@ -366,6 +376,66 @@ class TestFindingLifecycleIngest:
             .where(FindingRecord.closed_at.is_(None))
         )).scalars().all()
         assert len(open_rows) == 1
+
+    async def test_osv_failures_is_saved(self, client, db, pending_result):
+        headers = system_key_header()
+        await _ingest_with_osv_failures(client, pending_result.id, [], osv_failures=5, headers=headers)
+
+        result = await db.get(RepoScanResult, pending_result.id)
+        assert result.osv_failures == 5
+
+    async def test_osv_failures_prevents_closing_absent_records(self, client, db, repo_scan, pending_result):
+        """A nonzero osv_failures means package-alert's OSV lookups only
+        partially completed. An empty findings list in that scan must NOT be
+        read as "these packages are no longer malicious" — there is no way
+        to tell a genuine resolution apart from an OSV outage, so closing is
+        skipped entirely for a scan reporting failures."""
+        headers = system_key_header()
+        await _ingest(client, pending_result.id, [_finding()], headers)
+
+        result2 = RepoScanResult(repo_scan_id=repo_scan.id, status=RepoScanStatus.running, triggered_by=ScanTrigger.manual)
+        db.add(result2)
+        await db.commit()
+        await db.refresh(result2)
+        # OSV lookups failed for every package this scan — findings list is
+        # empty, but that must not be read as "nothing is malicious anymore".
+        await _ingest_with_osv_failures(client, result2.id, [], osv_failures=1, headers=headers)
+
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].closed_at is None
+
+    async def test_zero_osv_failures_still_closes_absent_records(self, client, db, repo_scan, pending_result):
+        """Sanity check: the existing close-on-absence behavior is untouched
+        when osv_failures is 0 (a genuinely clean scan)."""
+        headers = system_key_header()
+        await _ingest(client, pending_result.id, [_finding()], headers)
+
+        result2 = RepoScanResult(repo_scan_id=repo_scan.id, status=RepoScanStatus.running, triggered_by=ScanTrigger.manual)
+        db.add(result2)
+        await db.commit()
+        await db.refresh(result2)
+        await _ingest_with_osv_failures(client, result2.id, [], osv_failures=0, headers=headers)
+
+        rows = (await db.execute(select(FindingRecord))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].closed_at is not None
+
+    async def test_negative_osv_failures_is_rejected(self, client, pending_result):
+        """Mirrors risk_failures: a negative count is truthy in Python, so
+        without this rejection the finding-lifecycle guard would treat it as
+        a partial-failure signal and skip closing absent findings, while a
+        frontend `> 0` check would simultaneously hide the warning explaining
+        why. Malformed input must not be able to reach either code path."""
+        headers = system_key_header()
+        r = await client.post("/api/ingest/repo-scan-result", json={
+            "repo_scan_result_id": pending_result.id,
+            "status": "success",
+            "finding_count": 0,
+            "findings": [],
+            "osv_failures": -1,
+        }, headers=headers)
+        assert r.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -427,17 +497,19 @@ class TestRiskLifecycleIngest:
 
     async def test_risk_reappears_increments_reopen_count(self, client, db, repo_scan, pending_result):
         headers = system_key_header()
-        await _ingest_with_risks(client, pending_result.id, [_risk()], headers)  # open
+        await _ingest_with_risks(client, pending_result.id, [_risk()], headers)
+
         r2 = RepoScanResult(repo_scan_id=repo_scan.id, status=RepoScanStatus.running, triggered_by=ScanTrigger.manual)
         db.add(r2)
         await db.commit()
         await db.refresh(r2)
-        await _ingest_with_risks(client, r2.id, [], headers)  # close
+        await _ingest_with_risks(client, r2.id, [], headers)
+
         r3 = RepoScanResult(repo_scan_id=repo_scan.id, status=RepoScanStatus.running, triggered_by=ScanTrigger.manual)
         db.add(r3)
         await db.commit()
         await db.refresh(r3)
-        await _ingest_with_risks(client, r3.id, [_risk()], headers)  # reopen
+        await _ingest_with_risks(client, r3.id, [_risk()], headers)
 
         rows = (await db.execute(select(RiskRecord).where(RiskRecord.closed_at.is_(None)))).scalars().all()
         assert len(rows) == 1
@@ -584,8 +656,8 @@ class TestRiskLifecycleIngest:
 
     async def test_risk_failures_prevents_closing_absent_records(self, client, db, repo_scan, pending_result):
         """A nonzero risk_failures means package-alert's risk pass only partially
-        completed. An empty/short risks list in that scan must NOT be read as
-        "these packages are no longer risky" — there is no way to tell a
+        completed. An empty/short risks list in that scan must NOT be read
+        as "these packages are no longer risky" — there is no way to tell a
         genuine resolution apart from a scoring failure, so closing is skipped
         entirely for a scan reporting failures."""
         headers = system_key_header()
@@ -703,9 +775,11 @@ class TestRisksDoNotTriggerEmail:
             "risks": [_risk(level="critical", score=90)],
         }, headers=headers)
         assert r.status_code == 204
+
         assert sent == []
 
 
+@pytest.mark.asyncio
 class TestConfigChangeReset:
     async def test_config_change_closes_open_findings_with_reason(self, db, repo_scan):
         """When scan_config_hash changes between results, open findings are closed with closed_reason='config_change'."""
@@ -847,3 +921,148 @@ class TestConfigChangeReset:
         )).scalars().all()
         assert len(all_rows) == 1
         assert all_rows[0].closed_at is None
+
+    async def test_config_change_with_osv_failures_does_not_close_findings(self, db, repo_scan):
+        """A config change AND an OSV outage in the same scan must not stack:
+        the config-change reset closes every open finding unconditionally
+        today, even though the second result's osv_failures > 0 means its
+        (possibly empty/short) findings list may just reflect failed OSV
+        lookups, not a genuine resolution. Closing here — for either reason
+        — could misread "could not be checked under the new config" as
+        "no longer malicious"."""
+        import datetime
+
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        from app.services.finding_lifecycle import (
+            compute_scan_config_hash,
+            update_finding_records,
+        )
+
+        now = datetime.datetime.now(datetime.UTC)
+
+        r1 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=compute_scan_config_hash("--include-dev", None, None),
+            finding_count=1,
+            findings=[{"advisory_id": "GHSA-osv1", "package": "requests", "ecosystem": "pypi", "severity": "high"}],
+            completed_at=now,
+        )
+        db.add(r1)
+        await db.flush()
+        await update_finding_records(db, r1)
+        await db.flush()
+
+        # Config changed AND OSV lookups failed for this scan — findings is
+        # empty, but that must not be read as "nothing is malicious anymore"
+        # under either the config-change reset or the absence-close loop.
+        r2 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=compute_scan_config_hash("--no-dev", None, None),
+            finding_count=0,
+            findings=[],
+            osv_failures=1,
+            completed_at=now,
+        )
+        db.add(r2)
+        await db.flush()
+        await update_finding_records(db, r2)
+        await db.flush()
+
+        rows = (await db.execute(
+            select(FindingRecord).where(FindingRecord.repo_scan_id == repo_scan.id)
+        )).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].closed_at is None
+        assert rows[0].closed_reason is None
+
+    async def test_deferred_config_change_reset_still_fires_on_a_later_clean_scan(self, db, repo_scan):
+        """Skipping the reset on the degraded scan must not permanently lose
+        the transition. If the comparison baseline were simply "the most
+        recent successful result" (regardless of its own osv_failures), the
+        degraded scan itself would become that baseline — and since a later
+        scan under the same (by-then-stable) new config hash would compare
+        equal to it, the reset would never fire at all, for any future scan.
+        The baseline must instead be the most recent successful result that
+        itself had a clean OSV pass, so the transition is still detected once
+        a clean scan under the new config finally comes in.
+
+        The same finding is reported present in all three scans (rather than
+        going empty), so the ordinary absence-close loop is never a factor —
+        the only way this row can end up closed with closed_reason=
+        'config_change' is if the config-change reset itself actually fired.
+        """
+        import datetime
+
+        from app.models import FindingRecord, RepoScanResult, RepoScanStatus
+        from app.services.finding_lifecycle import (
+            compute_scan_config_hash,
+            update_finding_records,
+        )
+
+        now = datetime.datetime.now(datetime.UTC)
+        old_hash = compute_scan_config_hash("--include-dev", None, None)
+        new_hash = compute_scan_config_hash("--no-dev", None, None)
+        finding = {"advisory_id": "GHSA-osv2", "package": "requests", "ecosystem": "pypi", "severity": "high"}
+
+        r1 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=old_hash,
+            finding_count=1,
+            findings=[finding],
+            completed_at=now,
+        )
+        db.add(r1)
+        await db.flush()
+        await update_finding_records(db, r1)
+        await db.flush()
+
+        # Config changes AND OSV fails — reset is deferred, not performed.
+        # The finding is still reported present, so if a reset incorrectly
+        # fired here it would immediately reopen under the new config too —
+        # this scan's own osv_failures>0 guard is what's meant to prevent
+        # that, not anything about the finding's presence/absence.
+        r2 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=new_hash,
+            finding_count=1,
+            findings=[finding],
+            osv_failures=1,
+            completed_at=now + datetime.timedelta(minutes=1),
+        )
+        db.add(r2)
+        await db.flush()
+        await update_finding_records(db, r2)
+        await db.flush()
+
+        # A later scan, still under the new config, OSV now healthy, same
+        # finding still present.
+        r3 = RepoScanResult(
+            repo_scan_id=repo_scan.id,
+            status=RepoScanStatus.success,
+            scan_config_hash=new_hash,
+            finding_count=1,
+            findings=[finding],
+            osv_failures=0,
+            completed_at=now + datetime.timedelta(minutes=2),
+        )
+        db.add(r3)
+        await db.flush()
+        await update_finding_records(db, r3)
+        await db.flush()
+
+        rows = (await db.execute(
+            select(FindingRecord).where(FindingRecord.repo_scan_id == repo_scan.id)
+        )).scalars().all()
+        reset_rows = [r for r in rows if r.closed_reason == "config_change"]
+        assert len(reset_rows) == 1, (
+            "the deferred config-change reset must still fire once a clean "
+            f"scan under the new config runs, not be lost forever (rows: {rows})"
+        )
+
+        open_after = [r for r in rows if r.closed_at is None]
+        assert len(open_after) == 1
+        assert open_after[0].reopen_count == 0  # config reset, not a true reopen

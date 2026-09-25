@@ -41,7 +41,7 @@ export type UserRole = 'admin' | 'operator' | 'developer' | 'viewer'
 export type DaemonStatus = 'running' | 'stopped' | 'unknown'
 export type AlertSeverity = 'critical' | 'high' | 'medium' | 'warning' | 'low' | 'info'
 export type AlertKind = 'osv' | 'heuristic'
-export type ScanStatus = 'clean' | 'findings' | 'error'
+export type ScanStatus = 'clean' | 'findings' | 'degraded' | 'error'
 export type Ecosystem = 'pypi' | 'npm' | 'packagist' | 'other'
 
 export interface User {
@@ -132,6 +132,8 @@ export interface Scan {
   risks: Record<string, unknown>[] | null
   /** Packages package-alert could not score this scan. Nonzero means an empty/short `risks` list may reflect scoring failure, not a clean scan. */
   risk_failures: number
+  /** Packages package-alert could not check against OSV this scan. Nonzero means an empty `findings` list may reflect a failed OSV lookup, not a clean scan — see ScanStatus 'degraded'. */
+  osv_failures: number
   sources: string[] | null
   scanned_at: string; received_at: string
 }
@@ -204,6 +206,11 @@ export interface RepoScanResult {
    *  empty/short `risks` list may reflect scoring failure, not a clean scan —
    *  see risk_lifecycle.update_risk_records on the backend for the same rule. */
   risk_failures: number
+  /** Packages package-alert could not check against OSV this scan. Nonzero
+   *  means an empty/short `findings` list may reflect a failed OSV lookup,
+   *  not a clean scan — see finding_lifecycle.update_finding_records on the
+   *  backend for the same rule. */
+  osv_failures: number
   sources: string[] | null
   error_message: string | null; ecs_task_arn: string | null
   notified: boolean

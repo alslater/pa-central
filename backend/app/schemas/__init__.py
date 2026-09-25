@@ -479,6 +479,7 @@ class ScanPayload(BaseModel):
     risks: list[dict] | None = None
     # See RepoScanResultIngest.risk_failures for why negative counts are rejected.
     risk_failures: int = Field(0, ge=0)
+    osv_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
     unpinned: list[dict] | None = None  # packages without pinned versions
     scanned_at: datetime | None = None
@@ -502,6 +503,7 @@ class ScanOut(OrmBase):
     findings: list[dict] | None
     risks: list[dict] | None
     risk_failures: int
+    osv_failures: int
     sources: list[str] | None
     scanned_at: datetime
     received_at: datetime
@@ -801,6 +803,7 @@ class RepoScanResultOut(OrmBase):
     findings: list[dict] | None
     risks: list[dict] | None
     risk_failures: int
+    osv_failures: int
     sources: list[str] | None
     error_message: str | None
     triggered_by: ScanTrigger
@@ -832,6 +835,9 @@ class RepoScanResultIngest(BaseModel):
     # simultaneously hide the warning that explains why — stale risks with no
     # visible reason. Rejecting negative counts at ingestion closes that gap.
     risk_failures: int = Field(0, ge=0)
+    # Same reasoning as risk_failures above, for OSV lookup failures instead
+    # of scoring failures — see finding_lifecycle.update_finding_records.
+    osv_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
     error_message: str | None = None
 

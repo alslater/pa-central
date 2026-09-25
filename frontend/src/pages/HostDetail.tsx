@@ -207,6 +207,7 @@ function HostScans({ hostId }: { hostId: number }) {
         const hasFindings = !!s.findings?.length
         const hasRisks = !!s.risks?.length
         const hasRiskFailures = (s.risk_failures ?? 0) > 0
+        const hasOsvFailures = (s.osv_failures ?? 0) > 0
         const hasDetail = hasFindings || hasRisks
         const isExpanded = expanded === s.project_path
         return (
@@ -252,6 +253,14 @@ function HostScans({ hostId }: { hostId: number }) {
                 title={`Risk scoring was unavailable for ${s.risk_failures} package(s) — an empty or short risk list may not mean the scan is clean`}
               >
                 ⚠ {s.risk_failures} unscored
+              </span>
+            )}
+            {hasOsvFailures && (
+              <span
+                className="host-scan-count has-findings"
+                title={`OSV lookups failed for ${s.osv_failures} package(s) — an empty findings list may not mean the scan is clean`}
+              >
+                ⚠ {s.osv_failures} unchecked
               </span>
             )}
             <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>

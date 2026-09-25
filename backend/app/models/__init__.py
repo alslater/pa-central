@@ -86,6 +86,7 @@ class AlertKind(str, enum.Enum):
 class ScanStatus(str, enum.Enum):
     clean = "clean"
     findings = "findings"
+    degraded = "degraded"  # scanned, but some packages could not be checked against OSV
     error = "error"
 
 
@@ -255,6 +256,8 @@ class Scan(Base):
     findings: Mapped[list | None] = mapped_column(JSON, nullable=True)  # list of finding dicts
     risks: Mapped[list | None] = mapped_column(JSON, nullable=True)
     risk_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Packages package-alert could not check against OSV — see ScanStatus.degraded.
+    osv_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # e.g. ["Python (requirements.txt)", "Node.js (package-lock.json)"]
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     scanned_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
@@ -419,6 +422,12 @@ class RepoScanResult(Base):
     # failure rather than a clean scan — see risk_lifecycle.update_risk_records,
     # which reads this to decide whether it's safe to close absent risks.
     risk_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Packages package-alert could not check against OSV (network/429/503
+    # exhaustion, malformed response). A nonzero count means an empty/partial
+    # `findings` list may reflect a failed OSV lookup rather than a clean
+    # scan — see finding_lifecycle.update_finding_records, which reads this
+    # to decide whether it's safe to close absent findings.
+    osv_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     triggered_by: Mapped[ScanTrigger] = mapped_column(

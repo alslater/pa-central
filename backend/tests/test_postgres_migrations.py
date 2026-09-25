@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "594fb09ecdfc"
+HEAD_REVISION = "7b0e9bd83541"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -1598,3 +1598,169 @@ class TestDeleteCascadeBehaviour:
             assert [(r.id, r.host_id) for r in remaining] == [(2, None)], (
                 "host-scoped entry must be deleted, fleet-wide entry preserved"
             )
+
+
+class TestDegradedStatusAndOsvFailuresMigration:
+    """7b0e9bd83541 adds osv_failures to scans/repo_scan_results, and adds
+    'degraded' to the native PostgreSQL 'scanstatus' enum type.
+
+    The dialect-divergent part is the enum value: scans.status has no
+    create_constraint=True (see models.Scan), so on SQLite it's a bare
+    VARCHAR that accepts any string with no schema change at all — see
+    TestOsvFailuresAndDegradedStatusOnSqlite in test_sqlite_migrations.py.
+    On PostgreSQL, 'scanstatus' is a real native enum type and the database
+    itself would reject an unrecognized value at the SQL level; only this
+    test proves the ALTER TYPE ... ADD VALUE actually ran and took effect,
+    by inserting a real 'degraded' row through the raw connection rather
+    than through the ORM (which would just reflect the Python enum, not the
+    database's own constraint).
+
+    Seeded before the migration under test, per CLAUDE.md: an upgrade
+    against an empty database never proves an existing enum type can accept
+    a new value while already holding rows of the old ones.
+    """
+
+    PRE_OSV_FAILURES_REVISION = "594fb09ecdfc"
+
+    @staticmethod
+    def _seed_pre_migration_scan(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,"
+                    "role,is_active,totp_enabled,created_at,token_epoch) VALUES "
+                    "(1,'osv@example.invalid','Osv','x','viewer',true,false,now(),0)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO hosts (id,owner_user_id,name,daemon_status,created_at) "
+                    "VALUES (1,1,'h1','unknown',now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                    "finding_count,scanned_at,received_at) VALUES "
+                    "(1,1,'/app','project','clean',0,now(),now())"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def migrated(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_OSV_FAILURES_REVISION).returncode == 0
+        self._seed_pre_migration_scan(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_degraded_status_is_accepted_by_the_native_enum_type(self, migrated):
+        """The actual claim under test: PostgreSQL's own 'scanstatus' type,
+        not just the ORM's Python-side ScanStatus enum, now recognizes
+        'degraded'. A raw INSERT bypasses the ORM entirely, so this fails
+        with a real database-level error if the ALTER TYPE never ran."""
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                "finding_count,osv_failures,scanned_at,received_at) VALUES "
+                "(2,1,'/app2','project','degraded',0,4,now(),now())"
+            ))
+            row = conn.execute(sa.text(
+                "SELECT status, osv_failures FROM scans WHERE id = 2"
+            )).one()
+        assert row.status == "degraded"
+        assert row.osv_failures == 4
+
+    def test_existing_rows_default_osv_failures_to_zero(self, migrated):
+        with migrated.connect() as conn:
+            value = conn.execute(sa.text(
+                "SELECT osv_failures FROM scans WHERE id = 1"
+            )).scalar_one()
+        assert value == 0
+
+    def test_repo_scan_results_also_gets_osv_failures(self, migrated):
+        with migrated.connect() as conn:
+            column = conn.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'repo_scan_results' AND column_name = 'osv_failures'"
+            )).scalar_one_or_none()
+        assert column == "osv_failures"
+
+    def test_downgrade_drops_osv_failures_but_keeps_the_row(self, postgres_url):
+        """The enum value itself is deliberately NOT reverted on downgrade
+        (PostgreSQL has no ALTER TYPE ... DROP VALUE — see the migration's
+        own downgrade() docstring); only the osv_failures columns are."""
+        assert alembic(postgres_url, "upgrade", self.PRE_OSV_FAILURES_REVISION).returncode == 0
+        self._seed_pre_migration_scan(postgres_url)
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+        assert alembic(postgres_url, "downgrade", self.PRE_OSV_FAILURES_REVISION).returncode == 0
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                column = conn.execute(sa.text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'scans' AND column_name = 'osv_failures'"
+                )).scalar_one_or_none()
+                row = conn.execute(sa.text(
+                    "SELECT status FROM scans WHERE id = 1"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+        assert column is None
+        assert row == "clean"
+
+    def test_downgrade_refuses_when_a_degraded_row_exists(self, postgres_url):
+        """The prior ScanStatus enum has no 'degraded' member — a row left
+        in that state after downgrade would raise LookupError the moment
+        the older application code tried to read it via the ORM (reproduced
+        directly; see the migration's own downgrade() docstring). The
+        downgrade must refuse rather than silently leave that row behind."""
+        assert alembic(postgres_url, "upgrade", self.PRE_OSV_FAILURES_REVISION).returncode == 0
+        self._seed_pre_migration_scan(postgres_url)
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                    "finding_count,osv_failures,scanned_at,received_at) VALUES "
+                    "(2,1,'/app2','project','degraded',0,4,now(),now())"
+                ))
+
+            r = alembic(postgres_url, "downgrade", self.PRE_OSV_FAILURES_REVISION)
+            assert r.returncode != 0
+            assert "degraded" in r.stderr
+
+            with engine.connect() as conn:
+                column = conn.execute(sa.text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'scans' AND column_name = 'osv_failures'"
+                )).scalar_one_or_none()
+        finally:
+            engine.dispose()
+        assert column == "osv_failures", "a refused downgrade must not partially drop columns"
+
+    def test_downgrade_succeeds_once_the_degraded_row_is_reclassified(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_OSV_FAILURES_REVISION).returncode == 0
+        self._seed_pre_migration_scan(postgres_url)
+        assert alembic(postgres_url, "upgrade", "head").returncode == 0
+
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                    "finding_count,osv_failures,scanned_at,received_at) VALUES "
+                    "(2,1,'/app2','project','degraded',0,4,now(),now())"
+                ))
+            assert alembic(postgres_url, "downgrade", self.PRE_OSV_FAILURES_REVISION).returncode != 0
+
+            with engine.connect() as conn:
+                conn.execute(sa.text("UPDATE scans SET status = 'error' WHERE id = 2"))
+        finally:
+            engine.dispose()
+
+        r = alembic(postgres_url, "downgrade", self.PRE_OSV_FAILURES_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
