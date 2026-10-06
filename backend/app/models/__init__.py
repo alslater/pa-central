@@ -259,6 +259,10 @@ class Scan(Base):
     # Packages package-alert could not check against OSV — see ScanStatus.degraded.
     osv_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # e.g. ["Python (requirements.txt)", "Node.js (package-lock.json)"]
+    # package-alert >= 0.9.0 per-package upgrade advice, stored as emitted
+    # (schemas.Remediation). NULL for older pa versions and for host scans
+    # until the pa-central plugin sends it.
+    remediations: Mapped[list | None] = mapped_column(JSON, nullable=True)
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     scanned_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
     received_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
@@ -429,6 +433,9 @@ class RepoScanResult(Base):
     # to decide whether it's safe to close absent findings.
     osv_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # package-alert >= 0.9.0 per-package upgrade advice, stored as emitted
+    # (schemas.Remediation). NULL for scans run on older pa versions.
+    remediations: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     triggered_by: Mapped[ScanTrigger] = mapped_column(
         Enum(ScanTrigger), default=ScanTrigger.manual, nullable=False

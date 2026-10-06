@@ -27,6 +27,7 @@ from app.schemas import (
     AlertPayload,
     CooldownOut,
     HeartbeatPayload,
+    Remediation,
     RepoScanResultIngest,
     ScanOut,
     ScanPayload,
@@ -38,6 +39,10 @@ ApiKeyDep = Annotated[tuple, Depends(get_api_key)]
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 
 router = APIRouter(prefix="/ingest", tags=["agent-ingest"])
+
+
+def _dump_remediations(remediations: list[Remediation] | None) -> list[dict] | None:
+    return [r.model_dump() for r in remediations] if remediations is not None else None
 
 
 @router.post("/heartbeat", status_code=204)
@@ -115,6 +120,7 @@ async def ingest_scan(
         risk_failures=body.risk_failures,
         osv_failures=body.osv_failures,
         sources=body.sources,
+        remediations=_dump_remediations(body.remediations),
         scanned_at=body.scanned_at or utcnow(),
         raw=body.raw,
     )
@@ -301,6 +307,7 @@ async def ingest_repo_scan_result(
     result.risk_failures = body.risk_failures
     result.osv_failures = body.osv_failures
     result.sources = body.sources
+    result.remediations = _dump_remediations(body.remediations)
     result.error_message = body.error_message
     result.completed_at = utcnow()
 

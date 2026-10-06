@@ -65,7 +65,8 @@ describe('HostDetail scan row — risks', () => {
       status: 'findings', finding_count: 0, findings: null,
       risks: [{ package: 'reqeusts', ecosystem: 'pypi', score: 46, level: 'warning',
                 signals: [{ name: 'typosquat', score: 15, reason: "resembles 'requests'" }] }],
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     const user = await openScansTab()
 
@@ -85,7 +86,8 @@ describe('HostDetail scan row — risks', () => {
         { package: 'reqeusts', ecosystem: 'pypi', score: 46, level: 'warning', signals: [] },
         { package: 'lodash-utils', ecosystem: 'npm', score: 20, level: 'info', signals: [] },
       ],
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -98,7 +100,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 4, host_id: 1, project_path: '/app/onlyfindings', scan_type: 'project',
       status: 'findings', finding_count: 1, findings: [{ package: 'flask' }], risks: null,
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -111,7 +114,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 7, host_id: 1, project_path: '/app/cleanexplicit', scan_type: 'project',
       status: 'findings', finding_count: 1, findings: [{ package: 'flask' }], risks: [],
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -124,8 +128,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 5, host_id: 1, project_path: '/app/partialscan', scan_type: 'project',
       status: 'findings', finding_count: 0, findings: null,
-      risks: [], risk_failures: 2,
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risks: [], risk_failures: 2, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -137,8 +141,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 6, host_id: 1, project_path: '/app/cleanriskscan', scan_type: 'project',
       status: 'findings', finding_count: 1, findings: [{ package: 'flask' }],
-      risks: [], risk_failures: 0,
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risks: [], risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -150,8 +154,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 8, host_id: 1, project_path: '/app/osvoutage', scan_type: 'project',
       status: 'degraded', finding_count: 0, findings: [],
-      risks: null, osv_failures: 12,
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risks: null, risk_failures: 0, osv_failures: 12, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -163,8 +167,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 9, host_id: 1, project_path: '/app/cleanosvscan', scan_type: 'project',
       status: 'clean', finding_count: 0, findings: [],
-      risks: null, osv_failures: 0,
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -176,7 +180,8 @@ describe('HostDetail scan row — risks', () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([{
       id: 2, host_id: 1, project_path: '/app/cleanproject', scan_type: 'project',
       status: 'clean', finding_count: 0, findings: null, risks: null,
-      sources: null, scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z',
     }] as any)
     await openScansTab()
 
@@ -199,10 +204,10 @@ describe('HostDetail scan row — rendering GET /hosts/{id}/latest-scans results
   it('renders one card per row returned by the endpoint, in the given order', async () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([
       { id: 1, host_id: 1, project_path: '/zeta', scan_type: 'project', status: 'clean',
-        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
       { id: 2, host_id: 1, project_path: '/alpha', scan_type: 'project', status: 'clean',
-        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-19T00:00:00Z', received_at: '2026-08-19T00:00:00Z' },
     ] as any)
     await openScansTab()
@@ -218,10 +223,10 @@ describe('HostDetail scan row — rendering GET /hosts/{id}/latest-scans results
   it('expanding one project card does not expand another', async () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([
       { id: 1, host_id: 1, project_path: '/app/one', scan_type: 'project', status: 'findings',
-        finding_count: 1, findings: [{ package: 'flask' }], risks: null, risk_failures: 0, sources: null,
+        finding_count: 1, findings: [{ package: 'flask' }], risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
       { id: 2, host_id: 1, project_path: '/app/two', scan_type: 'project', status: 'findings',
-        finding_count: 1, findings: [{ package: 'requests' }], risks: null, risk_failures: 0, sources: null,
+        finding_count: 1, findings: [{ package: 'requests' }], risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
     ] as any)
     const user = await openScansTab()
@@ -239,13 +244,13 @@ describe('HostDetail scan row — project filter', () => {
   it('narrows the list to projects whose path matches the filter text', async () => {
     vi.mocked(api.hosts.latestScans).mockResolvedValue([
       { id: 1, host_id: 1, project_path: '/app/payments-service', scan_type: 'project', status: 'clean',
-        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
       { id: 2, host_id: 1, project_path: '/app/auth-service', scan_type: 'project', status: 'clean',
-        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
       { id: 3, host_id: 1, project_path: '/app/billing-worker', scan_type: 'project', status: 'clean',
-        finding_count: 0, findings: null, risks: null, risk_failures: 0, sources: null,
+        finding_count: 0, findings: null, risks: null, risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
         scanned_at: '2026-08-20T00:00:00Z', received_at: '2026-08-20T00:00:00Z' },
     ] as any)
     const user = await openScansTab()

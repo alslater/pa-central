@@ -1,7 +1,8 @@
 import { useState, useEffect, useEffectEvent, useRef, useCallback, useMemo, useId, forwardRef } from 'react'
 import type { CSSProperties, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
-import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus } from '@/lib/api'
+import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus, type Remediation } from '@/lib/api'
 import { useRovingTabs } from '@/lib/hooks'
+import { groupFindings, severityRank, type RawFinding, type PackageGroup, type AdvisoryRow } from '@/lib/remediationGroups'
 
 // ── URL sanitization ──────────────────────────────────────────────────────────
 
@@ -748,32 +749,43 @@ export function FindingRecordDetail({ f, children }: { f: FindingRecord; childre
 
 // ── Findings table ────────────────────────────────────────────────────────────
 
-interface Finding {
-  package?: string
-  ecosystem?: string
-  version?: string
-  advisory_id?: string
-  severity?: string
-  summary?: string
-  details?: string
-  fixed_versions?: string | string[] | null
-  url?: string
-  is_malicious?: boolean
-  [key: string]: unknown
-}
-
-const SEV_ORDER: Record<string, number> = {
-  critical: 0, high: 1, medium: 2, warning: 3, low: 4, info: 5,
-}
-
 const PAGE_SIZE = 25
 
-function RawFindingDetail({ f }: { f: Finding }) {
-  const rawSev = f.severity?.toLowerCase() ?? 'info'
-  const sev = (rawSev === 'moderate' ? 'medium' : SEV_CLASSES[rawSev as AlertSeverity] ? rawSev : 'info') as AlertSeverity
-  const fixedStr = Array.isArray(f.fixed_versions)
-    ? f.fixed_versions.join(', ')
-    : typeof f.fixed_versions === 'string' ? f.fixed_versions : null
+function toSeverity(raw: string | undefined): AlertSeverity {
+  const s = raw?.toLowerCase() ?? 'info'
+  return (s === 'moderate' ? 'medium' : SEV_CLASSES[s as AlertSeverity] ? s : 'info') as AlertSeverity
+}
+
+const TAG = 'inline-flex items-center px-2 py-0.5 rounded text-style-tag'
+const TAG_REVIEW = `${TAG} bg-status-review/12 text-status-review-text`
+const TAG_MUTED = `${TAG} bg-muted text-muted-foreground`
+
+function Pager({ page, totalPages, total, noun, onPage }: {
+  page: number; totalPages: number; total: number; noun?: string; onPage: (p: number) => void
+}) {
+  if (totalPages <= 1) return null
+  const btn = (disabled: boolean) =>
+    `text-xs px-2.5 py-1 rounded border border-border bg-muted ${disabled ? 'text-muted-foreground cursor-default' : 'text-foreground cursor-pointer'}`
+  return (
+    <div className="flex items-center gap-2 px-4 py-2.5 border-t border-border">
+      <button type="button" onClick={() => onPage(page - 1)} disabled={page === 0} className={btn(page === 0)}>←</button>
+      <span className="text-xs text-muted-foreground">
+        {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}{noun ? ` ${noun}` : ''}
+      </span>
+      <button type="button" onClick={() => onPage(page + 1)} disabled={page >= totalPages - 1} className={btn(page >= totalPages - 1)}>→</button>
+    </div>
+  )
+}
+
+// fixed_versions arrives as a string[] or a comma-separated string.
+function fixedVersionList(v: unknown): string[] {
+  const parts = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : []
+  return parts.filter((x): x is string => typeof x === 'string').map(x => x.trim()).filter(Boolean)
+}
+
+function RawFindingDetail({ f, aliases = [], unfixed = false }: { f: RawFinding; aliases?: string[]; unfixed?: boolean }) {
+  const sev = toSeverity(f.severity)
+  const fixedStr = fixedVersionList(f.fixed_versions).join(', ') || null
   return (
     <div className="flex flex-col gap-0">
       <div className="flex flex-wrap gap-2 mb-4">
@@ -800,6 +812,12 @@ function RawFindingDetail({ f }: { f: Finding }) {
           <div className="text-[13px] font-mono">{f.advisory_id}</div>
         </div>
       )}
+      {aliases.length > 0 && (
+        <div className="py-2 border-b border-border/50">
+          <div className="text-[11px] text-muted-foreground mb-0.5">Also reported as</div>
+          <div className="text-[13px] font-mono">{aliases.join(', ')}</div>
+        </div>
+      )}
       {f.summary && (
         <div className="py-2 border-b border-border/50">
           <div className="text-[11px] text-muted-foreground mb-0.5">Summary</div>
@@ -813,6 +831,11 @@ function RawFindingDetail({ f }: { f: Finding }) {
           : <div className="text-[13px] text-muted-foreground">No fix available</div>
         }
       </div>
+      {unfixed && (
+        <div className="py-2 border-b border-border/50">
+          <span className={TAG_REVIEW}>Not fixed by recommended version</span>
+        </div>
+      )}
       {(() => { const href = safeUrl(typeof f.url === 'string' ? f.url : undefined); return href && (
         <div className="py-2 border-b border-border/50">
           <div className="text-[11px] text-muted-foreground mb-0.5">Reference</div>
@@ -834,16 +857,15 @@ function RawFindingDetail({ f }: { f: Finding }) {
   )
 }
 
-export function FindingsTable({ findings }: { findings: Record<string, unknown>[] }) {
+function FlatFindingsTable({ findings }: { findings: Record<string, unknown>[] }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [page, setPage] = useState(0)
 
   const { items, rowKeys, rowKeyIndex } = useMemo(() => {
     const sorted = [...findings].sort((a, b) => {
-      const f = a as Finding, g = b as Finding
-      return (SEV_ORDER[f.severity?.toLowerCase() ?? 'info'] ?? 9) -
-             (SEV_ORDER[g.severity?.toLowerCase() ?? 'info'] ?? 9)
-    }) as Finding[]
+      const f = a as RawFinding, g = b as RawFinding
+      return severityRank(f.severity) - severityRank(g.severity)
+    }) as RawFinding[]
     // Build stable row keys: identity tuple is preferred; append a
     // disambiguating counter only for rows that share the same triple.
     const keyCounts = new Map<string, number>()
@@ -882,8 +904,7 @@ export function FindingsTable({ findings }: { findings: Record<string, unknown>[
       {pageItems.map((f, i) => {
         const itemIndex = page * PAGE_SIZE + i
         const rowKey = rowKeys[itemIndex]
-        const rawSev = f.severity?.toLowerCase() ?? 'info'
-        const sev = (rawSev === 'moderate' ? 'medium' : SEV_CLASSES[rawSev as AlertSeverity] ? rawSev : 'info') as AlertSeverity
+        const sev = toSeverity(f.severity)
         return (
           <div key={rowKey} className="border-b border-border">
             <div
@@ -917,25 +938,7 @@ export function FindingsTable({ findings }: { findings: Record<string, unknown>[
           </div>
         )
       })}
-      {totalPages > 1 && (
-        <div className="flex items-center gap-2 px-4 py-2.5 border-t border-border">
-          <button
-            type="button"
-            onClick={() => { setPage(p => p - 1); setSelectedKey(null) }}
-            disabled={page === 0}
-            className={`text-xs px-2.5 py-1 rounded border border-border bg-muted ${page === 0 ? 'text-muted-foreground cursor-default' : 'text-foreground cursor-pointer'}`}
-          >←</button>
-          <span className="text-xs text-muted-foreground">
-            {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, items.length)} of {items.length}
-          </span>
-          <button
-            type="button"
-            onClick={() => { setPage(p => p + 1); setSelectedKey(null) }}
-            disabled={page >= totalPages - 1}
-            className={`text-xs px-2.5 py-1 rounded border border-border bg-muted ${page >= totalPages - 1 ? 'text-muted-foreground cursor-default' : 'text-foreground cursor-pointer'}`}
-          >→</button>
-        </div>
-      )}
+      <Pager page={page} totalPages={totalPages} total={items.length} onPage={p => { setPage(p); setSelectedKey(null) }} />
     </div>
     {selected && (
       <Drawer
@@ -943,6 +946,123 @@ export function FindingsTable({ findings }: { findings: Record<string, unknown>[
         onClose={() => setSelectedKey(null)}
       >
         <RawFindingDetail f={selected} />
+      </Drawer>
+    )}
+    </>
+  )
+}
+
+export function FindingsTable({ findings, remediations }: {
+  findings: Record<string, unknown>[]
+  remediations?: Remediation[] | null
+}) {
+  // Grouped only when package-alert (>= 0.9.0) supplied advice; older
+  // results and host scans keep the flat table exactly as before.
+  return remediations?.length
+    ? <GroupedFindingsTable findings={findings} remediations={remediations} />
+    : <FlatFindingsTable findings={findings} />
+}
+
+// package-alert emits recommended_version null in two cases (see its
+// _recommendation_text): no recommendation at all (unfixed_advisory_ids null,
+// installed version unknown/unorderable) where it lists every known fixed
+// version, and a recommendation with no known fixed version (unfixed ids is a
+// list) where it says so.
+function RemediationSummary({ r, findings }: { r: Remediation; findings: RawFinding[] }) {
+  const open = r.recommended_version ? r.unfixed_advisory_ids?.length ?? 0 : 0
+  const fixedIn = r.recommended_version || r.unfixed_advisory_ids !== null
+    ? []
+    : [...new Set(findings.flatMap(f => fixedVersionList(f.fixed_versions)))].sort()
+  return (
+    <>
+      {r.recommended_version
+        ? <span className="font-mono text-xs text-status-pass-text">→ {r.recommended_version}</span>
+        : fixedIn.length
+          ? <span className="font-mono text-xs text-status-pass-text">Fixed in: {fixedIn.join(', ')}</span>
+          : <span className="text-xs text-muted-foreground">No fixed version known</span>}
+      {r.major_upgrade === true && <span className={TAG_REVIEW}>Major upgrade</span>}
+      {r.verified === false && (
+        <span className={TAG_MUTED} title="Chosen from fixed-version lists only: OSV range data was unavailable for at least one advisory">Unverified</span>
+      )}
+      {r.in_cooldown === true && (
+        <span className={TAG_REVIEW}>
+          In cooldown{typeof r.recommended_age_days === 'number' ? ` · ${Math.floor(r.recommended_age_days)}d` : ''}
+        </span>
+      )}
+      {open > 0 && <span className={TAG_REVIEW}>Leaves {open} open</span>}
+    </>
+  )
+}
+
+function GroupedFindingsTable({ findings, remediations }: {
+  findings: Record<string, unknown>[]
+  remediations: Remediation[]
+}) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+
+  const groups = useMemo(() => groupFindings(findings as RawFinding[], remediations), [findings, remediations])
+  const rowIndex = useMemo(() => {
+    const m = new Map<string, { group: PackageGroup; row: AdvisoryRow }>()
+    for (const group of groups) for (const row of group.rows) m.set(row.key, { group, row })
+    return m
+  }, [groups])
+  const selected = selectedKey !== null ? rowIndex.get(selectedKey) ?? null : null
+
+  const totalPages = Math.ceil(groups.length / PAGE_SIZE)
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- same page clamp as FlatFindingsTable: derived-state reset when data shrinks
+  useEffect(() => { setPage(p => totalPages > 0 ? Math.min(p, totalPages - 1) : 0) }, [totalPages])
+
+  if (!groups.length) return null
+  const pageGroups = groups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const toggle = (key: string) => setSelectedKey(k => k === key ? null : key)
+
+  return (
+    <>
+    <div className="flex flex-col">
+      {pageGroups.map(g => (
+        <div key={g.key} role="group" aria-label={`${g.package || 'unknown package'} ${g.version ?? ''}`.trim()} className="border-b border-border">
+          <div className="flex flex-wrap items-center gap-2.5 px-4 py-2.5 bg-muted/30">
+            <SeverityBadge severity={toSeverity(g.worstSeverity)} />
+            <span className="font-mono text-xs font-semibold">{g.package || '—'}</span>
+            {g.version && <span className="text-[11px] text-muted-foreground">{g.version}</span>}
+            {g.ecosystem && <span className="text-[11px] text-muted-foreground uppercase">{g.ecosystem}</span>}
+            {g.malicious && <span className="text-[11px] text-status-fail-text font-semibold">⚠ MALICIOUS</span>}
+            {g.remediation && <RemediationSummary r={g.remediation} findings={g.findings} />}
+          </div>
+          {g.rows.map(row => {
+            const f = row.finding
+            return (
+              <div
+                key={row.key}
+                onClick={() => toggle(row.key)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(row.key) } }}
+                className="flex items-center gap-2.5 pl-8 pr-4 py-2 cursor-pointer hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
+                tabIndex={0}
+                role="button"
+                aria-label={`${f.advisory_id ?? 'advisory'} — view details`}
+              >
+                <SeverityBadge severity={toSeverity(f.severity)} />
+                {f.is_malicious && <span className="text-[11px] text-status-fail-text font-semibold">⚠ MALICIOUS</span>}
+                <span className="flex-1 text-xs text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap">{f.summary ?? ''}</span>
+                {f.advisory_id && (
+                  <span className="text-[11px] text-muted-foreground font-mono shrink-0">
+                    {f.advisory_id}{row.aliases.length ? ` + ${row.aliases.join(', ')}` : ''}
+                  </span>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      ))}
+      <Pager page={page} totalPages={totalPages} total={groups.length} noun="packages" onPage={p => { setPage(p); setSelectedKey(null) }} />
+    </div>
+    {selected && (
+      <Drawer
+        title={`${selected.group.package || '—'} — ${selected.row.finding.advisory_id ?? 'Finding'}`}
+        onClose={() => setSelectedKey(null)}
+      >
+        <RawFindingDetail f={selected.row.finding} aliases={selected.row.aliases} unfixed={selected.row.unfixed} />
       </Drawer>
     )}
     </>
@@ -1131,10 +1251,11 @@ export function RisksTable({ risks }: { risks: Record<string, unknown>[] }) {
 type ScanDetailTab = 'findings' | 'risks'
 
 export function ScanDetailTabs({
-  findings, risks,
+  findings, risks, remediations,
 }: {
   findings: Record<string, unknown>[] | null | undefined
   risks: Record<string, unknown>[] | null | undefined
+  remediations?: Remediation[] | null
 }) {
   const hasFindings = !!findings?.length
   const hasRisks = !!risks?.length
@@ -1143,7 +1264,7 @@ export function ScanDetailTabs({
   const TAB_IDS: readonly ScanDetailTab[] = ['findings', 'risks']
   const { tabRef, onKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
 
-  if (hasFindings && !hasRisks) return <FindingsTable findings={findings!} />
+  if (hasFindings && !hasRisks) return <FindingsTable findings={findings!} remediations={remediations} />
   if (hasRisks && !hasFindings) return <RisksTable risks={risks!} />
   if (!hasFindings && !hasRisks) return null
 
@@ -1180,7 +1301,7 @@ export function ScanDetailTabs({
         </button>
       </div>
       <div id={`${uid}-panel-findings`} role="tabpanel" aria-labelledby={`${uid}-tab-findings`} hidden={tab !== 'findings'}>
-        <FindingsTable findings={findings!} />
+        <FindingsTable findings={findings!} remediations={remediations} />
       </div>
       <div id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`} hidden={tab !== 'risks'}>
         <RisksTable risks={risks!} />

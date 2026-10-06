@@ -267,7 +267,7 @@ function HostScans({ hostId }: { hostId: number }) {
           </div>
           {isExpanded && hasDetail && (
             <div className="host-scan-findings-panel">
-              <ScanDetailTabs findings={s.findings} risks={s.risks} />
+              <ScanDetailTabs findings={s.findings} risks={s.risks} remediations={s.remediations} />
             </div>
           )}
         </Card>

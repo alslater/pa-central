@@ -1,10 +1,19 @@
 """Pydantic v2 schemas for API request/response."""
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    EmailStr,
+    Field,
+    ValidationError,
+    field_validator,
+)
 
 from app.core.security import MAX_PASSWORD_BYTES
 from app.models import (
@@ -19,6 +28,8 @@ from app.models import (
     SettingValueType,
     UserRole,
 )
+
+log = logging.getLogger(__name__)
 
 # ── Shared ────────────────────────────────────────────────────────────────────
 
@@ -460,6 +471,62 @@ class AlertBulkAcknowledge(BaseModel):
     acknowledged: bool = True
 
 
+# ── Remediation (package-alert >= 0.9.0) ─────────────────────────────────────
+#
+# One upgrade recommendation per vulnerable package, exactly as package-alert's
+# `scan-project --format json` emits it (packagealert.cli.app._remediations_json).
+# pa-central stores and displays it; it never re-derives it. Every field is
+# optional and null means "unknown", e.g. recommended_age_days/in_cooldown are
+# only filled by a live scan.
+
+class RemediationAdvisory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str | None = None
+    # The other ids this scan reported for the same flaw (e.g. a GHSA's PYSEC twin).
+    aliases: list[str] = []
+
+
+class Remediation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    package: str | None = None
+    ecosystem: str | None = None
+    version: str | None = None
+    advisories: list[RemediationAdvisory] = []
+    recommended_version: str | None = None
+    unfixed_advisory_ids: list[str] | None = None
+    major_upgrade: bool | None = None
+    verified: bool | None = None
+    recommended_age_days: float | None = None
+    in_cooldown: bool | None = None
+
+
+def _drop_invalid_remediations(v: Any) -> Any:
+    """Keep the entries that validate; drop the rest instead of rejecting.
+
+    A 422 on ingest loses the entire scan result (findings, risks, status),
+    which is far too high a price for advisory display data, so an entry a
+    future or buggy package-alert gets wrong is logged and dropped, and a
+    non-list value is treated as absent.
+    """
+    if v is None:
+        return None
+    if not isinstance(v, list):
+        log.warning("Ignoring non-list remediations value (%s)", type(v).__name__)
+        return None
+    kept: list[Remediation] = []
+    for entry in v:
+        try:
+            kept.append(Remediation.model_validate(entry))
+        except ValidationError:
+            log.warning("Dropping malformed remediation entry: %.200r", entry)
+    return kept
+
+
+IngestRemediations = Annotated[list[Remediation] | None, BeforeValidator(_drop_invalid_remediations)]
+
+
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
 class ScanPayload(BaseModel):
@@ -481,6 +548,7 @@ class ScanPayload(BaseModel):
     risk_failures: int = Field(0, ge=0)
     osv_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
+    remediations: IngestRemediations = None
     unpinned: list[dict] | None = None  # packages without pinned versions
     scanned_at: datetime | None = None
     raw: dict | None = None
@@ -505,6 +573,7 @@ class ScanOut(OrmBase):
     risk_failures: int
     osv_failures: int
     sources: list[str] | None
+    remediations: list[Remediation] | None = None
     scanned_at: datetime
     received_at: datetime
 
@@ -805,6 +874,7 @@ class RepoScanResultOut(OrmBase):
     risk_failures: int
     osv_failures: int
     sources: list[str] | None
+    remediations: list[Remediation] | None = None
     error_message: str | None
     triggered_by: ScanTrigger
     ecs_task_arn: str | None
@@ -839,6 +909,7 @@ class RepoScanResultIngest(BaseModel):
     # of scoring failures — see finding_lifecycle.update_finding_records.
     osv_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
+    remediations: IngestRemediations = None
     error_message: str | None = None
 
 

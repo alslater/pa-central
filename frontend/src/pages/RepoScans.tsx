@@ -292,7 +292,7 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
             )}
             {isExpanded && (hasFindings || hasRisks) && (
               <div className="result-findings-expanded">
-                <ScanDetailTabs findings={r.findings} risks={r.risks} />
+                <ScanDetailTabs findings={r.findings} risks={r.risks} remediations={r.remediations} />
               </div>
             )}
           </div>

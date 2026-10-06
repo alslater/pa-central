@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "7b0e9bd83541"
+HEAD_REVISION = "e4c1a9d2b7f3"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -1764,3 +1764,133 @@ class TestDegradedStatusAndOsvFailuresMigration:
 
         r = alembic(postgres_url, "downgrade", self.PRE_OSV_FAILURES_REVISION)
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+
+class TestRemediationsMigration:
+    """e4c1a9d2b7f3 adds nullable JSON `remediations` to scans and
+    repo_scan_results. No FKs, so EXPECTED_ONDELETE is unchanged.
+
+    Seeded before the migration, per CLAUDE.md: dropping a column on
+    downgrade is where a rebuild-style (batch) migration loses rows, and an
+    empty table hides that.
+    """
+
+    PRE_REMEDIATIONS_REVISION = "7b0e9bd83541"
+
+    @staticmethod
+    def _seed(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,"
+                    "role,is_active,totp_enabled,created_at,token_epoch) VALUES "
+                    "(1,'rem@example.invalid','Rem','x','viewer',true,false,now(),0)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO hosts (id,owner_user_id,name,daemon_status,created_at) "
+                    "VALUES (1,1,'h1','unknown',now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                    "finding_count,osv_failures,scanned_at,received_at) VALUES "
+                    "(1,1,'/app','project','clean',0,0,now(),now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,"
+                    "is_enabled,created_by_id,created_at,updated_at) "
+                    "VALUES (1,'r','https://example.invalid/r','main','high',true,1,"
+                    "now(),now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scan_results (id,repo_scan_id,status,finding_count,"
+                    "risk_failures,osv_failures,triggered_by,started_at,notified) VALUES "
+                    "(1,1,'success',0,0,0,'manual',now(),false)"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def migrated(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REMEDIATIONS_REVISION).returncode == 0
+        self._seed(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_existing_rows_get_null_remediations(self, migrated):
+        with migrated.connect() as conn:
+            scan = conn.execute(sa.text("SELECT remediations FROM scans WHERE id = 1")).scalar_one()
+            res = conn.execute(sa.text(
+                "SELECT remediations FROM repo_scan_results WHERE id = 1"
+            )).scalar_one()
+        assert scan is None
+        assert res is None
+
+    @staticmethod
+    def _remediation_columns(engine):
+        with engine.connect() as conn:
+            rows = conn.execute(sa.text(
+                "SELECT table_name, data_type, is_nullable FROM information_schema.columns "
+                "WHERE column_name = 'remediations' ORDER BY table_name"
+            )).all()
+        return [(r.table_name, r.data_type, r.is_nullable) for r in rows]
+
+    def test_columns_are_nullable_json(self, migrated):
+        assert self._remediation_columns(migrated) == [
+            ("repo_scan_results", "json", "YES"),
+            ("scans", "json", "YES"),
+        ]
+
+    def test_downgrade_converges_when_one_column_is_already_gone(self, migrated, postgres_url):
+        with migrated.connect() as conn:
+            conn.execute(sa.text("ALTER TABLE scans DROP COLUMN remediations"))
+        r = alembic(postgres_url, "downgrade", self.PRE_REMEDIATIONS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert self._remediation_columns(migrated) == []
+
+    def test_upgrade_converges_when_one_column_already_exists(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REMEDIATIONS_REVISION).returncode == 0
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text("ALTER TABLE scans ADD COLUMN remediations JSON"))
+            r = alembic(postgres_url, "upgrade", "head")
+            assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+            assert self._remediation_columns(engine) == [
+                ("repo_scan_results", "json", "YES"),
+                ("scans", "json", "YES"),
+            ]
+        finally:
+            engine.dispose()
+
+    def test_downgrade_with_populated_remediations_keeps_the_rows(self, migrated, postgres_url):
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "UPDATE scans SET remediations = '[{\"package\": \"a\"}]' WHERE id = 1"
+            ))
+            conn.execute(sa.text(
+                "UPDATE repo_scan_results SET remediations = '[{\"package\": \"b\"}]' WHERE id = 1"
+            ))
+        r = alembic(postgres_url, "downgrade", self.PRE_REMEDIATIONS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        with migrated.connect() as conn:
+            cols = conn.execute(sa.text(
+                "SELECT count(*) FROM information_schema.columns WHERE column_name = 'remediations'"
+            )).scalar_one()
+            scans = conn.execute(sa.text("SELECT id FROM scans")).all()
+            results = conn.execute(sa.text("SELECT id FROM repo_scan_results")).all()
+        assert cols == 0
+        assert [r.id for r in scans] == [1]
+        assert [r.id for r in results] == [1]
+
+    def test_upgrade_downgrade_upgrade_round_trips(self, migrated, postgres_url):
+        assert alembic(postgres_url, "downgrade", self.PRE_REMEDIATIONS_REVISION).returncode == 0
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert self._remediation_columns(migrated) == [
+            ("repo_scan_results", "json", "YES"),
+            ("scans", "json", "YES"),
+        ]
