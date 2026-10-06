@@ -75,7 +75,8 @@ describe('RepoScans result row — risk count', () => {
         { package: 'reqeusts', ecosystem: 'pypi', score: 46, level: 'warning', signals: [] },
         { package: 'lodash-utils', ecosystem: 'npm', score: 20, level: 'info', signals: [] },
       ],
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()
@@ -88,7 +89,8 @@ describe('RepoScans result row — risk count', () => {
     vi.mocked(api.repoScans.results).mockResolvedValue([{
       id: 11, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
       pa_version: '0.7.0', finding_count: 1, findings: [{ package: 'flask' }], risks: null,
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()
@@ -101,7 +103,8 @@ describe('RepoScans result row — risk count', () => {
     vi.mocked(api.repoScans.results).mockResolvedValue([{
       id: 12, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
       pa_version: '0.7.0', finding_count: 1, findings: [{ package: 'flask' }], risks: [],
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()
@@ -114,8 +117,8 @@ describe('RepoScans result row — risk count', () => {
   it('shows an unscored warning when risk_failures > 0 even though risks is empty', async () => {
     vi.mocked(api.repoScans.results).mockResolvedValue([{
       id: 12, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
-      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], risk_failures: 3,
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], risk_failures: 3, osv_failures: 0, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()
@@ -126,8 +129,8 @@ describe('RepoScans result row — risk count', () => {
   it('does not show an unscored warning when risk_failures is 0', async () => {
     vi.mocked(api.repoScans.results).mockResolvedValue([{
       id: 13, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
-      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], risk_failures: 0,
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()
@@ -139,8 +142,8 @@ describe('RepoScans result row — risk count', () => {
   it('shows an unchecked warning when osv_failures > 0 even though findings is empty', async () => {
     vi.mocked(api.repoScans.results).mockResolvedValue([{
       id: 14, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
-      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], osv_failures: 7,
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], risk_failures: 0, osv_failures: 7, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()
@@ -151,8 +154,8 @@ describe('RepoScans result row — risk count', () => {
   it('does not show an unchecked warning when osv_failures is 0', async () => {
     vi.mocked(api.repoScans.results).mockResolvedValue([{
       id: 15, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
-      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], osv_failures: 0,
-      sources: null, error_message: null, ecs_task_arn: null, notified: false,
+      pa_version: '0.7.0', finding_count: 0, findings: [], risks: [], risk_failures: 0, osv_failures: 0, sources: null, remediations: null,
+      error_message: null, ecs_task_arn: null, notified: false,
       started_at: '2026-08-20T00:00:00Z', completed_at: '2026-08-20T00:01:00Z',
     }] as any)
     await expandResults()

@@ -22,6 +22,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 PRE_KIND_REVISION = "b3f81c4d9e27"
 KIND_REVISION = "c7a2e5f01d38"
 PRE_OSV_FAILURES_REVISION = "594fb09ecdfc"
+PRE_REMEDIATIONS_REVISION = "7b0e9bd83541"
 
 
 def alembic(db_path: str, *args: str) -> subprocess.CompletedProcess:
@@ -370,3 +371,86 @@ class TestOsvFailuresAndDegradedStatusOnSqlite:
 
         r = alembic(db_path, "downgrade", PRE_OSV_FAILURES_REVISION)
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+
+class TestRemediationsOnSqlite:
+    """e4c1a9d2b7f3 on SQLite: the downgrade's batch drop_column rebuilds the
+    table there (PostgreSQL ALTERs in place), so prove rows survive it."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        path = str(tmp_path / "scratch.db")
+        assert alembic(path, "upgrade", PRE_REMEDIATIONS_REVISION).returncode == 0
+        _seed_pre_osv_failures_rows(path)  # users/hosts/scans rows; valid at this revision too
+        return path
+
+    def test_upgrade_adds_nullable_column(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                value = conn.execute(sa.text("SELECT remediations FROM scans WHERE id=1")).scalar_one()
+                ddl = conn.execute(sa.text(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='repo_scan_results'"
+                )).scalar_one()
+        finally:
+            engine.dispose()
+        assert value is None
+        assert "remediations" in ddl
+
+    def test_downgrade_keeps_rows(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text("UPDATE scans SET remediations='[{\"package\":\"a\"}]' WHERE id=1"))
+        finally:
+            engine.dispose()
+        r = alembic(db_path, "downgrade", PRE_REMEDIATIONS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                ddl = conn.execute(sa.text(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='scans'"
+                )).scalar_one()
+                rows = conn.execute(sa.text("SELECT id FROM scans")).all()
+        finally:
+            engine.dispose()
+        assert "remediations" not in ddl
+        assert [row.id for row in rows] == [1]
+
+    @staticmethod
+    def _remediation_tables(db_path):
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                return {
+                    t: [r[1] for r in conn.execute(sa.text(f"PRAGMA table_info({t})"))].count("remediations")
+                    for t in ("scans", "repo_scan_results")
+                }
+        finally:
+            engine.dispose()
+
+    def test_downgrade_converges_when_one_column_is_already_gone(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text("ALTER TABLE scans DROP COLUMN remediations"))
+        finally:
+            engine.dispose()
+        r = alembic(db_path, "downgrade", PRE_REMEDIATIONS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert self._remediation_tables(db_path) == {"scans": 0, "repo_scan_results": 0}
+
+    def test_upgrade_converges_when_one_column_already_exists(self, db_path):
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text("ALTER TABLE scans ADD COLUMN remediations JSON"))
+        finally:
+            engine.dispose()
+        r = alembic(db_path, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert self._remediation_tables(db_path) == {"scans": 1, "repo_scan_results": 1}

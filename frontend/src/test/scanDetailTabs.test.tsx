@@ -93,4 +93,16 @@ describe('ScanDetailTabs', () => {
     expect(risksTab).toHaveAttribute('aria-selected', 'true')
     expect(findingsTab).toHaveAttribute('aria-selected', 'false')
   })
+
+  it('passes remediations through to the findings table (grouped header shows the recommendation)', () => {
+    const findings = [{ package: 'django', ecosystem: 'PyPI', version: '5.2.15', advisory_id: 'GHSA-a', severity: 'high' }]
+    const remediations = [{
+      package: 'django', ecosystem: 'PyPI', version: '5.2.15',
+      advisories: [{ id: 'GHSA-a', aliases: [] }],
+      recommended_version: '5.2.17', unfixed_advisory_ids: [], major_upgrade: false,
+      verified: true, recommended_age_days: null, in_cooldown: null,
+    }]
+    render(<ScanDetailTabs findings={findings} risks={[]} remediations={remediations} />)
+    expect(screen.getByText('→ 5.2.17')).toBeInTheDocument()
+  })
 })

@@ -65,6 +65,7 @@ def post_result(
     risk_failures: int = 0,
     osv_failures: int = 0,
     sources: list[str] | None = None,
+    remediations: list[dict] | None = None,
     error_message: str | None = None,
 ) -> None:
     import httpx
@@ -83,6 +84,8 @@ def post_result(
         payload["risks"] = risks
     if sources is not None:
         payload["sources"] = sources
+    if remediations is not None:
+        payload["remediations"] = remediations
     if error_message:
         payload["error_message"] = error_message
 
@@ -187,9 +190,9 @@ def run_pa_scan(
     config_toml: str,
     scan_flags: str = "",
     subfolder: str = "",
-) -> tuple[int, list[dict], list[dict] | None, int, int, list[str]]:
+) -> tuple[int, list[dict], list[dict] | None, int, int, list[str], list[dict] | None]:
     """Run pa scan-project. Returns (finding_count, findings, risks, risk_failures,
-    osv_failures, sources).
+    osv_failures, sources, remediations).
 
     risks is None (not []) when the key is absent from pa's JSON output — an
     older package-alert binary that predates risk scoring — so the backend
@@ -203,6 +206,11 @@ def run_pa_scan(
     older package-alert binary that predates this simply omits the key, so
     a missing key defaults to 0 (the pre-existing "checked, clean" meaning),
     matching risk_failures' own default-to-0 behaviour for the same reason.
+
+    remediations is None (not []) when the key is absent from pa's JSON output —
+    package-alert < 0.9.0 — so the backend can tell "no advice available" (old pa)
+    apart from "no vulnerable packages" (clean scan). package-alert >= 0.9.0
+    includes the key even for a clean scan.
     """
     import shlex
     cmd = [str(Path(sys.executable).parent / "pa"), "scan-project", "--format", "json"]
@@ -246,7 +254,9 @@ def run_pa_scan(
         if config_tmp:
             Path(config_tmp).unlink(missing_ok=True)
 
-    if result.returncode not in (0, 1):  # pa exits 1 when findings found
+    # 0 = scan completed (findings are read from the JSON); 1 = findings on package-alert
+    # < 0.9.0 (PA_VERSION is chosen at runtime), or invalid CLI usage on 0.9.0+ (fails JSON parsing below)
+    if result.returncode not in (0, 1):
         raise RuntimeError(f"pa scan-project failed: {result.stderr}")
 
     try:
@@ -261,7 +271,13 @@ def run_pa_scan(
     risk_failures = data.get("risk_failures", 0)
     osv_failures = data.get("osv_failures", 0)
     sources = data.get("sources", [])
-    return len(findings), findings, risks, risk_failures, osv_failures, sources
+    # package-alert >= 0.9.0: one upgrade recommendation per vulnerable
+    # package. None (not []) when absent or malformed, so an older pa
+    # version's result is stored as "no advice" rather than "nothing to fix".
+    remediations = data.get("remediations")
+    if not isinstance(remediations, list):
+        remediations = None
+    return len(findings), findings, risks, risk_failures, osv_failures, sources, remediations
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -317,7 +333,7 @@ def main() -> None:
         try:
             scan_flags = get_env("PA_SCAN_FLAGS", "")
             subfolder = get_env("PA_SUBFOLDER", "")
-            finding_count, findings, risks, risk_failures, osv_failures, sources = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
+            finding_count, findings, risks, risk_failures, osv_failures, sources, remediations = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
         except RuntimeError as exc:
             post_result(fleet_url, fleet_key, result_id, "failed",
                         pa_version=pa_version, error_message=str(exc))
@@ -333,6 +349,7 @@ def main() -> None:
             risk_failures=risk_failures,
             osv_failures=osv_failures,
             sources=sources or None,
+            remediations=remediations,
         )
 
     finally:

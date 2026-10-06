@@ -125,6 +125,24 @@ export interface Alert {
   acknowledged: boolean; occurred_at: string; received_at: string
 }
 
+/** One vulnerability as package-alert merged it; `aliases` are the other ids the scan reported for the same flaw. */
+export interface RemediationAdvisory { id: string | null; aliases: string[] }
+
+/** package-alert (>= 0.9.0) single recommended upgrade for one vulnerable
+ *  package — stored as the scan emitted it, never re-derived here. Every
+ *  field may be null, and null means unknown (e.g. the age/cooldown fields
+ *  are only filled by a live scan), not false. */
+export interface Remediation {
+  package: string | null; ecosystem: string | null; version: string | null
+  advisories: RemediationAdvisory[]
+  recommended_version: string | null
+  unfixed_advisory_ids: string[] | null
+  major_upgrade: boolean | null
+  verified: boolean | null
+  recommended_age_days: number | null
+  in_cooldown: boolean | null
+}
+
 export interface Scan {
   id: number; host_id: number; project_path: string
   scan_type: string; status: ScanStatus; finding_count: number
@@ -135,6 +153,8 @@ export interface Scan {
   /** Packages package-alert could not check against OSV this scan. Nonzero means an empty `findings` list may reflect a failed OSV lookup, not a clean scan — see ScanStatus 'degraded'. */
   osv_failures: number
   sources: string[] | null
+  /** Per-package upgrade advice; null for scans from package-alert < 0.9.0 (and host scans until the plugin sends it). */
+  remediations: Remediation[] | null
   scanned_at: string; received_at: string
 }
 
@@ -212,6 +232,8 @@ export interface RepoScanResult {
    *  backend for the same rule. */
   osv_failures: number
   sources: string[] | null
+  /** Per-package upgrade advice; null for scans from package-alert < 0.9.0 (and host scans until the plugin sends it). */
+  remediations: Remediation[] | null
   error_message: string | null; ecs_task_arn: string | null
   notified: boolean
   started_at: string | null; completed_at: string | null

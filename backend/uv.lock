@@ -995,7 +995,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
     { name = "greenlet", specifier = ">=3.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "package-alert", specifier = "==0.7.1" },
+    { name = "package-alert", specifier = "==0.9.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.8" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.2.0" },
@@ -1025,7 +1025,7 @@ dev = [
 
 [[package]]
 name = "package-alert"
-version = "0.7.1"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -1039,9 +1039,9 @@ dependencies = [
     { name = "typer" },
     { name = "watchdog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7b/35/dada058b8da54deb2491d8bff707935c15b74d86c35ee037a7143e36bdf1/package_alert-0.7.1.tar.gz", hash = "sha256:0e4e5b3a477282dd3b09701820ddef79269ff229a21454da177b101c93c0acb6", size = 672616, upload-time = "2026-08-20T14:17:00.809Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/b9/f69f74a9ef35e3615ac52b08b118706d289c8d1f6a9b3b880176a7ab80bc/package_alert-0.9.0.tar.gz", hash = "sha256:d976a43ce896d09f4dcd7a70d4899c8bc163abc88b13f540ae6574245966c03d", size = 1093513, upload-time = "2026-10-05T15:47:35.06Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/eb/e002fb99472c5de2e8e8c2c9009a934e71742582dd1bcfcec05c0fe22afc/package_alert-0.7.1-py3-none-any.whl", hash = "sha256:75f2fa2349582b2878765d66e14263cd4895f9dee6d8e13664a46fd1c5537a66", size = 310618, upload-time = "2026-08-20T14:16:55.088Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/b5/9bde5ebb7f143ea8437e25242028f4d013947f2181440cf9dd8effde45ca/package_alert-0.9.0-py3-none-any.whl", hash = "sha256:10a1b85f8b30878d5145e775e3ad32f685814274d173cd7710d7fe6702c9496f", size = 450562, upload-time = "2026-10-05T15:47:28.527Z" },
 ]
 
 [[package]]
