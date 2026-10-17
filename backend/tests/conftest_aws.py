@@ -91,3 +91,25 @@ def secretsmanager(localstack):
 def ecs_client(localstack):
     """Boto3 ECS client pointed at LocalStack."""
     return boto3.client("ecs", endpoint_url=localstack, **AWS_DUMMY)
+
+
+@pytest.fixture
+def credentials_in_localstack(localstack, secretsmanager, monkeypatch):
+    """Repo credentials stored through the production Secrets Manager path, against LocalStack.
+
+    The app's client factories pick up aws_endpoint_url; dummy keys keep boto3 off real AWS. Test
+    secrets are deleted afterwards: LocalStack outlives each test's in-memory database, whose
+    credential ids restart at 1, so a leftover secret name would collide on the next run.
+    """
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "aws_endpoint_url", localstack)
+    monkeypatch.setattr(app_settings, "aws_region", AWS_DUMMY["region_name"])
+    monkeypatch.setattr(app_settings, "local_docker_scan", False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", AWS_DUMMY["aws_access_key_id"])
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", AWS_DUMMY["aws_secret_access_key"])
+    yield secretsmanager
+    for page in secretsmanager.get_paginator("list_secrets").paginate(
+            Filters=[{"Key": "name", "Values": ["pa-central/repo-creds/"]}]):
+        for secret in page.get("SecretList", []):
+            secretsmanager.delete_secret(SecretId=secret["ARN"], ForceDeleteWithoutRecovery=True)

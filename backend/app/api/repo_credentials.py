@@ -1,5 +1,6 @@
 """Repo credential CRUD — shared credentials for repo scanning."""
 import json
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,6 +13,11 @@ from app.core.config import settings as app_settings
 from app.core.database import get_db
 from app.models import CredentialType, RepoCredential, User, utcnow
 from app.schemas import RepoCredentialCreate, RepoCredentialOut, RepoCredentialUpdate
+from app.services.package_indexes import (
+    credential_in_use,
+    index_url_problem,
+    lock_credentials,
+)
 
 router = APIRouter(prefix="/repo-credentials", tags=["repo-credentials"])
 
@@ -25,7 +31,11 @@ def _sm() -> SecretsManagerClient:
 
 
 def _secret_name(cred_id: int) -> str:
-    return f"pa-central/repo-creds/{cred_id}"
+    """A new secret's name. Unique, not just the credential id: SQLite reuses the highest id after a
+    delete, and a deleted credential's secret is removed only after its row (delete_credential), so a
+    credential created in between would otherwise ask for a name that still exists. Every later
+    operation uses the stored ARN, never this name."""
+    return f"pa-central/repo-creds/{cred_id}-{uuid.uuid4().hex}"
 
 
 def _normalize_pem(value: str) -> str:
@@ -68,6 +78,15 @@ def _encode_credential(value: str, passphrase: str | None) -> str:
     return value
 
 
+def _check_index_fields(ctype: CredentialType, index_url: str | None, index_username: str | None) -> None:
+    if ctype == CredentialType.package_index:
+        problem = index_url_problem(index_url)
+        if problem:
+            raise HTTPException(400, problem)
+    elif index_url is not None or index_username is not None:
+        raise HTTPException(400, "index_url and index_username are only valid for credential_type 'package_index'")
+
+
 @router.get("", response_model=list[RepoCredentialOut])
 async def list_credentials(db: DbDep, _: OperatorDep) -> list[RepoCredentialOut]:
     result = await db.execute(select(RepoCredential).order_by(RepoCredential.name))
@@ -82,9 +101,12 @@ async def create_credential(body: RepoCredentialCreate, db: DbDep, _: OperatorDe
         raise HTTPException(400, "credential_value must not be set when credential_type is 'none'")
     if body.ssh_key_passphrase and body.credential_type != CredentialType.ssh_key:
         raise HTTPException(400, "ssh_key_passphrase is only valid for credential_type 'ssh_key'")
+    _check_index_fields(body.credential_type, body.index_url, body.index_username)
     cred = RepoCredential(
         name=body.name,
         credential_type=body.credential_type,
+        index_url=body.index_url.strip() if body.index_url else None,
+        index_username=body.index_username or None,
     )
     db.add(cred)
     await db.flush()
@@ -104,6 +126,8 @@ async def create_credential(body: RepoCredentialCreate, db: DbDep, _: OperatorDe
 
 @router.patch("/{cred_id}", response_model=RepoCredentialOut)
 async def update_credential(cred_id: int, body: RepoCredentialUpdate, db: DbDep, _: OperatorDep) -> RepoCredentialOut:
+    # Before the reads below: the in-use check must not race a scan being assigned it.
+    await lock_credentials(db, [cred_id])
     cred = await db.get(RepoCredential, cred_id)
     if not cred:
         raise HTTPException(404, "Credential not found")
@@ -118,6 +142,19 @@ async def update_credential(cred_id: int, body: RepoCredentialUpdate, db: DbDep,
         raise HTTPException(400, "Provide a new credential_value when changing credential_type")
     if ssh_key_passphrase and effective_type != CredentialType.ssh_key:
         raise HTTPException(400, "ssh_key_passphrase is only valid for credential_type 'ssh_key'")
+    # A scan's git credential must stay a git type, and a linked package index must stay a
+    # package index: changing the type would break every scan that uses it.
+    if effective_type != cred.credential_type and await credential_in_use(db, cred_id):
+        raise HTTPException(409, "Credential is in use by one or more repo scans; its type cannot change")
+    carried = effective_type == cred.credential_type
+    # model_dump(exclude_none) drops an explicit null, which here means "clear it" (a token
+    # instead of a username and password): only an omitted field keeps the stored value.
+    sent = body.model_fields_set
+    effective_url = body.index_url if "index_url" in sent else (cred.index_url if carried else None)
+    effective_user = body.index_username if "index_username" in sent else (cred.index_username if carried else None)
+    _check_index_fields(effective_type, effective_url, effective_user)
+    updates["index_url"] = effective_url.strip() if effective_url else None
+    updates["index_username"] = effective_user or None
     for k, v in updates.items():
         setattr(cred, k, v)
     if cred.credential_type == CredentialType.none:
@@ -148,18 +185,21 @@ async def update_credential(cred_id: int, body: RepoCredentialUpdate, db: DbDep,
 
 @router.delete("/{cred_id}", status_code=204)
 async def delete_credential(cred_id: int, db: DbDep, _: AdminDep) -> None:
+    # Before the reads below: the in-use check must not race a scan being assigned it.
+    await lock_credentials(db, [cred_id])
     cred = await db.get(RepoCredential, cred_id)
     if not cred:
         raise HTTPException(404, "Credential not found")
     # Prevent deletion if any scan references this credential
-    from app.models import RepoScan
-    in_use = await db.execute(select(RepoScan).where(RepoScan.credential_id == cred_id).limit(1))
-    if in_use.scalar_one_or_none():
+    if await credential_in_use(db, cred_id):
         raise HTTPException(409, "Credential is in use by one or more repo scans")
-    if cred.credential_secret_arn and not cred.credential_secret_arn.startswith("local://"):
-        try:
-            await _sm().delete_secret(cred.credential_secret_arn)
-        except Exception:  # noqa: BLE001 S110
-            pass
+    arn = cred.credential_secret_arn
     await db.delete(cred)
     await db.commit()
+    # Only once the row is gone: a delete that fails to commit must not have destroyed the secret
+    # a credential still points at (at worst, a failure here leaves an orphaned secret).
+    if arn and not arn.startswith("local://"):
+        try:
+            await _sm().delete_secret(arn)
+        except Exception:  # noqa: BLE001 S110
+            pass

@@ -109,6 +109,10 @@ cd backend && uv run python -m app.main
 
 The "task ARN" stored for local runs is prefixed `local-docker://` so you can tell them apart from ECS runs.
 
+### Fix plans and package index credentials
+
+A repo scan can **Generate fix plans** (off by default, per scan). After a successful scan with findings, the scan task runs `pa fix` as an unprivileged `pa-trial` user in a scrubbed environment and attaches the resulting plan, showing which upgrades would clear the findings and whether a trial resolve verified them, to the scan result. It never changes the scan status, emails or findings. Repositories that use a private registry also need **package index** credentials (read-only tokens, added in the Credentials tab and attached to the scan), and the ECS subnets must be able to reach the registry. The time budget is the `fix_plan_timeout_seconds` system setting (default 900). Fix plans need `package-alert` 0.10.0 or later; the scan task pip-installs package-alert at run time from the `pa_version` system setting, so set it to `0.10.0` or later (or leave it blank for the latest release). With an older `pa_version`, plans come back `skipped` or unverified. See [docs/fix-plans-deployment.md](docs/fix-plans-deployment.md) for the isolation model, registry and proxy limits, and ECS task sizing.
+
 ---
 
 ## Agent API (called by the package-alert plugin on each host)

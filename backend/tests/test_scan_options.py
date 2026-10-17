@@ -21,6 +21,14 @@ def test_returns_scan_installed_bool():
     assert flag.cli_flag == "--scan-installed"
 
 
+def test_returns_no_yank_bool():
+    # package-alert >= 0.9.2
+    opts = get_scan_options()
+    flag = next(f for f in opts.flags if f.name == "no_yank")
+    assert flag.type == "bool"
+    assert flag.cli_flag == "--no-yank"
+
+
 def test_returns_requirements_str():
     opts = get_scan_options()
     flag = next(f for f in opts.flags if f.name == "requirements")

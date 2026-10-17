@@ -1,6 +1,10 @@
 import { useState, useEffect, useEffectEvent, useRef, useCallback, useMemo, useId, forwardRef } from 'react'
 import type { CSSProperties, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
-import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus, type Remediation } from '@/lib/api'
+import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus, type Remediation, type FixPlanResult } from '@/lib/api'
+import { FixPlanPanel } from '@/components/FixPlanPanel'
+import { TAG, TAG_REVIEW, TAG_MUTED } from '@/components/tags'
+
+export { TAG, TAG_REVIEW, TAG_MUTED }
 import { useRovingTabs } from '@/lib/hooks'
 import { groupFindings, severityRank, type RawFinding, type PackageGroup, type AdvisoryRow } from '@/lib/remediationGroups'
 
@@ -756,9 +760,6 @@ function toSeverity(raw: string | undefined): AlertSeverity {
   return (s === 'moderate' ? 'medium' : SEV_CLASSES[s as AlertSeverity] ? s : 'info') as AlertSeverity
 }
 
-const TAG = 'inline-flex items-center px-2 py-0.5 rounded text-style-tag'
-const TAG_REVIEW = `${TAG} bg-status-review/12 text-status-review-text`
-const TAG_MUTED = `${TAG} bg-muted text-muted-foreground`
 
 function Pager({ page, totalPages, total, noun, onPage }: {
   page: number; totalPages: number; total: number; noun?: string; onPage: (p: number) => void
@@ -1248,64 +1249,66 @@ export function RisksTable({ risks }: { risks: Record<string, unknown>[] }) {
 // the reader to scroll past one to reach the other. When only one of the two
 // is present, that table renders directly with no tab bar — a single-type
 // result shouldn't gain tab chrome it doesn't need.
-type ScanDetailTab = 'findings' | 'risks'
+type ScanDetailTab = 'findings' | 'risks' | 'fix'
 
 export function ScanDetailTabs({
-  findings, risks, remediations,
+  findings, risks, remediations, fixPlan,
 }: {
   findings: Record<string, unknown>[] | null | undefined
   risks: Record<string, unknown>[] | null | undefined
   remediations?: Remediation[] | null
+  fixPlan?: FixPlanResult | null
 }) {
   const hasFindings = !!findings?.length
   const hasRisks = !!risks?.length
-  const [tab, setTab] = useState<ScanDetailTab>(hasFindings ? 'findings' : 'risks')
+  const present = (['findings', 'risks', 'fix'] as const).filter(
+    t => t === 'findings' ? hasFindings : t === 'risks' ? hasRisks : !!fixPlan)
+  // The requested tab can vanish when the data changes (a refresh drops the fix plan): show the
+  // first tab present then, or every panel is hidden and keyboard navigation finds no current tab.
+  const [requested, setTab] = useState<ScanDetailTab>(present[0] ?? 'findings')
+  const tab: ScanDetailTab = present.includes(requested) ? requested : (present[0] ?? 'findings')
   const uid = useId()
-  const TAB_IDS: readonly ScanDetailTab[] = ['findings', 'risks']
-  const { tabRef, onKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
+  const { tabRef, onKeyDown } = useRovingTabs(present, tab, setTab)
 
-  if (hasFindings && !hasRisks) return <FindingsTable findings={findings!} remediations={remediations} />
-  if (hasRisks && !hasFindings) return <RisksTable risks={risks!} />
-  if (!hasFindings && !hasRisks) return null
+  if (present.length === 0) return null
+
+  const tabs: Record<ScanDetailTab, { label: string; panel: ReactNode }> = {
+    findings: {
+      label: `Findings (${findings?.length ?? 0})`,
+      panel: <FindingsTable findings={findings ?? []} remediations={remediations} />,
+    },
+    risks: { label: `Risks (${risks?.length ?? 0})`, panel: <RisksTable risks={risks ?? []} /> },
+    fix: { label: 'Fix plan', panel: fixPlan ? <FixPlanPanel fixPlan={fixPlan} /> : null },
+  }
+
+  if (present.length === 1) return <>{tabs[present[0]].panel}</>
 
   return (
     <div>
       <div className="scan-card-inner-tab-bar" role="tablist">
-        <button
-          ref={tabRef('findings')}
-          type="button"
-          role="tab"
-          aria-selected={tab === 'findings'}
-          aria-controls={`${uid}-panel-findings`}
-          id={`${uid}-tab-findings`}
-          tabIndex={tab === 'findings' ? 0 : -1}
-          onClick={() => setTab('findings')}
-          onKeyDown={onKeyDown}
-          className={tab === 'findings' ? 'tab-btn-inner active' : 'tab-btn-inner'}
-        >
-          Findings ({findings!.length})
-        </button>
-        <button
-          ref={tabRef('risks')}
-          type="button"
-          role="tab"
-          aria-selected={tab === 'risks'}
-          aria-controls={`${uid}-panel-risks`}
-          id={`${uid}-tab-risks`}
-          tabIndex={tab === 'risks' ? 0 : -1}
-          onClick={() => setTab('risks')}
-          onKeyDown={onKeyDown}
-          className={tab === 'risks' ? 'tab-btn-inner active' : 'tab-btn-inner'}
-        >
-          Risks ({risks!.length})
-        </button>
+        {present.map(id => (
+          <button
+            key={id}
+            ref={tabRef(id)}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`${uid}-panel-${id}`}
+            id={`${uid}-tab-${id}`}
+            tabIndex={tab === id ? 0 : -1}
+            onClick={() => setTab(id)}
+            onKeyDown={onKeyDown}
+            className={tab === id ? 'tab-btn-inner active' : 'tab-btn-inner'}
+          >
+            {tabs[id].label}
+          </button>
+        ))}
       </div>
-      <div id={`${uid}-panel-findings`} role="tabpanel" aria-labelledby={`${uid}-tab-findings`} hidden={tab !== 'findings'}>
-        <FindingsTable findings={findings!} remediations={remediations} />
-      </div>
-      <div id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`} hidden={tab !== 'risks'}>
-        <RisksTable risks={risks!} />
-      </div>
+      {present.map(id => (
+        <div key={id} id={`${uid}-panel-${id}`} role="tabpanel" aria-labelledby={`${uid}-tab-${id}`} hidden={tab !== id}>
+          {tabs[id].panel}
+        </div>
+      ))}
     </div>
   )
 }
@@ -1513,65 +1516,65 @@ export function RiskRecordsTable({
   )
 }
 
-type RecordTab = 'findings' | 'risks'
+type RecordTab = 'findings' | 'risks' | 'fix'
 
 export function RecordTabs({
-  findings, risks, show, onChanged,
+  findings, risks, fixPlan, show, onChanged,
 }: {
   findings: FindingRecord[]
   risks: RiskRecord[]
+  fixPlan?: FixPlanResult | null
   show: (msg: string, kind: 'ok' | 'err') => void
   onChanged?: () => void
 }) {
-  const hasFindings = findings.length > 0
-  const hasRisks = risks.length > 0
-  const [tab, setTab] = useState<RecordTab>(hasFindings ? 'findings' : 'risks')
+  const present = (['findings', 'risks', 'fix'] as const).filter(
+    t => t === 'findings' ? findings.length > 0 : t === 'risks' ? risks.length > 0 : !!fixPlan)
+  // The requested tab can vanish when the data changes (a refresh drops the fix plan): show the
+  // first tab present then, or every panel is hidden and keyboard navigation finds no current tab.
+  const [requested, setTab] = useState<RecordTab>(present[0] ?? 'findings')
+  const tab: RecordTab = present.includes(requested) ? requested : (present[0] ?? 'findings')
   const uid = useId()
-  const TAB_IDS: readonly RecordTab[] = ['findings', 'risks']
-  const { tabRef, onKeyDown } = useRovingTabs(TAB_IDS, tab, setTab)
+  const { tabRef, onKeyDown } = useRovingTabs(present, tab, setTab)
 
-  if (hasFindings && !hasRisks) return <FindingRecordsTable findings={findings} show={show} onChanged={onChanged} />
-  if (hasRisks && !hasFindings) return <RiskRecordsTable risks={risks} show={show} onChanged={onChanged} />
-  if (!hasFindings && !hasRisks) return <div className="px-4 py-2"><Empty message="No open or accepted findings or risks." /></div>
+  if (present.length === 0) return <div className="px-4 py-2"><Empty message="No open or accepted findings or risks." /></div>
+
+  const tabs: Record<RecordTab, { label: string; panel: ReactNode }> = {
+    findings: {
+      label: `Findings (${findings.length})`,
+      panel: <FindingRecordsTable findings={findings} show={show} onChanged={onChanged} />,
+    },
+    risks: { label: `Risks (${risks.length})`, panel: <RiskRecordsTable risks={risks} show={show} onChanged={onChanged} /> },
+    fix: { label: 'Fix plan', panel: fixPlan ? <FixPlanPanel fixPlan={fixPlan} /> : null },
+  }
+
+  if (present.length === 1) return <>{tabs[present[0]].panel}</>
 
   return (
     <div>
       <div className="scan-card-inner-tab-bar" role="tablist">
-        <button
-          ref={tabRef('findings')}
-          type="button"
-          role="tab"
-          aria-selected={tab === 'findings'}
-          aria-controls={`${uid}-panel-findings`}
-          id={`${uid}-tab-findings`}
-          tabIndex={tab === 'findings' ? 0 : -1}
-          onClick={() => setTab('findings')}
-          onKeyDown={onKeyDown}
-          className={tab === 'findings' ? 'tab-btn-inner active' : 'tab-btn-inner'}
-        >
-          Findings ({findings.length})
-        </button>
-        <button
-          ref={tabRef('risks')}
-          type="button"
-          role="tab"
-          aria-selected={tab === 'risks'}
-          aria-controls={`${uid}-panel-risks`}
-          id={`${uid}-tab-risks`}
-          tabIndex={tab === 'risks' ? 0 : -1}
-          onClick={() => setTab('risks')}
-          onKeyDown={onKeyDown}
-          className={tab === 'risks' ? 'tab-btn-inner active' : 'tab-btn-inner'}
-        >
-          Risks ({risks.length})
-        </button>
+        {present.map(id => (
+          <button
+            key={id}
+            ref={tabRef(id)}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`${uid}-panel-${id}`}
+            id={`${uid}-tab-${id}`}
+            tabIndex={tab === id ? 0 : -1}
+            onClick={() => setTab(id)}
+            onKeyDown={onKeyDown}
+            className={tab === id ? 'tab-btn-inner active' : 'tab-btn-inner'}
+          >
+            {tabs[id].label}
+          </button>
+        ))}
       </div>
-      <div id={`${uid}-panel-findings`} role="tabpanel" aria-labelledby={`${uid}-tab-findings`} hidden={tab !== 'findings'}>
-        <FindingRecordsTable findings={findings} show={show} onChanged={onChanged} />
-      </div>
-      <div id={`${uid}-panel-risks`} role="tabpanel" aria-labelledby={`${uid}-tab-risks`} hidden={tab !== 'risks'}>
-        <RiskRecordsTable risks={risks} show={show} onChanged={onChanged} />
-      </div>
+      {present.map(id => (
+        <div key={id} id={`${uid}-panel-${id}`} role="tabpanel" aria-labelledby={`${uid}-tab-${id}`} hidden={tab !== id}>
+          {tabs[id].panel}
+        </div>
+      ))}
     </div>
   )
 }

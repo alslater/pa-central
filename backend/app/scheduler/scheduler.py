@@ -22,13 +22,14 @@ from app.models import (
     utcnow,
 )
 from app.services.finding_lifecycle import DEFAULT_FINDING_RETENTION, parse_int
+from app.services.fix_plan_budget import (
+    get_fix_plan_timeout,
+    max_task_seconds,
+)
 from app.services.password_reset import RESET_TOKEN_PRUNE_GRACE_HOURS
+from app.services.scan_launch import effective_pa_version
 
 logger = logging.getLogger(__name__)
-
-# Scans running longer than this are considered stuck
-STUCK_SCAN_TIMEOUT_MINUTES = 30
-
 
 # ── Cron evaluation ───────────────────────────────────────────────────────────
 
@@ -126,13 +127,13 @@ def should_trigger_scan(
 
 # ── Lock helpers ──────────────────────────────────────────────────────────────
 
-async def _acquire_scan_lock(scan_id: int) -> bool:
+async def _acquire_scan_lock(scan_id: int, ttl_seconds: int) -> bool:
     if not app_settings.valkey_url:
         return True
     from app.core.valkey import acquire_lock, get_valkey
     r = get_valkey(app_settings.valkey_url)
     try:
-        return await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=3600)
+        return await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=ttl_seconds)
     finally:
         await r.aclose()
 
@@ -150,9 +151,10 @@ async def _release_scan_lock(scan_id: int) -> None:
 
 # ── Task launch (ECS or local Docker) ────────────────────────────────────────
 
-async def _launch_ecs_task(scan: Any, result_id: int, credential: Any = None) -> str:
-    from app.core.aws import EcsClient, build_scan_task_env
-    env = await build_scan_task_env(scan, result_id, credential)
+async def _launch_ecs_task(session: Any, scan: Any, result_id: int, credential: Any = None) -> str:
+    from app.core.aws import EcsClient
+    from app.services.scan_launch import build_scan_task_env
+    env = await build_scan_task_env(session, scan, result_id, credential)
 
     if app_settings.local_docker_scan:
         from app.core.docker_runner import run_local_scan
@@ -174,7 +176,9 @@ async def _launch_ecs_task(scan: Any, result_id: int, credential: Any = None) ->
 
 async def trigger_scan(scan: Any, db_factory: Any) -> None:
     """Acquire lock, create a RepoScanResult row, and launch the ECS task."""
-    acquired = await _acquire_scan_lock(scan.id)
+    async with db_factory() as budget_session:
+        ttl = max_task_seconds(await get_fix_plan_timeout(budget_session))
+    acquired = await _acquire_scan_lock(scan.id, ttl)
     if not acquired:
         logger.info("scan %d already in progress — skipping", scan.id)
         return
@@ -193,6 +197,7 @@ async def trigger_scan(scan: Any, db_factory: Any) -> None:
             status=RepoScanStatus.running,
             triggered_by=ScanTrigger.scheduled,
             started_at=utcnow(),
+            pa_version=await effective_pa_version(session, tracked_scan),
             scan_config_hash=tracked_scan.scan_config_hash,
         )
         session.add(result)
@@ -200,7 +205,7 @@ async def trigger_scan(scan: Any, db_factory: Any) -> None:
         await session.refresh(result)
 
         try:
-            task_arn = await _launch_ecs_task(tracked_scan, result.id, credential)
+            task_arn = await _launch_ecs_task(session, tracked_scan, result.id, credential)
             result.ecs_task_arn = task_arn
             tracked_scan.last_scan_at = utcnow()
             await session.commit()
@@ -323,9 +328,9 @@ async def run_one_tick(db_factory: Any) -> None:
 # ── Stuck job recovery ────────────────────────────────────────────────────────
 
 async def recover_stuck_scans(db_factory: Any) -> None:
-    """Mark running results older than STUCK_SCAN_TIMEOUT_MINUTES as failed."""
-    cutoff = utcnow() - timedelta(minutes=STUCK_SCAN_TIMEOUT_MINUTES)
+    """Mark running results older than the task budget as failed."""
     async with db_factory() as session:
+        cutoff = utcnow() - timedelta(seconds=max_task_seconds(await get_fix_plan_timeout(session)))
         rows = await session.execute(
             select(RepoScanResult).where(
                 RepoScanResult.status == RepoScanStatus.running,

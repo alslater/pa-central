@@ -68,6 +68,20 @@ def test_out_of_range_error():
     assert len(result.errors) >= 1
 
 
+def test_fix_section_known():
+    # [fix] is package-alert >= 0.9.2
+    result = lint_toml('[fix]\nallow_major = ["django"]')
+    assert result.valid is True
+    assert result.warnings == []
+
+
+def test_fix_allow_major_rejects_all():
+    # "all" is a per-run CLI choice only; AppConfig's validator rejects it in config
+    result = lint_toml('[fix]\nallow_major = ["all"]')
+    assert result.valid is False
+    assert any("allow_major" in e for e in result.errors)
+
+
 def test_overlay_ignored_api_key_warns():
     result = lint_toml('api_key = "secret"')
     assert result.valid is True

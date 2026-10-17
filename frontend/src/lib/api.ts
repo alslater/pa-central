@@ -194,13 +194,15 @@ export interface ExposureHistory {
   window_days: number
 }
 
-export type CredentialType = 'none' | 'ssh_key' | 'https_token'
+export type CredentialType = 'none' | 'ssh_key' | 'https_token' | 'package_index'
 export type RepoScanStatus = 'pending' | 'running' | 'success' | 'failed'
 export type ScanTrigger = 'manual' | 'scheduled'
 export type SettingValueType = 'string' | 'int' | 'bool' | 'json' | 'secret'
 
 export interface RepoCredential {
   id: number; name: string; credential_type: CredentialType
+  /** package_index only: the private index's base URL and optional username. */
+  index_url: string | null; index_username: string | null
   created_at: string; updated_at: string
 }
 
@@ -214,6 +216,57 @@ export interface RepoScan {
   last_scan_at: string | null; created_at: string; updated_at: string; created_by_id: number
   breach: boolean; breach_count: number
   scan_config_hash: string | null
+  fix_plans_enabled: boolean; package_index_credential_ids: number[]
+}
+
+export type FixPlanStatus = 'planned' | 'unsupported' | 'error' | 'skipped' | 'timeout'
+
+/** One upgrade package-alert's pa fix planned (as emitted; never re-derived here). */
+export interface PlannedFix {
+  package: string | null; version: string | null; target: string | null; direct: boolean | null
+  path: string[]; advisories: string[]; left_open: string[]
+  fixes_all: string | null; fixes_all_advisories: string[]
+  cooldown_checked: boolean | null; verified: boolean | null
+  changes: Record<string, unknown>[]
+  parent: { package: string; version: string } | null
+  more_parents: { package: string; version: string }[]
+  forced: { under: string; declares: string } | null
+  by_relock: boolean | null
+}
+
+/** A vulnerable package pa fix could not plan, and why. */
+export interface HeldFix {
+  package: string | null; version: string | null; target: string | null
+  reason: string | null; advisories: string[]; detail: string | null
+  cadence: string | null; needs_major: string[]
+}
+
+export interface FixPlan {
+  lockfile: string | null; planned: PlannedFix[]; held: HeldFix[]
+  commands: unknown[]
+  command_changes: unknown[]; yanked_locked: unknown[]
+  /** Set when every trial failed the same way (a project or machine problem, not the pins). */
+  trial_failure: string | null
+  lock_drift: unknown[]; lock_drift_unchecked: number
+  sync: Record<string, unknown> | null
+  separate: boolean | null; separate_reason: string | null
+  deferred: string[]
+  osv_failures: number; not_public: number; yank_failures: number
+  /** package-alert's own flag: true can still mean every item was held — read held/trial_failure too. */
+  verified: boolean | null
+  unverified_reason: string | null
+}
+
+export interface FixPlanResult {
+  status: FixPlanStatus | null
+  lockfile: string | null
+  error: string | null
+  exit_code: number | null
+  duration_seconds: number | null
+  timeout_seconds: number | null
+  /** Backend-computed: the run used at least 80% of its budget. */
+  near_timeout: boolean
+  plan: FixPlan | null
 }
 
 export interface RepoScanResult {
@@ -222,6 +275,8 @@ export interface RepoScanResult {
   pa_version: string | null; finding_count: number | null
   findings: Record<string, unknown>[] | null
   risks: Record<string, unknown>[] | null
+  /** Fix plan from pa fix; null when fix plans were off, the scan found nothing, or the result predates the feature. */
+  fix_plan: FixPlanResult | null
   /** Packages package-alert could not score this scan. Nonzero means an
    *  empty/short `risks` list may reflect scoring failure, not a clean scan —
    *  see risk_lifecycle.update_risk_records on the backend for the same rule. */
@@ -252,6 +307,13 @@ export interface RepoScanHeadline {
   open_findings_by_severity: Record<AlertSeverity, number>
   open_risks_by_level: Record<'critical' | 'warning' | 'info', number>
   breach: boolean; breach_count: number
+  fix_count: number | null
+}
+
+export interface LatestFixPlan {
+  result_id: number
+  completed_at: string | null
+  fix_plan: FixPlanResult | null
 }
 
 export interface FindingRecord {
@@ -529,9 +591,9 @@ export const api = {
 
   repoCredentials: {
     list: () => request<RepoCredential[]>('/repo-credentials'),
-    create: (data: { name: string; credential_type: CredentialType; credential_value?: string | null; ssh_key_passphrase?: string }) =>
+    create: (data: { name: string; credential_type: CredentialType; credential_value?: string | null; ssh_key_passphrase?: string; index_url?: string | null; index_username?: string | null }) =>
       request<RepoCredential>('/repo-credentials', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: number, data: { name?: string; credential_type?: CredentialType; credential_value?: string; ssh_key_passphrase?: string }) =>
+    update: (id: number, data: { name?: string; credential_type?: CredentialType; credential_value?: string; ssh_key_passphrase?: string; index_url?: string | null; index_username?: string | null }) =>
       request<RepoCredential>(`/repo-credentials/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: number) => request<void>(`/repo-credentials/${id}`, { method: 'DELETE' }),
   },
@@ -544,6 +606,7 @@ export const api = {
       credential_id?: number | null
       cron_schedule?: string | null; cron_timezone?: string | null; is_enabled?: boolean
       config_template_id?: number | null; pa_version?: string | null; scan_flags?: string | null; subfolder?: string | null
+      fix_plans_enabled?: boolean; package_index_credential_ids?: number[]
       min_notify_severity?: AlertSeverity; notify_recipients?: string[]
     }) => request<RepoScan>('/repo-scans', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: number, data: Partial<RepoScan>) =>
@@ -554,6 +617,7 @@ export const api = {
     allResults: (limit?: number) => request<RepoScanResultWithName[]>(`/repo-scans/results${limit ? `?limit=${limit}` : ''}`),
     scanOptions: () => request<ScanOptions>('/repo-scans/scan-options'),
     headlines: () => request<RepoScanHeadline[]>('/repo-scans/headlines'),
+    latestFixPlan: (id: number) => request<LatestFixPlan | null>(`/repo-scans/${id}/fix-plan`),
     exposureHistory: (id: number, days?: number) =>
       request<ExposureHistory>(`/repo-scans/${id}/exposure-history${days ? `?days=${days}` : ''}`),
   },

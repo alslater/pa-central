@@ -100,6 +100,30 @@ class TestSystemSettings:
 
 
 @pytest.mark.asyncio
+class TestPaVersionSetting:
+    async def test_accepts_a_prerelease_and_blank(self, client, admin_token):
+        for value in ("0.10.0rc1", ""):
+            r = await client.patch("/api/system-settings", json={"updates": {"pa_version": value}},
+                                   headers=auth(admin_token))
+            assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("sent, stored", [("   ", ""), (" 0.10.0 ", "0.10.0"), ("0.10.0rc1", "0.10.0rc1")])
+    async def test_is_stored_normalised(self, client, admin_token, sent, stored):
+        # A whitespace-only value was stored as sent and forwarded as the version to install.
+        r = await client.patch("/api/system-settings", json={"updates": {"pa_version": sent}},
+                               headers=auth(admin_token))
+        assert r.status_code == 200, r.text
+        row = next(x for x in r.json() if x["key"] == "pa_version")
+        assert row["value"] == stored
+
+    async def test_rejects_a_non_version(self, client, admin_token):
+        r = await client.patch("/api/system-settings", json={"updates": {"pa_version": "0.10 --pre"}},
+                               headers=auth(admin_token))
+        assert r.status_code == 400
+        assert "0.10.0rc1" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
 class TestSystemSettingsPositiveIntValidation:
     """sla_high_days/sla_medium_days/finding_retention_days feed
     get_global_sla's parse_int, which silently substitutes a default for any

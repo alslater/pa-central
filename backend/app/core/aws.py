@@ -77,26 +77,3 @@ class EcsClient:
             failures = resp.get("failures", [])
             raise RuntimeError(f"ECS RunTask returned no tasks: {failures}")
         return tasks[0]["taskArn"]
-
-
-async def build_scan_task_env(scan: Any, result_id: int, credential: Any = None) -> dict[str, str]:
-    """Build environment variable dict for a scan task."""
-    from app.core.config import settings as app_settings
-    from app.models import CredentialType
-    cred_type = credential.credential_type if credential else CredentialType.none
-    cred_arn = credential.credential_secret_arn if credential else None
-    local_arn = (cred_arn or "").startswith("local://")
-    return {
-        "PA_VERSION": scan.pa_version or "",
-        "REPO_SCAN_RESULT_ID": str(result_id),
-        "REPO_URL": scan.url,
-        "BRANCH": scan.branch,
-        "CREDENTIAL_TYPE": cred_type.value,
-        "CREDENTIAL_SECRET_ARN": "" if local_arn else (cred_arn or ""),
-        "CREDENTIAL_VALUE": cred_arn[len("local://"):] if local_arn else "",
-        "FLEET_API_URL": app_settings.resolved_scan_task_fleet_url,
-        "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
-        "PA_CONFIG_TOML": "",  # filled by caller if config template assigned
-        "PA_SCAN_FLAGS": getattr(scan, 'scan_flags', None) or "",
-        "PA_SUBFOLDER": getattr(scan, 'subfolder', None) or "",
-    }

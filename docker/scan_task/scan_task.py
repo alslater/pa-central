@@ -19,6 +19,10 @@ Environment variables (all required unless noted):
   PA_CONFIG_TOML          — (optional) TOML config content for pa scan-project
   PA_SCAN_FLAGS           — (optional) shell-quoted CLI args for pa scan-project (--flag=value form, split via shlex)
   PA_SUBFOLDER            — (optional) repo subdirectory to scan (relative path; defaults to repo root)
+  FIX_PLANS               — (optional) "1" to run pa fix after a scan with findings
+  FIX_PLAN_TIMEOUT        — (optional) fix step budget in seconds (default 900)
+  PACKAGE_INDEXES         — (optional) JSON list of private registries for pa fix:
+                            {"url", "username", "secret_arn"} or {"url", "username", "value"}
 """
 import json
 import os
@@ -28,6 +32,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+import fix_plan
 
 # ── Environment ───────────────────────────────────────────────────────────────
 
@@ -44,9 +50,15 @@ def get_env(name: str, default: str = "") -> str:
 
 # ── Secrets Manager ───────────────────────────────────────────────────────────
 
-def fetch_secret(arn: str) -> str:
+def fetch_secret(arn: str, timeout: float | None = None) -> str:
     import boto3
-    client = boto3.client("secretsmanager")
+    config = None
+    if timeout is not None:
+        from botocore.config import Config
+        # One attempt whose connect + read together fit in *timeout*: the fix step's deadline covers it.
+        config = Config(connect_timeout=timeout / 2, read_timeout=timeout / 2,
+                        retries={"total_max_attempts": 1})
+    client = boto3.client("secretsmanager", config=config)
     resp = client.get_secret_value(SecretId=arn)
     return resp["SecretString"]
 
@@ -67,6 +79,7 @@ def post_result(
     sources: list[str] | None = None,
     remediations: list[dict] | None = None,
     error_message: str | None = None,
+    fix_plan: dict | None = None,
 ) -> None:
     import httpx
     payload: dict[str, Any] = {
@@ -86,6 +99,8 @@ def post_result(
         payload["sources"] = sources
     if remediations is not None:
         payload["remediations"] = remediations
+    if fix_plan is not None:
+        payload["fix_plan"] = fix_plan
     if error_message:
         payload["error_message"] = error_message
 
@@ -185,6 +200,23 @@ def clone_repo(
 
 # ── pa scan-project ────────────────────────────────────────────────────────────
 
+_SCAN_ENV_KEYS = (
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+)
+
+
+def scan_env() -> dict[str, str]:
+    """Allow-listed environment for `pa scan-project` (least privilege).
+
+    The task holds the fleet API key, the git credential and the AWS task role; scan-project needs
+    none of them. Proxy variables pass through UNCHANGED (it must reach OSV, and pa is trusted, so
+    unlike the fix step their credentials are not stripped).
+    """
+    return {k: os.environ[k] for k in _SCAN_ENV_KEYS if k in os.environ}
+
+
 def run_pa_scan(
     repo_path: Path,
     config_toml: str,
@@ -249,7 +281,7 @@ def run_pa_scan(
     cmd.append(str(scan_path))
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=scan_env())
     finally:
         if config_tmp:
             Path(config_tmp).unlink(missing_ok=True)
@@ -328,6 +360,9 @@ def main() -> None:
             post_result(fleet_url, fleet_key, result_id, "failed",
                         pa_version=pa_version, error_message=str(exc))
             return
+        # The token must not stay in .git/config; checked, and the fix step refuses to run if it did.
+        remote_clean = fix_plan.strip_remote_credentials(
+            repo_path, repo_url, [credential] if credential_type == "https_token" and credential else [])
 
         # 4. Run scan
         try:
@@ -339,9 +374,32 @@ def main() -> None:
                         pa_version=pa_version, error_message=str(exc))
             return
 
-        # 5. Report success
-        post_result(
-            fleet_url, fleet_key, result_id, "success",
+        # 5. Fix plan: only when enabled and the scan found something; never fails the scan.
+        fix_result = None
+        fix_timeout = 900
+        if get_env("FIX_PLANS") == "1" and finding_count > 0:
+            try:
+                timeout = int(get_env("FIX_PLAN_TIMEOUT", "900") or "900")
+            except ValueError:
+                timeout = 900
+            fix_timeout = timeout
+            if not remote_clean:
+                fix_result = fix_plan.failed("the credential could not be removed from the clone's remote URL; "
+                                             "pa fix was not run", timeout=timeout)
+            else:
+                try:
+                    indexes = fix_plan.parse_indexes(os.environ.get("PACKAGE_INDEXES", ""))
+                    # Both resolved: on a host where /tmp is a symlink, run_fix's relative_to would fail.
+                    scan_dir = (repo_path / subfolder).resolve() if subfolder else repo_path.resolve()
+                    fix_result = fix_plan.run_fix(repo_path.resolve(), scan_dir, config_toml=config_toml,
+                                                  indexes=indexes, timeout=timeout, fetch_secret=fetch_secret)
+                except Exception as exc:  # noqa: BLE001 - the fix step must never cost the scan its result
+                    fix_result = fix_plan.failed(f"fix step not started: {exc}", timeout=timeout)
+
+        # 6. Report success
+        import httpx
+
+        success = dict(
             pa_version=pa_version,
             finding_count=finding_count,
             findings=findings,
@@ -351,6 +409,27 @@ def main() -> None:
             sources=sources or None,
             remediations=remediations,
         )
+        try:
+            post_result(fleet_url, fleet_key, result_id, "success", fix_plan=fix_result, **success)
+        except (httpx.HTTPStatusError, ValueError) as exc:
+            # A fix plan pa-central refuses (too deep, too large, malformed), or one httpx cannot even
+            # encode (ValueError: a non-finite number, refused before anything is sent), must not cost
+            # the scan its result: post once more with the plan replaced by an error entry. 5xx and
+            # network errors propagate, and so does a second failure. The payload is never quoted.
+            if fix_result is None:
+                raise
+            if isinstance(exc, httpx.HTTPStatusError):
+                status = exc.response.status_code
+                if not 400 <= status < 500:
+                    raise
+                reason = f"pa-central rejected the fix plan (HTTP {status})"
+            else:
+                reason = "the fix plan could not be encoded as JSON"
+            post_result(
+                fleet_url, fleet_key, result_id, "success",
+                fix_plan=fix_plan.failed(reason, timeout=fix_timeout),
+                **success,
+            )
 
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

@@ -178,3 +178,29 @@ async def test_no_email_sent_when_every_recipient_is_undeliverable(temp_db_url, 
         r = (await session.execute(select(RepoScanResult).where(RepoScanResult.id == result_id))).scalar_one()
         assert r.notified is False
     await engine2.dispose()
+
+
+async def test_findings_email_carries_the_results_fix_plan(seeded_scan, temp_db_url, monkeypatch):
+    """The ingest notification passes the stored fix plan to the email, not just the findings."""
+    from app.api.ingest import _send_result_email
+    from app.core.email import EmailService
+    from tests.test_fix_plan_surfaces import PLAN
+
+    engine = create_async_engine(temp_db_url)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        (await session.get(RepoScanResult, seeded_scan)).fix_plan = PLAN
+        await session.commit()
+    await engine.dispose()
+
+    captured = []
+
+    async def fake_send(self, msg, recipients):
+        captured.append(msg)
+
+    monkeypatch.setattr(EmailService, "send", fake_send)
+    await _send_result_email(seeded_scan)
+
+    assert len(captured) == 1
+    assert captured[0]["Subject"].endswith("— 2 fixes available")
+    assert "anyio" in captured[0].get_content() and "4.14.1 -> 4.14.2" in captured[0].get_content()
