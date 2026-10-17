@@ -30,6 +30,7 @@ from app.schemas import (
     ExposureHistoryOut,
     ExposurePoint,
     FindingRecordOut,
+    LatestFixPlanOut,
     RepoScanCreate,
     RepoScanHeadlineOut,
     RepoScanOut,
@@ -49,10 +50,20 @@ from app.services.finding_lifecycle import (
     load_finding_acceptance_events,
     not_accepted_sql_expr,
 )
+from app.services.fix_plan_budget import get_fix_plan_timeout, max_task_seconds
+from app.services.fix_plan_latest import latest_fix_plans, planned_count
+from app.services.package_indexes import (
+    ids_problem,
+    index_ids_by_scan,
+    lock_credentials,
+    lock_scan,
+    set_index_ids,
+)
 from app.services.risk_lifecycle import build_risk_out
 from app.services.risk_lifecycle import (
     not_accepted_sql_expr as risk_not_accepted_sql_expr,
 )
+from app.services.scan_launch import build_scan_task_env, effective_pa_version
 
 router = APIRouter(prefix="/repo-scans", tags=["repo-scans"])
 
@@ -121,13 +132,26 @@ async def _breach_info(db: AsyncSession, scan: RepoScan, global_high: int, globa
 
 
 
-def _repo_scan_out(scan: RepoScan, has_breach: bool, breach_count: int) -> RepoScanOut:
-    """Build a RepoScanOut, injecting the computed breach fields."""
+def _repo_scan_out(scan: RepoScan, has_breach: bool, breach_count: int,
+                   index_ids: list[int] | None = None) -> RepoScanOut:
+    """Build a RepoScanOut, injecting the computed breach fields and package-index links."""
     return RepoScanOut.model_validate({
         **{c.key: getattr(scan, c.key) for c in RepoScan.__table__.columns},
         "breach": has_breach,
         "breach_count": breach_count,
+        "package_index_credential_ids": index_ids or [],
     })
+
+
+async def _git_credential_problem(db: AsyncSession, credential_id: int | None) -> None:
+    if credential_id is None:
+        return
+    cred = await db.get(RepoCredential, credential_id)
+    if not cred:
+        raise HTTPException(404, "Credential not found")
+    if cred.credential_type == CredentialType.package_index:
+        raise HTTPException(400, "A package_index credential cannot be the git credential; "
+                                 "attach it under package_index_credential_ids")
 
 
 @asynccontextmanager
@@ -151,6 +175,7 @@ async def list_repo_scans(db: DbDep, _: OperatorDep) -> list[RepoScanOut]:
 
     global_high, global_medium = await _get_global_sla_for_repo(db)
     scan_ids = [s.id for s in scans]
+    ids_by_scan = await index_ids_by_scan(db, scan_ids)
     now = datetime.now(UTC)
 
     # Compute the minimum effective SLA across all scans — this is the safe
@@ -172,14 +197,18 @@ async def list_repo_scans(db: DbDep, _: OperatorDep) -> list[RepoScanOut]:
             1 for severity, first_found_at in candidates_by_scan[scan.id]
             if _age_in_breach(first_found_at, compute_sla_days(severity, eff_high, eff_medium), now)
         )
-        out.append(_repo_scan_out(scan, count > 0, count))
+        out.append(_repo_scan_out(scan, count > 0, count, ids_by_scan[scan.id]))
     return out
 
 
 @router.post("", status_code=201)
 async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -> RepoScanOut:
-    if body.credential_id is not None and not await db.get(RepoCredential, body.credential_id):
-        raise HTTPException(404, "Credential not found")
+    # Held until commit, so a concurrent type change cannot slip between the checks and the insert.
+    await lock_credentials(db, [body.credential_id, *body.package_index_credential_ids])
+    await _git_credential_problem(db, body.credential_id)
+    problem = await ids_problem(db, body.package_index_credential_ids)
+    if problem:
+        raise HTTPException(400, problem)
     scan = RepoScan(
         name=body.name, url=body.url, branch=body.branch,
         credential_id=body.credential_id,
@@ -192,14 +221,18 @@ async def create_repo_scan(body: RepoScanCreate, db: DbDep, user: OperatorDep) -
         enabled_at=utcnow() if body.is_enabled else None,
         scan_flags=body.scan_flags,
         subfolder=body.subfolder,
+        pa_version=body.pa_version,
         scan_config_hash=compute_scan_config_hash(body.scan_flags, body.subfolder, body.config_template_id),
         sla_high_days=body.sla_high_days,
         sla_medium_days=body.sla_medium_days,
+        fix_plans_enabled=body.fix_plans_enabled,
         created_by_id=user.id,
     )
     db.add(scan)
+    await db.flush()
+    await set_index_ids(db, scan.id, body.package_index_credential_ids)
     await db.commit()
-    return _repo_scan_out(scan, False, 0)
+    return _repo_scan_out(scan, False, 0, body.package_index_credential_ids)
 
 
 @router.get("/headlines")
@@ -267,6 +300,8 @@ async def list_repo_scan_headlines(db: DbDep, _: OperatorDep) -> list[RepoScanHe
     for scan_id, severity, first_found_at in open_rows:
         candidates_by_scan[scan_id].append((severity, first_found_at))
 
+    fix_plans = await latest_fix_plans(db, scan_ids)
+
     out = []
     for scan in scans:
         eff_high, eff_medium = get_effective_sla(scan, global_high, global_medium)
@@ -286,6 +321,7 @@ async def list_repo_scan_headlines(db: DbDep, _: OperatorDep) -> list[RepoScanHe
             open_risks_by_level=risks_by_scan[scan.id],
             breach=has_breach,
             breach_count=breach_count,
+            fix_count=planned_count(fix_plans[scan.id][2]) if scan.id in fix_plans else None,
         ))
     return out
 
@@ -357,17 +393,31 @@ async def get_repo_scan(scan_id: int, db: DbDep, _: OperatorDep) -> RepoScanOut:
         raise HTTPException(404, "Repo scan not found")
     global_high, global_medium = await _get_global_sla_for_repo(db)
     has_breach, breach_count = await _breach_info(db, scan, global_high, global_medium)
-    return _repo_scan_out(scan, has_breach, breach_count)
+    index_ids = (await index_ids_by_scan(db, [scan.id]))[scan.id]
+    return _repo_scan_out(scan, has_breach, breach_count, index_ids)
 
 
 @router.patch("/{scan_id}")
 async def update_repo_scan(scan_id: int, body: RepoScanUpdate, db: DbDep, _: OperatorDep) -> RepoScanOut:
+    # The scan row first: two concurrent replacements of its package-index links would otherwise
+    # each delete the links the other has not committed yet and both insert, merging the lists.
+    # Then the credentials, held until commit, so a concurrent type change cannot slip between
+    # the checks and the write. Always scan before credentials, so the two cannot deadlock.
+    await lock_scan(db, scan_id)
+    await lock_credentials(db, [body.credential_id, *(body.package_index_credential_ids or [])])
     scan = await db.get(RepoScan, scan_id)
     if not scan:
         raise HTTPException(404, "Repo scan not found")
     updates = body.model_dump(exclude_unset=True)
-    if updates.get("credential_id") is not None and not await db.get(RepoCredential, updates["credential_id"]):
-        raise HTTPException(404, "Credential not found")
+    await _git_credential_problem(db, updates.get("credential_id"))
+    if updates.get("fix_plans_enabled", False) is None:
+        del updates["fix_plans_enabled"]  # column is NOT NULL; an explicit null means "leave as is"
+    new_index_ids = updates.pop("package_index_credential_ids", None)
+    if new_index_ids is not None:
+        problem = await ids_problem(db, new_index_ids)
+        if problem:
+            raise HTTPException(400, problem)
+        await set_index_ids(db, scan.id, new_index_ids)
     # A disabled scan re-enabled after missing one or more scheduled
     # occurrences must wait for its *next* one, not fire immediately because
     # created_at is already in the past — see should_trigger_scan.
@@ -385,7 +435,8 @@ async def update_repo_scan(scan_id: int, body: RepoScanUpdate, db: DbDep, _: Ope
     await db.commit()
     global_high, global_medium = await _get_global_sla_for_repo(db)
     has_breach, breach_count = await _breach_info(db, scan, global_high, global_medium)
-    return _repo_scan_out(scan, has_breach, breach_count)
+    index_ids = (await index_ids_by_scan(db, [scan.id]))[scan.id]
+    return _repo_scan_out(scan, has_breach, breach_count, index_ids)
 
 
 @router.delete("/{scan_id}", status_code=204)
@@ -409,6 +460,18 @@ async def list_results(scan_id: int, db: DbDep, _: OperatorDep) -> list[RepoScan
         .limit(50)
     )
     return result.scalars().all()
+
+
+@router.get("/{scan_id}/fix-plan")
+async def get_latest_fix_plan(scan_id: int, db: DbDep, _: OperatorDep) -> LatestFixPlanOut | None:
+    """The fix plan from the scan's latest successful result; null before any successful scan."""
+    if not await db.get(RepoScan, scan_id):
+        raise HTTPException(404, "Repo scan not found")
+    latest = (await latest_fix_plans(db, [scan_id])).get(scan_id)
+    if latest is None:
+        return None
+    result_id, completed_at, plan = latest
+    return LatestFixPlanOut(result_id=result_id, completed_at=completed_at, fix_plan=plan)
 
 
 @router.get("/{scan_id}/findings", response_model=list[FindingRecordOut])
@@ -499,8 +562,9 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
     if not scan.is_enabled:
         raise HTTPException(400, "Repo scan is disabled")
 
+    lock_ttl = max_task_seconds(await get_fix_plan_timeout(db))
     async with _get_valkey() as r:
-        if r is not None and not await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=900):
+        if r is not None and not await acquire_lock(r, f"repo_scan:{scan_id}:lock", ttl_seconds=lock_ttl):
             raise HTTPException(409, "Scan already in progress")
 
     # Resolve credential
@@ -508,19 +572,7 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
     if scan.credential_id:
         credential = await db.get(RepoCredential, scan.credential_id)
 
-    cred_type = credential.credential_type if credential else CredentialType.none
-    cred_arn = credential.credential_secret_arn if credential else None
-
-    pa_version = ""
-    config_toml = ""
-    from app.models import ConfigTemplate, SystemSetting
-    pa_version_row = await db.get(SystemSetting, "pa_version")
-    if pa_version_row:
-        pa_version = pa_version_row.value or ""
-    if scan.config_template_id:
-        tmpl = await db.get(ConfigTemplate, scan.config_template_id)
-        if tmpl:
-            config_toml = tmpl.toml_content
+    pa_version = await effective_pa_version(db, scan)
 
     result = RepoScanResult(
         repo_scan_id=scan.id,
@@ -532,22 +584,8 @@ async def trigger_scan(scan_id: int, db: DbDep, user: OperatorDep) -> RepoScanRe
     db.add(result)
     await db.flush()
 
-    local_arn = (cred_arn or "").startswith("local://")
     try:
-        task_env = {
-            "PA_VERSION": pa_version,
-            "REPO_SCAN_RESULT_ID": str(result.id),
-            "REPO_URL": scan.url,
-            "BRANCH": scan.branch,
-            "CREDENTIAL_TYPE": cred_type.value,
-            "CREDENTIAL_SECRET_ARN": "" if local_arn else (cred_arn or ""),
-            "CREDENTIAL_VALUE": cred_arn[len("local://"):] if local_arn else "",
-            "FLEET_API_URL": app_settings.resolved_scan_task_fleet_url,
-            "FLEET_SYSTEM_API_KEY": app_settings.fleet_system_api_key or "",
-            "PA_CONFIG_TOML": config_toml,
-            "PA_SCAN_FLAGS": scan.scan_flags or "",
-            "PA_SUBFOLDER": scan.subfolder or "",
-        }
+        task_env = await build_scan_task_env(db, scan, result.id, credential)
         if app_settings.local_docker_scan:
             from app.core.docker_runner import run_local_scan
             task_arn = await run_local_scan(

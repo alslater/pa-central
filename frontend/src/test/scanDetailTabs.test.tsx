@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ScanDetailTabs } from '@/components/ui'
+import type { FixPlanResult } from '@/lib/api'
 
 const mockFindings = [{ package: 'flask', severity: 'high', advisory_id: 'GHSA-x' }]
 const mockRisks = [{ package: 'reqeusts', ecosystem: 'pypi', score: 46, level: 'warning',
@@ -105,4 +106,26 @@ describe('ScanDetailTabs', () => {
     render(<ScanDetailTabs findings={findings} risks={[]} remediations={remediations} />)
     expect(screen.getByText('→ 5.2.17')).toBeInTheDocument()
   })
+})
+
+const fixPlan = { status: 'planned', lockfile: 'uv.lock', error: null, exit_code: 0, duration_seconds: 10,
+  timeout_seconds: 900, near_timeout: false, plan: { lockfile: 'uv.lock', planned: [], held: [], commands: [],
+  command_changes: [], yanked_locked: [], trial_failure: null, lock_drift: [], lock_drift_unchecked: 0,
+  sync: null, separate: null, separate_reason: null, deferred: [],
+    osv_failures: 0, not_public: 0, yank_failures: 0, verified: true, unverified_reason: null } } as FixPlanResult
+
+it('adds a Fix plan tab with roving keyboard navigation', async () => {
+  render(<ScanDetailTabs findings={mockFindings} risks={mockRisks} fixPlan={fixPlan} />)
+  const tabs = screen.getAllByRole('tab')
+  expect(tabs.map(t => t.textContent)).toEqual(['Findings (1)', 'Risks (1)', 'Fix plan'])
+  tabs[0].focus()
+  await userEvent.keyboard('{ArrowLeft}')
+  expect(screen.getByRole('tab', { name: 'Fix plan' })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('tab', { name: 'Fix plan' })).toHaveFocus()
+})
+
+it('renders only the fix plan directly when it is the only content', () => {
+  render(<ScanDetailTabs findings={[]} risks={[]} fixPlan={fixPlan} />)
+  expect(screen.queryByRole('tablist')).toBeNull()
+  expect(screen.getByText('uv.lock')).toBeInTheDocument()
 })

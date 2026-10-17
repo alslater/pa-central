@@ -184,3 +184,19 @@ The four `with_for_update=True` call sites in `api/findings.py` and `api/risks.p
 **Proposed fix:** Replace the locking read with a single atomic conditional `UPDATE`, following the pattern already used for password-reset token consumption.
 
 **Trigger:** If SQLite stays the default for multi-worker deployments.
+
+### Fleet cache for OSV and other upstream endpoints
+
+Every scan container starts with an empty package-alert cache, so each repo scan re-queries OSV for every locked package (`POST /querybatch`) and fetches every advisory (`GET /vulns/{id}`); `pa fix` repeats lookups per trial. Scheduled scans of many repos at the same hour risk OSV 429/503 responses, which surface as `osv_failures` and degraded scans. Daemon hosts each keep their own cache too.
+
+**Proposed solution:** pa-central serves an OSV-compatible endpoint backed by a shared cache, and scan tasks (and optionally hosts, via config templates) point `[osv] base_url` at it. Requirements that make this more than a URL swap:
+
+- Never cache degraded, partial or error responses; pass 429/503 through so package-alert still counts `osv_failures`.
+- Cache per package query, not per batch body (batches differ every scan), which means splitting and reassembling `querybatch`, including OSV's per-query pagination. `GET /vulns/{id}` is the easy, high-volume part and can be invalidated by the `modified` timestamps `querybatch` returns.
+- Auth: package-alert's OSV client cannot send headers, and `pa fix` queries OSV as the unprivileged trial user, so the proxy needs either a narrowly scoped token in the URL or network-only access from the scan subnets — never the fleet system key.
+
+Later candidates for the same cache: deps.dev (risk scoring popularity) and registry metadata (yank and cooldown checks).
+
+**Before building:** use the fix-plans end-to-end timing run to measure OSV time versus trial time, and how often scheduled scans report `osv_failures`.
+
+**Files affected:** a new `backend/app/api/osv_proxy.py` and cache service, `backend/app/core/aws.py` / scan task config injection, config templates.

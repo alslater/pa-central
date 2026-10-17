@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    Column,
     Date,
     DateTime,
     Enum,
@@ -18,7 +19,9 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Table,
     Text,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -136,6 +139,8 @@ class CredentialType(str, enum.Enum):
     none = "none"
     ssh_key = "ssh_key"
     https_token = "https_token"
+    # A private package index (uv) for pa fix trials; never a git credential.
+    package_index = "package_index"
 
 
 class RepoScanStatus(str, enum.Enum):
@@ -359,6 +364,10 @@ class RepoCredential(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     credential_type: Mapped[CredentialType] = mapped_column(Enum(CredentialType), nullable=False)
     credential_secret_arn: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # package_index only: the index's base URL, and its username when it has one
+    # (the secret then holds the password; without a username it holds a token).
+    index_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    index_username: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow, onupdate=utcnow)
 
@@ -366,6 +375,16 @@ class RepoCredential(Base):
 
 
 # ── Repo Scan ─────────────────────────────────────────────────────────────────
+
+# Package-index credentials a repo scan's fix plans authenticate with. Deleting the repo
+# scan removes its links; a linked credential cannot be deleted (API 409, NO ACTION FK).
+repo_scan_package_indexes = Table(
+    "repo_scan_package_indexes",
+    Base.metadata,
+    Column("repo_scan_id", ForeignKey("repo_scans.id", ondelete="CASCADE"), primary_key=True),
+    Column("credential_id", ForeignKey("repo_credentials.id"), primary_key=True),
+)
+
 
 class RepoScan(Base):
     __tablename__ = "repo_scans"
@@ -395,6 +414,10 @@ class RepoScan(Base):
     # since that missed occurrence is already in the past relative to
     # created_at. See should_trigger_scan in app/scheduler/scheduler.py.
     enabled_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    # Run pa fix after scans that find vulnerabilities (docs/fix-plans-deployment.md).
+    fix_plans_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     sla_high_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sla_medium_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_scan_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
@@ -436,6 +459,9 @@ class RepoScanResult(Base):
     # package-alert >= 0.9.0 per-package upgrade advice, stored as emitted
     # (schemas.Remediation). NULL for scans run on older pa versions.
     remediations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # pa fix outcome for this scan (schemas.FixPlanResult), stored as posted. NULL when
+    # no fix plan was attempted (flag off, nothing found, or older results).
+    fix_plan: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     triggered_by: Mapped[ScanTrigger] = mapped_column(
         Enum(ScanTrigger), default=ScanTrigger.manual, nullable=False

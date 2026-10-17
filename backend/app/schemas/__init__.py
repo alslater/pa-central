@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
     EmailStr,
     Field,
     ValidationError,
+    computed_field,
     field_validator,
 )
 
@@ -527,6 +532,258 @@ def _drop_invalid_remediations(v: Any) -> Any:
 IngestRemediations = Annotated[list[Remediation] | None, BeforeValidator(_drop_invalid_remediations)]
 
 
+# ── Fix plan (package-alert `pa fix --format json`) ───────────────────────────
+#
+# Stored as the scan task posted it and displayed verbatim: pa-central never re-derives a
+# verdict (package-alert's `verified` is true even when every item is held "could not
+# verify" by a shared trial failure — see trial_failure). Lenient like remediations: a 422
+# would lose the whole scan result.
+
+def _keep_valid(model: type[BaseModel], label: str) -> Callable[[Any], Any]:
+    def validate(v: Any) -> Any:
+        if not isinstance(v, list):
+            if v is not None:
+                log.warning("Ignoring non-list %s value (%s)", label, type(v).__name__)
+            return []
+        kept = []
+        for entry in v:
+            try:
+                kept.append(model.model_validate(entry))
+            except ValidationError:
+                log.warning("Dropping malformed %s entry: %.200r", label, entry)
+        return kept
+    return validate
+
+
+def _list_or_empty(v: Any) -> Any:
+    return v if isinstance(v, list) else []
+
+
+def _finite_tree(v: Any) -> Any:
+    """*v* with every non-finite float in it (NaN, ±Infinity) replaced by None, recursively.
+
+    Python's json accepts NaN/Infinity literals, but PostgreSQL's json type rejects them: one
+    inside an untyped fix-plan field would fail the commit and lose the whole scan result.
+    Iterative (explicit stack): a deeply nested value must not raise RecursionError here, which is not
+    a ValidationError and would otherwise cost the scan its result. Structure is rebuilt, not mutated.
+    """
+    def fresh(x: Any) -> Any:
+        if isinstance(x, float):
+            return x if math.isfinite(x) else None
+        if isinstance(x, list):
+            return [None] * len(x)
+        if isinstance(x, dict):
+            return {}
+        return x
+
+    root = fresh(v)
+    stack: list[tuple[Any, Any]] = [(v, root)] if isinstance(v, (list, dict)) else []
+    while stack:
+        src, dst = stack.pop()
+        if isinstance(src, list):
+            for i, item in enumerate(src):
+                child = fresh(item)
+                dst[i] = child
+                if isinstance(item, (list, dict)):
+                    stack.append((item, child))
+        else:
+            for k, item in src.items():
+                child = fresh(item)
+                dst[k] = child
+                if isinstance(item, (list, dict)):
+                    stack.append((item, child))
+    return root
+
+
+LooseList = Annotated[list[Any], BeforeValidator(_list_or_empty), AfterValidator(_finite_tree)]
+
+
+# One wrong-typed value in a fix plan degrades to the field's default instead of failing the
+# model, so it cannot discard the valid parts of the plan around it.
+def _str_items(v: Any) -> Any:
+    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+
+def _str_or_none(v: Any) -> Any:
+    return v if isinstance(v, str) else None
+
+
+def _bool_or_none(v: Any) -> Any:
+    return v if isinstance(v, bool) else None
+
+
+def _dict_or_none(v: Any) -> Any:
+    return v if isinstance(v, dict) else None
+
+
+def _as_int(v: Any) -> int | None:
+    """An int, or an integral float (900.0), within the 64-bit range JSON consumers handle."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, int) and abs(v) < 2**63:
+        return v
+    return None
+
+
+def _int_or_zero(v: Any) -> Any:
+    n = _as_int(v)
+    return 0 if n is None else n
+
+
+def _int_or_none(v: Any) -> Any:
+    return _as_int(v)
+
+
+def _finite_float_or_none(v: Any) -> Any:
+    # NaN/Infinity are valid Python floats but PostgreSQL's JSON type rejects them, which
+    # would fail the commit and lose the whole scan result. float() of a huge int raises
+    # OverflowError, which pydantic does not turn into a ValidationError.
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float(v)
+    except (OverflowError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _entry_str_items(v: Any) -> Any:
+    # Inside a planned/held entry a non-list is a malformed entry (dropped by _keep_valid);
+    # only a bad element is tolerated.
+    if not isinstance(v, list):
+        raise ValueError("expected a list")  # noqa: TRY004 - pydantic only converts ValueError
+    return _str_items(v)
+
+
+LooseStrList = Annotated[list[str], BeforeValidator(_str_items)]
+EntryStrList = Annotated[list[str], BeforeValidator(_entry_str_items)]
+LooseStr = Annotated[str | None, BeforeValidator(_str_or_none)]
+LooseBool = Annotated[bool | None, BeforeValidator(_bool_or_none)]
+LooseDict = Annotated[dict | None, BeforeValidator(_dict_or_none), AfterValidator(_finite_tree)]
+# Untyped plan-entry fields: kept strict on shape (a wrong shape drops the entry), non-finite floats cleared.
+FiniteDictList = Annotated[list[dict], AfterValidator(_finite_tree)]
+FiniteDict = Annotated[dict | None, AfterValidator(_finite_tree)]
+LooseInt = Annotated[int, BeforeValidator(_int_or_zero)]
+LooseOptInt = Annotated[int | None, BeforeValidator(_int_or_none)]
+LooseFloat = Annotated[float | None, BeforeValidator(_finite_float_or_none)]
+
+
+class PlannedFix(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    package: str | None = None
+    version: str | None = None
+    target: str | None = None
+    direct: LooseBool = None
+    path: EntryStrList = []
+    advisories: EntryStrList = []
+    left_open: EntryStrList = []
+    fixes_all: str | None = None
+    fixes_all_advisories: EntryStrList = []
+    cooldown_checked: LooseBool = None
+    verified: LooseBool = None
+    changes: FiniteDictList = []
+    parent: FiniteDict = None
+    more_parents: FiniteDictList = []
+    forced: FiniteDict = None
+    by_relock: LooseBool = None
+
+
+class HeldFix(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    package: str | None = None
+    version: str | None = None
+    target: str | None = None
+    reason: str | None = None
+    advisories: EntryStrList = []
+    detail: str | None = None
+    cadence: str | None = None
+    needs_major: EntryStrList = []
+
+
+class FixPlan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    lockfile: LooseStr = None
+    planned: Annotated[list[PlannedFix], BeforeValidator(_keep_valid(PlannedFix, "planned fix"))] = []
+    held: Annotated[list[HeldFix], BeforeValidator(_keep_valid(HeldFix, "held fix"))] = []
+    commands: LooseList = []
+    command_changes: LooseList = []
+    yanked_locked: LooseList = []
+    trial_failure: LooseStr = None
+    lock_drift: LooseList = []
+    lock_drift_unchecked: LooseInt = 0
+    sync: LooseDict = None
+    separate: LooseBool = None
+    separate_reason: LooseStr = None
+    deferred: LooseStrList = []
+    osv_failures: LooseInt = 0
+    not_public: LooseInt = 0
+    yank_failures: LooseInt = 0
+    verified: LooseBool = None
+    unverified_reason: LooseStr = None
+
+
+def _plan_or_none(v: Any) -> Any:
+    if v is None:
+        return None
+    try:
+        return FixPlan.model_validate(v)
+    except ValidationError:
+        log.warning("Dropping malformed fix plan body: %.200r", v)
+        return None
+    except RecursionError:
+        log.warning("Dropping fix plan body nested too deeply")
+        return None
+
+
+class FixPlanResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    status: Literal["planned", "unsupported", "error", "skipped", "timeout"] | None = None
+    lockfile: LooseStr = None
+    error: LooseStr = None
+    exit_code: LooseOptInt = None
+    duration_seconds: LooseFloat = None
+    timeout_seconds: LooseOptInt = None
+    plan: Annotated[FixPlan | None, BeforeValidator(_plan_or_none)] = None
+
+
+class FixPlanResultOut(FixPlanResult):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def near_timeout(self) -> bool:
+        """The run used most of its budget (fix_plan_budget.NEAR_TIMEOUT_FRACTION); the UI warns."""
+        from app.services.fix_plan_budget import NEAR_TIMEOUT_FRACTION
+
+        if self.status == "timeout" or not self.duration_seconds or not self.timeout_seconds:
+            return False
+        return self.duration_seconds >= NEAR_TIMEOUT_FRACTION * self.timeout_seconds
+
+
+def _fix_plan_or_none(v: Any) -> Any:
+    """A fix_plan that does not validate as a whole is stored as absent, never rejected."""
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        log.warning("Ignoring non-object fix_plan value (%s)", type(v).__name__)
+        return None
+    try:
+        return FixPlanResult.model_validate(v)
+    except ValidationError:
+        log.warning("Dropping malformed fix_plan: %.200r", v)
+        return None
+    except RecursionError:
+        log.warning("Dropping fix_plan nested too deeply")
+        return None
+
+
+IngestFixPlan = Annotated[FixPlanResult | None, BeforeValidator(_fix_plan_or_none)]
+
+
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
 class ScanPayload(BaseModel):
@@ -747,6 +1004,9 @@ class RepoCredentialCreate(BaseModel):
     credential_type: CredentialType
     credential_value: str | None = None
     ssh_key_passphrase: str | None = None
+    # package_index only (validated against credential_type in the API).
+    index_url: str | None = None
+    index_username: str | None = Field(None, max_length=200)
 
 
 class RepoCredentialUpdate(BaseModel):
@@ -754,12 +1014,16 @@ class RepoCredentialUpdate(BaseModel):
     credential_type: CredentialType | None = None
     credential_value: str | None = None
     ssh_key_passphrase: str | None = None
+    index_url: str | None = None
+    index_username: str | None = Field(None, max_length=200)
 
 
 class RepoCredentialOut(OrmBase):
     id: int
     name: str
     credential_type: CredentialType
+    index_url: str | None = None
+    index_username: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -781,6 +1045,23 @@ def _validate_subfolder(v: str | None) -> str | None:
     return v
 
 
+_PA_VERSION_RE = re.compile(r"\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?")
+
+
+def normalize_pa_version(v: str | None) -> str | None:
+    """A package-alert version to pin (``0.10.0``, ``0.10.0rc1``), or None for "not set".
+
+    Shared by the repo-scan fields and the ``pa_version`` system setting: the value becomes
+    ``pip install package-alert==<v>`` in the scan task, so only a plain PEP 440 public version passes.
+    """
+    if v is None or not v.strip():
+        return None
+    v = v.strip()
+    if not _PA_VERSION_RE.fullmatch(v):
+        raise ValueError(f"pa version must be a release version such as 0.10.0 or 0.10.0rc1, got {v!r}")
+    return v
+
+
 class RepoScanCreate(BaseModel):
     name: str
     url: str
@@ -796,11 +1077,19 @@ class RepoScanCreate(BaseModel):
     subfolder: str | None = None
     sla_high_days: int | None = Field(None, gt=0)
     sla_medium_days: int | None = Field(None, gt=0)
+    fix_plans_enabled: bool = False
+    package_index_credential_ids: list[int] = []
+    pa_version: str | None = Field(None, max_length=50)
 
     @field_validator("subfolder")
     @classmethod
     def subfolder_not_absolute(cls, v: str | None) -> str | None:
         return _validate_subfolder(v)
+
+    @field_validator("pa_version")
+    @classmethod
+    def pa_version_is_a_version(cls, v: str | None) -> str | None:
+        return normalize_pa_version(v)
 
 
 class RepoScanUpdate(BaseModel):
@@ -818,11 +1107,19 @@ class RepoScanUpdate(BaseModel):
     subfolder: str | None = None
     sla_high_days: int | None = Field(None, gt=0)
     sla_medium_days: int | None = Field(None, gt=0)
+    fix_plans_enabled: bool | None = None
+    package_index_credential_ids: list[int] | None = None
+    pa_version: str | None = Field(None, max_length=50)
 
     @field_validator("subfolder")
     @classmethod
     def subfolder_not_absolute(cls, v: str | None) -> str | None:
         return _validate_subfolder(v)
+
+    @field_validator("pa_version")
+    @classmethod
+    def pa_version_is_a_version(cls, v: str | None) -> str | None:
+        return normalize_pa_version(v)
 
 
 class RepoScanOut(OrmBase):
@@ -849,6 +1146,8 @@ class RepoScanOut(OrmBase):
     breach: bool
     breach_count: int
     scan_config_hash: str | None
+    fix_plans_enabled: bool
+    package_index_credential_ids: list[int] = []
 
 
 class RepoScanHeadlineOut(BaseModel):
@@ -861,6 +1160,13 @@ class RepoScanHeadlineOut(BaseModel):
     open_risks_by_level: dict[str, int]
     breach: bool
     breach_count: int
+    fix_count: int | None = None
+
+
+class LatestFixPlanOut(BaseModel):
+    result_id: int
+    completed_at: datetime | None
+    fix_plan: FixPlanResultOut | None
 
 
 class RepoScanResultOut(OrmBase):
@@ -875,6 +1181,7 @@ class RepoScanResultOut(OrmBase):
     osv_failures: int
     sources: list[str] | None
     remediations: list[Remediation] | None = None
+    fix_plan: FixPlanResultOut | None = None
     error_message: str | None
     triggered_by: ScanTrigger
     ecs_task_arn: str | None
@@ -910,6 +1217,7 @@ class RepoScanResultIngest(BaseModel):
     osv_failures: int = Field(0, ge=0)
     sources: list[str] | None = None
     remediations: IngestRemediations = None
+    fix_plan: IngestFixPlan = None
     error_message: str | None = None
 
 

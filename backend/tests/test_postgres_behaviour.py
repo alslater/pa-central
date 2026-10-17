@@ -3380,3 +3380,297 @@ class TestPasswordResetTokenExpiryOnPostgres:
         )).scalar_one_or_none()
         assert remaining is None
 
+
+
+@pytest.mark.asyncio
+class TestFixPlanNonFiniteFloatsOnPostgres:
+    """PostgreSQL's json type rejects NaN/Infinity, which Python's json accepts. A non-finite
+    float nested in an untyped fix-plan field (lock_drift, changes, ...) would fail the
+    commit and lose the whole scan result; SQLite stores the literal and cannot catch it.
+    Exercises the real ingest endpoint so the schema's sanitising is what is tested.
+    """
+
+    KEY = "pg-fleet-system-key"
+
+    @pytest.fixture
+    async def session(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+        await engine.dispose()
+
+    @pytest.fixture
+    async def client(self, session, monkeypatch):
+        from app.core.config import settings as app_settings
+
+        monkeypatch.setattr(app_settings, "fleet_system_api_key", self.KEY)
+        monkeypatch.setattr("app.api.ingest._send_result_email", lambda *a, **kw: None)
+
+        async def override_db():
+            yield session
+
+        app.dependency_overrides[get_db] = override_db
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+        app.dependency_overrides.pop(get_db, None)
+
+    async def test_nested_nan_is_stored_as_null(self, session, client):
+        scan = RepoScan(name="nan", url="https://x/nan", branch="main")
+        session.add(scan)
+        await session.flush()
+        res = RepoScanResult(repo_scan_id=scan.id, status=RepoScanStatus.running)
+        session.add(res)
+        await session.commit()
+        res_id = res.id
+        body = (
+            f'{{"repo_scan_result_id": {res_id}, "status": "success", "finding_count": 1, "findings": [], '
+            '"fix_plan": {"status": "planned", "plan": {"lock_drift": [{"delta": NaN}], '
+            '"planned": [{"package": "a", "changes": [{"score": Infinity}]}]}}}'
+        )
+        r = await client.post("/api/ingest/repo-scan-result", content=body,
+                              headers={"X-API-Key": self.KEY, "Content-Type": "application/json"})
+        assert r.status_code == 204, r.text
+        session.expire_all()
+        stored = (await session.execute(
+            sa.select(RepoScanResult.fix_plan).where(RepoScanResult.id == res_id))).scalar_one()
+        assert stored["plan"]["lock_drift"] == [{"delta": None}]
+        assert stored["plan"]["planned"][0]["changes"] == [{"score": None}]
+
+
+class TestCredentialTypeChangeRacesAssignmentOnPostgres:
+    """A credential's type is checked when a scan is assigned it, and its use is checked when its
+    type changes. Without a shared lock the two can interleave: each passes its check against the
+    other's uncommitted state, both commit, and a package_index credential ends up as a scan's git
+    credential (or the reverse); the foreign keys check existence, not type. Both paths now write-
+    lock the credential row first (lock_credentials), so whichever runs second sees the other's
+    commit. Deletion takes the same lock: unlocked, it could pass its in-use check, delete the
+    secret, then fail on the foreign key, leaving a newly assigned scan with no secret. Each test
+    holds that lock in a separate session, confirms the request under test is really blocked on
+    it, then commits the conflicting change and checks it was seen.
+    """
+
+    @pytest.fixture
+    async def session_factory(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
+        await engine.dispose()
+
+    async def _seed(self, factory):
+        from app.models import CredentialType, RepoCredential
+
+        async with factory() as s:
+            user = User(email="pg-cred-race@example.com", display_name="Op",
+                        hashed_password=hash_password("password123456"), role=UserRole.operator, is_active=True)
+            cred = RepoCredential(name="git", credential_type=CredentialType.https_token)
+            s.add_all([user, cred])
+            await s.commit()
+            return user.id, cred.id
+
+    async def _blocked(self, task):
+        await asyncio.sleep(0.3)
+        assert not task.done(), (
+            "the request finished while the credential lock was held: it is not waiting on it, so this "
+            "test cannot prove anything about the race")
+
+    async def test_a_type_change_sees_an_assignment_committed_during_its_wait(self, session_factory):
+        from fastapi import HTTPException
+
+        from app.api.repo_credentials import update_credential
+        from app.models import CredentialType
+        from app.schemas import RepoCredentialUpdate
+        from app.services.package_indexes import lock_credentials
+
+        user_id, cred_id = await self._seed(session_factory)
+        holder, changer = session_factory(), session_factory()
+        try:
+            await lock_credentials(holder, [cred_id])  # what a concurrent scan assignment holds
+
+            async def change_type():
+                user = await changer.get(User, user_id)
+                body = RepoCredentialUpdate(credential_type=CredentialType.none)
+                return await update_credential(cred_id, body, changer, user)
+
+            task = asyncio.create_task(change_type())
+            await self._blocked(task)
+            holder.add(RepoScan(name="assigned", url="https://x/a", branch="main", credential_id=cred_id))
+            await holder.commit()
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(task, timeout=5.0)
+            assert exc.value.status_code == 409
+        finally:
+            await holder.close()
+            await changer.close()
+
+    async def test_an_assignment_sees_a_type_change_committed_during_its_wait(self, session_factory):
+        from fastapi import HTTPException
+
+        from app.api.repo_scans import create_repo_scan
+        from app.models import CredentialType, RepoCredential
+        from app.schemas import RepoScanCreate
+        from app.services.package_indexes import lock_credentials
+
+        user_id, cred_id = await self._seed(session_factory)
+        holder, creator = session_factory(), session_factory()
+        try:
+            await lock_credentials(holder, [cred_id])  # what a concurrent type change holds
+
+            async def assign():
+                user = await creator.get(User, user_id)
+                body = RepoScanCreate(name="s", url="https://x/s", credential_id=cred_id)
+                return await create_repo_scan(body, creator, user)
+
+            task = asyncio.create_task(assign())
+            await self._blocked(task)
+            await holder.execute(sa.update(RepoCredential).where(RepoCredential.id == cred_id).values(
+                credential_type=CredentialType.package_index, index_url="https://pypi.example/simple"))
+            await holder.commit()
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(task, timeout=5.0)
+            assert exc.value.status_code == 400
+            assert "cannot be the git credential" in exc.value.detail
+            async with session_factory() as s:
+                assert (await s.execute(sa.select(RepoScan).where(RepoScan.name == "s"))).first() is None
+        finally:
+            await holder.close()
+            await creator.close()
+
+    async def test_a_scan_update_sees_a_type_change_committed_during_its_wait(self, session_factory):
+        from fastapi import HTTPException
+
+        from app.api.repo_scans import update_repo_scan
+        from app.models import CredentialType, RepoCredential
+        from app.schemas import RepoScanUpdate
+        from app.services.package_indexes import lock_credentials
+
+        user_id, cred_id = await self._seed(session_factory)
+        async with session_factory() as s:
+            scan = RepoScan(name="existing", url="https://x/e", branch="main")
+            s.add(scan)
+            await s.commit()
+            scan_id = scan.id
+        holder, updater = session_factory(), session_factory()
+        try:
+            await lock_credentials(holder, [cred_id])
+
+            async def assign():
+                user = await updater.get(User, user_id)
+                return await update_repo_scan(scan_id, RepoScanUpdate(credential_id=cred_id), updater, user)
+
+            task = asyncio.create_task(assign())
+            await self._blocked(task)
+            await holder.execute(sa.update(RepoCredential).where(RepoCredential.id == cred_id).values(
+                credential_type=CredentialType.package_index, index_url="https://pypi.example/simple"))
+            await holder.commit()
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(task, timeout=5.0)
+            assert exc.value.status_code == 400
+            async with session_factory() as s:
+                assert (await s.get(RepoScan, scan_id)).credential_id is None
+        finally:
+            await holder.close()
+            await updater.close()
+
+    async def test_a_delete_sees_an_assignment_committed_during_its_wait(self, session_factory, monkeypatch):
+        # Unlocked, the delete passed its in-use check, deleted the secret, and only then failed on
+        # the foreign key: the newly assigned scan kept a credential whose secret was gone.
+        from fastapi import HTTPException
+
+        from app.api import repo_credentials
+        from app.models import RepoCredential
+        from app.services.package_indexes import lock_credentials
+
+        user_id, cred_id = await self._seed(session_factory)
+        async with session_factory() as s:
+            await s.execute(sa.update(RepoCredential).where(RepoCredential.id == cred_id)
+                            .values(credential_secret_arn="arn:aws:secretsmanager:eu-west-1:1:secret:pa-x"))
+            await s.commit()
+        deleted = []
+
+        class FakeSecrets:  # never real AWS
+            async def delete_secret(self, arn):
+                deleted.append(arn)
+
+        monkeypatch.setattr(repo_credentials, "_sm", lambda: FakeSecrets())
+        holder, deleter = session_factory(), session_factory()
+        try:
+            await lock_credentials(holder, [cred_id])  # what a concurrent scan assignment holds
+
+            async def delete():
+                user = await deleter.get(User, user_id)
+                return await repo_credentials.delete_credential(cred_id, deleter, user)
+
+            task = asyncio.create_task(delete())
+            await self._blocked(task)
+            holder.add(RepoScan(name="assigned", url="https://x/a", branch="main", credential_id=cred_id))
+            await holder.commit()
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(task, timeout=5.0)
+            assert exc.value.status_code == 409
+            assert deleted == []
+            async with session_factory() as s:
+                assert await s.get(RepoCredential, cred_id) is not None
+        finally:
+            await holder.close()
+            await deleter.close()
+
+
+class TestPackageIndexReplacementsDoNotMergeOnPostgres:
+    """Replacing a scan's package-index links deletes and re-inserts them. Two concurrent PATCHes
+    with different credentials locked only their own credential rows, so each deleted the links
+    the other had not committed yet, both inserted, and the scan kept both lists: registry access
+    nobody asked for. update_repo_scan now write-locks the scan row first (lock_scan).
+    """
+
+    @pytest.fixture
+    async def session_factory(self, migrated_url):
+        engine = make_async_engine(migrated_url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
+        await engine.dispose()
+
+    async def test_the_second_replacement_wins_whole(self, session_factory):
+        from app.api.repo_scans import update_repo_scan
+        from app.models import CredentialType, RepoCredential
+        from app.schemas import RepoScanUpdate
+        from app.services.package_indexes import (
+            index_ids_by_scan,
+            lock_scan,
+            set_index_ids,
+        )
+
+        async with session_factory() as s:
+            user = User(email="pg-links-race@example.com", display_name="Op",
+                        hashed_password=hash_password("password123456"), role=UserRole.operator, is_active=True)
+            a = RepoCredential(name="idx-a", credential_type=CredentialType.package_index,
+                               index_url="https://a.example/simple")
+            b = RepoCredential(name="idx-b", credential_type=CredentialType.package_index,
+                               index_url="https://b.example/simple")
+            scan = RepoScan(name="links", url="https://x/l", branch="main")
+            s.add_all([user, a, b, scan])
+            await s.commit()
+            user_id, a_id, b_id, scan_id = user.id, a.id, b.id, scan.id
+
+        holder, updater = session_factory(), session_factory()
+        try:
+            await lock_scan(holder, scan_id)  # what the concurrent PATCH for [a] holds
+
+            async def replace_with_b():
+                user = await updater.get(User, user_id)
+                body = RepoScanUpdate(package_index_credential_ids=[b_id])
+                return await update_repo_scan(scan_id, body, updater, user)
+
+            task = asyncio.create_task(replace_with_b())
+            await asyncio.sleep(0.3)
+            assert not task.done(), (
+                "the PATCH finished while the scan lock was held: it is not waiting on it, so this "
+                "test cannot prove anything about the race")
+            await set_index_ids(holder, scan_id, [a_id])
+            await holder.commit()
+            await asyncio.wait_for(task, timeout=5.0)
+            async with session_factory() as s:
+                assert (await index_ids_by_scan(s, [scan_id]))[scan_id] == [b_id]
+        finally:
+            await holder.close()
+            await updater.close()

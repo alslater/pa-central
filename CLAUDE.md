@@ -184,9 +184,14 @@ checklist before considering the upgrade done:
   `backend/app/services/config_lint.py` if needed.
 
 - [ ] **scan_task Docker image** — `docker/scan_task/scan_task.py` installs
-  `package-alert` at runtime via pip. Verify the new version's `pa scan-project`
-  still exits 0 on clean repos and 1 when findings are found (non-zero exit
-  codes other than 1 are treated as hard failures).
+  `package-alert` at runtime via pip. Verify that `pa scan-project --format json`
+  exits 0 both on a clean repo and on one with findings (since 0.9.0 the exit
+  code no longer signals findings; 1 means invalid CLI usage, which
+  `run_pa_scan` still tolerates only for older pa versions where 1 meant
+  findings, so on 0.9.0+ it then fails JSON parsing). Any other exit code is a
+  failure in `run_pa_scan`. Also verify the fix step
+  (`docker/scan_task/fix_plan.py`) still sees `pa fix` exit 0/1 with JSON output
+  and 2 for unusable projects.
 
 - [ ] **Backend tests** — run `cd backend && .venv/bin/pytest` and confirm all
   scan-options and config-lint tests still pass.

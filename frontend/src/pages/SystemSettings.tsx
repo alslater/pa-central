@@ -18,6 +18,7 @@ const KNOWN_SETTINGS: Array<{
   { key: 'smtp_timeout_seconds', label: 'Timeout (seconds)', hint: '30 — how long to wait on an unresponsive server', type: 'string' },
   { key: 'scan_result_retention_days',  label: 'Retention (days)',  hint: 'e.g. 30', type: 'int' },
   { key: 'scan_result_retention_count', label: 'Retention (count)', hint: 'e.g. 100', type: 'int' },
+  { key: 'fix_plan_timeout_seconds', label: 'Fix plan time budget (seconds)', hint: '900 — 120 to 3600', type: 'int' },
   { key: 'sla_high_days',           label: 'SLA: High/Critical (days)', hint: 'e.g. 14', type: 'int' },
   { key: 'sla_medium_days',         label: 'SLA: Medium (days)',        hint: 'e.g. 90', type: 'int' },
   { key: 'finding_retention_days',  label: 'Finding & risk retention (days)',  hint: 'e.g. 365 — also applies to closed risks', type: 'int' },
@@ -340,6 +341,16 @@ export default function SystemSettings() {
                   />
                 ))}
               </div>
+            </section>
+
+            <section>
+              <h3 className="text-style-caption mb-3">Fix Plans</h3>
+              <Input label="Fix plan time budget (seconds)" type="number" inputMode="numeric" min={120} max={3600}
+                     placeholder="900 — 120 to 3600" value={settings['fix_plan_timeout_seconds'] ?? ''}
+                     onChange={e => set('fix_plan_timeout_seconds', e.target.value)} />
+              <p className="text-style-body-small mt-1">
+                How long pa fix may run per scan. Results warn at 80% of it; scan locks and stuck-scan recovery allow for it.
+              </p>
             </section>
 
             <section>

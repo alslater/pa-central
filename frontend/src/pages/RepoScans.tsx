@@ -7,12 +7,17 @@ import { useAuth } from '@/hooks/useAuth'
 import { Card, Button, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, ScanDetailTabs, timeAgo } from '@/components/ui'
 import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settings2 } from 'lucide-react'
 import { CronField } from '@/components/CronField'
+import { formatDuration } from '@/components/FixPlanPanel'
+import { TAG_MUTED, TAG_PASS, TAG_REVIEW } from '@/components/tags'
 import { TimezoneField } from '@/components/TimezoneField'
 import { parseScanArgs, assembleScanArgs, compileFlags, scanArgsReducer } from '@/lib/scanArgs'
 import { useRovingTabs } from '@/lib/hooks'
 
 const SEV_OPTIONS: AlertSeverity[] = ['info', 'low', 'warning', 'medium', 'high', 'critical']
-const CRED_OPTIONS: CredentialType[] = ['none', 'https_token', 'ssh_key']
+const CRED_OPTIONS: CredentialType[] = ['none', 'https_token', 'ssh_key', 'package_index']
+const CRED_TYPE_LABEL: Record<CredentialType, string> = {
+  none: 'None', https_token: 'HTTPS token', ssh_key: 'SSH key', package_index: 'Package index (uv)',
+}
 
 // Normalises a pasted PEM key into the canonical RFC 7468 layout that OpenSSH
 // and most TLS libraries require: header line, optional Proc-Type/DEK-Info
@@ -69,7 +74,10 @@ function CredentialForm({
   initial, onSave, onCancel,
 }: {
   initial?: RepoCredential
-  onSave: (data: { name: string; credential_type: CredentialType; credential_value?: string; ssh_key_passphrase?: string }) => void
+  onSave: (data: {
+    name: string; credential_type: CredentialType; credential_value?: string; ssh_key_passphrase?: string
+    index_url?: string | null; index_username?: string | null
+  }) => void
   onCancel: () => void
 }) {
   const [form, setForm] = useState({
@@ -77,6 +85,8 @@ function CredentialForm({
     credential_type: initial?.credential_type ?? 'none' as CredentialType,
     credential_value: '',
     ssh_key_passphrase: '',
+    index_url: initial?.index_url ?? '',
+    index_username: initial?.index_username ?? '',
   })
   const set = (k: string, v: unknown) => setForm(prev => ({ ...prev, [k]: v }))
 
@@ -87,6 +97,9 @@ function CredentialForm({
       credential_type: form.credential_type,
       credential_value: form.credential_value || undefined,
       ssh_key_passphrase: (form.credential_type === 'ssh_key' && form.ssh_key_passphrase) ? form.ssh_key_passphrase : undefined,
+      ...(form.credential_type === 'package_index'
+        ? { index_url: form.index_url.trim(), index_username: form.index_username.trim() || null }
+        : {}),
     })
   }
 
@@ -95,11 +108,20 @@ function CredentialForm({
       <div className="cred-form-grid">
         <Input label="Name" value={form.name} onChange={e => set('name', e.target.value)} />
         <Select label="Type" value={form.credential_type} onChange={e => set('credential_type', e.target.value)}>
-          {CRED_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
+          {CRED_OPTIONS.map(c => <option key={c} value={c}>{CRED_TYPE_LABEL[c]}</option>)}
         </Select>
+        {form.credential_type === 'package_index' && (
+          <>
+            <Input label="Index URL" placeholder="https://pypi.internal.example/simple" value={form.index_url}
+                   onChange={e => set('index_url', e.target.value)} />
+            <Input label="Username (blank for a token)" value={form.index_username}
+                   onChange={e => set('index_username', e.target.value)} />
+          </>
+        )}
         {form.credential_type !== 'none' && (
           <Input
-            label={form.credential_type === 'ssh_key' ? 'SSH private key' : 'HTTPS token'}
+            label={form.credential_type === 'ssh_key' ? 'SSH private key'
+              : form.credential_type === 'package_index' ? (form.index_username ? 'Password' : 'Token') : 'HTTPS token'}
             type="password"
             placeholder={initial ? 'Leave blank to keep existing' : undefined}
             value={form.credential_value}
@@ -116,6 +138,11 @@ function CredentialForm({
           />
         )}
       </div>
+      {form.credential_type === 'package_index' && (
+        <p className="text-style-body-small">
+          Use a read-only token scoped to the registry: repository build code can read it while fix plans run.
+        </p>
+      )}
       <div className="cred-form-actions">
         <Button variant="primary" onClick={submit}>{initial ? 'Save' : 'Add'}</Button>
         <Button variant="secondary" onClick={onCancel}>Cancel</Button>
@@ -134,10 +161,6 @@ function CredentialsPanel({
   onDelete: (cred: RepoCredential) => void
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
-
-  const CRED_TYPE_LABEL: Record<CredentialType, string> = {
-    none: 'None', https_token: 'HTTPS token', ssh_key: 'SSH key',
-  }
 
   return (
     <Card className="card-mb-24">
@@ -219,16 +242,17 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
         const hasRisks = r.risks && r.risks.length > 0
         const hasRiskFailures = (r.risk_failures ?? 0) > 0
         const hasOsvFailures = (r.osv_failures ?? 0) > 0
+        const hasFixPlan = !!r.fix_plan
         const isExpanded = expandedId === r.id
         return (
           <div key={r.id} className="result-row">
             <div
-              className={`result-row-content ${(hasFindings || hasRisks) ? 'result-row-clickable' : 'result-row-static'}`}
-              onClick={() => (hasFindings || hasRisks) && setExpandedId(isExpanded ? null : r.id)}
-              onKeyDown={e => { if ((hasFindings || hasRisks) && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
-              role={(hasFindings || hasRisks) ? 'button' : undefined}
-              tabIndex={(hasFindings || hasRisks) ? 0 : undefined}
-              aria-expanded={(hasFindings || hasRisks) ? isExpanded : undefined}
+              className={`result-row-content ${(hasFindings || hasRisks || hasFixPlan) ? 'result-row-clickable' : 'result-row-static'}`}
+              onClick={() => (hasFindings || hasRisks || hasFixPlan) && setExpandedId(isExpanded ? null : r.id)}
+              onKeyDown={e => { if ((hasFindings || hasRisks || hasFixPlan) && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
+              role={(hasFindings || hasRisks || hasFixPlan) ? 'button' : undefined}
+              tabIndex={(hasFindings || hasRisks || hasFixPlan) ? 0 : undefined}
+              aria-expanded={(hasFindings || hasRisks || hasFixPlan) ? isExpanded : undefined}
             >
               <RepoScanStatusBadge status={r.status} />
               <span className="result-trigger-label">
@@ -267,13 +291,39 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
                   ⚠ {r.osv_failures} unchecked
                 </span>
               )}
+              {r.fix_plan?.status === 'planned' && r.fix_plan.plan && (
+                // A failure shared by every trial leaves verified set and nothing planned: not "nothing fixable".
+                r.fix_plan.plan.trial_failure ? (
+                  <span className={TAG_REVIEW} title={r.fix_plan.plan.trial_failure}>trials failed</span>
+                ) : !r.fix_plan.plan.verified ? (
+                  <span className={TAG_REVIEW}>plan unverified</span>
+                ) : r.fix_plan.plan.planned.length === 0 ? (
+                  <span className={TAG_MUTED}>nothing fixable</span>
+                ) : (
+                  <span className={TAG_PASS}>{r.fix_plan.plan.planned.length} fixable</span>
+                )
+              )}
+              {r.fix_plan?.near_timeout && r.fix_plan.duration_seconds != null && r.fix_plan.timeout_seconds != null && (
+                <span className={TAG_REVIEW}
+                      title="Raise fix_plan_timeout_seconds in System Settings, or the scan task's CPU, before runs start timing out">
+                  ⚠ fix plan near time limit ({formatDuration(r.fix_plan.duration_seconds)} of {formatDuration(r.fix_plan.timeout_seconds)})
+                </span>
+              )}
+              {r.fix_plan?.status === 'timeout' && r.fix_plan.timeout_seconds != null && (
+                <span className={TAG_REVIEW} title="Raise fix_plan_timeout_seconds in System Settings">
+                  ⚠ fix plan timed out ({formatDuration(r.fix_plan.timeout_seconds)})
+                </span>
+              )}
               {r.pa_version && (
                 <span className="result-pa-version">pa@{r.pa_version}</span>
+              )}
+              {r.fix_plan?.duration_seconds != null && (
+                <span className="result-pa-version" title="Fix plan duration">fix {formatDuration(r.fix_plan.duration_seconds)}</span>
               )}
               <span className="result-timestamp">
                 {r.started_at ? timeAgo(r.started_at) : ''}
               </span>
-              {(hasFindings || hasRisks) && (
+              {(hasFindings || hasRisks || hasFixPlan) && (
                 <span className="result-chevron">
                   {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </span>
@@ -290,9 +340,9 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
             {r.error_message && (
               <pre className="result-error-pre">{r.error_message}</pre>
             )}
-            {isExpanded && (hasFindings || hasRisks) && (
+            {isExpanded && (hasFindings || hasRisks || hasFixPlan) && (
               <div className="result-findings-expanded">
-                <ScanDetailTabs findings={r.findings} risks={r.risks} remediations={r.remediations} />
+                <ScanDetailTabs findings={r.findings} risks={r.risks} remediations={r.remediations} fixPlan={r.fix_plan} />
               </div>
             )}
           </div>
@@ -544,6 +594,57 @@ function ScanCard({
 }
 
 
+function FixPlanFields({
+  enabled, indexIds, credentials, labelClassName, onEnabledChange, onIndexIdsChange,
+}: {
+  enabled: boolean
+  indexIds: number[]
+  credentials: RepoCredential[]
+  labelClassName: string
+  onEnabledChange: (enabled: boolean) => void
+  onIndexIdsChange: (ids: number[]) => void
+}) {
+  const indexCredentials = credentials.filter(c => c.credential_type === 'package_index')
+  return (
+    <>
+      <label className={labelClassName}>
+        <input type="checkbox" checked={enabled} onChange={e => onEnabledChange(e.target.checked)} />
+        Generate fix plans
+      </label>
+      <p className="text-style-body-small">
+        Runs pa fix after scans that find vulnerabilities. Executes the project's package manager in an isolated
+        user; can add up to the fix-plan time budget.
+      </p>
+      {enabled && (
+        <fieldset className="flex flex-col gap-2">
+          <legend className="text-xs text-muted-foreground font-medium mb-1.5">Package index credentials</legend>
+          {indexCredentials.length === 0 ? (
+            <p className="text-style-body-small">
+              None yet. Only needed for private registries: add one on the Credentials tab with the type
+              “Package index (uv)”.
+            </p>
+          ) : (
+            <>
+              {indexCredentials.map(c => (
+                <label key={c.id} className={labelClassName}>
+                  <input type="checkbox" checked={indexIds.includes(c.id)}
+                         onChange={e => onIndexIdsChange(e.target.checked
+                           ? [...indexIds, c.id]
+                           : indexIds.filter(i => i !== c.id))} />
+                  {c.name}
+                </label>
+              ))}
+              <p className="text-style-body-small">
+                Use read-only tokens: repository build code can read them while fix plans run.
+              </p>
+            </>
+          )}
+        </fieldset>
+      )}
+    </>
+  )
+}
+
 function EditForm({
   scan, credentials, templates, defaultTz, scanOptions, scanOptionsVersion, onSave,
 }: {
@@ -571,6 +672,8 @@ function EditForm({
     sla_medium_days: scan.sla_medium_days ?? null,
     min_notify_severity: scan.min_notify_severity,
     notify_recipients: (scan.notify_recipients ?? []).join(', '),
+    fix_plans_enabled: scan.fix_plans_enabled,
+    package_index_credential_ids: scan.package_index_credential_ids,
   })
 
   const set = (k: string, v: unknown) => setForm(prev => ({ ...prev, [k]: v }))
@@ -594,6 +697,8 @@ function EditForm({
     sla_medium_days: form.sla_medium_days,
     min_notify_severity: form.min_notify_severity as AlertSeverity,
     notify_recipients: form.notify_recipients.split(',').map((s: string) => s.trim()).filter(Boolean),
+    fix_plans_enabled: form.fix_plans_enabled,
+    package_index_credential_ids: form.package_index_credential_ids,
   })
 
   const configChanged = (): boolean => {
@@ -657,12 +762,18 @@ function EditForm({
         )}
         <Select label="Credential" value={String(form.credential_id)} onChange={e => set('credential_id', e.target.value)}>
           <option value="">— none —</option>
-          {credentials.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {credentials.filter(c => c.credential_type !== 'package_index').map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </Select>
         <Select label="Config template" value={String(form.config_template_id)} onChange={e => set('config_template_id', e.target.value)}>
           <option value="">— none —</option>
           {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
         </Select>
+        <div className="edit-form-span2 flex flex-col gap-2">
+          <FixPlanFields enabled={form.fix_plans_enabled} indexIds={form.package_index_credential_ids}
+                         credentials={credentials} labelClassName="edit-form-enabled-label"
+                         onEnabledChange={v => set('fix_plans_enabled', v)}
+                         onIndexIdsChange={ids => set('package_index_credential_ids', ids)} />
+        </div>
         <Select label="Min notify severity" value={form.min_notify_severity} onChange={e => set('min_notify_severity', e.target.value)}>
           {SEV_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
         </Select>
@@ -706,6 +817,7 @@ function AddModal({
     credential_id: '', config_template_id: '', pa_version: '', scan_flags: '', subfolder: '',
     min_notify_severity: 'medium' as AlertSeverity,
     notify_recipients: '', is_enabled: true,
+    fix_plans_enabled: false, package_index_credential_ids: [] as number[],
   })
   const set = (k: string, v: unknown) => setForm(prev => ({ ...prev, [k]: v }))
 
@@ -723,6 +835,8 @@ function AddModal({
       min_notify_severity: form.min_notify_severity,
       notify_recipients: form.notify_recipients.split(',').map(s => s.trim()).filter(Boolean),
       is_enabled: form.is_enabled,
+      fix_plans_enabled: form.fix_plans_enabled,
+      package_index_credential_ids: form.package_index_credential_ids,
     })
   }
 
@@ -750,12 +864,16 @@ function AddModal({
         )}
         <Select label="Credential" value={form.credential_id} onChange={e => set('credential_id', e.target.value)}>
           <option value="">— none —</option>
-          {credentials.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {credentials.filter(c => c.credential_type !== 'package_index').map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </Select>
         <Select label="Config template (optional)" value={form.config_template_id} onChange={e => set('config_template_id', e.target.value)}>
           <option value="">— none —</option>
           {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
         </Select>
+        <FixPlanFields enabled={form.fix_plans_enabled} indexIds={form.package_index_credential_ids}
+                       credentials={credentials} labelClassName="add-modal-enabled-label"
+                       onEnabledChange={v => set('fix_plans_enabled', v)}
+                       onIndexIdsChange={ids => set('package_index_credential_ids', ids)} />
         <Select label="Min notify severity" value={form.min_notify_severity} onChange={e => set('min_notify_severity', e.target.value)}>
           {SEV_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
         </Select>

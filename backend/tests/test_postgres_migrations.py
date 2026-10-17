@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "e4c1a9d2b7f3"
+HEAD_REVISION = "f1a2b3c4d5e6"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -71,6 +71,10 @@ EXPECTED_ONDELETE = {
     # A reset token is meaningless without its user, and leaving orphans
     # behind would be a standing credential for a deleted account.
     ("password_reset_tokens", "user_id"): "c",
+    # A link dies with its repo scan; deleting a still-linked credential is refused
+    # (the API returns 409 first; NO ACTION is the database-level backstop).
+    ("repo_scan_package_indexes", "repo_scan_id"): "c",
+    ("repo_scan_package_indexes", "credential_id"): "a",
 }
 
 MIGRATED_TABLES = sorted({t for t, _ in EXPECTED_ONDELETE})
@@ -84,6 +88,7 @@ _POST_BASE_REVISION_TABLES = {
     "finding_acceptance_events",
     "risk_acceptance_events",
     "password_reset_tokens",
+    "repo_scan_package_indexes",
 }
 DOWNGRADE_EXPECTED_ONDELETE = {
     k: v for k, v in EXPECTED_ONDELETE.items() if k[0] not in _POST_BASE_REVISION_TABLES
@@ -1894,3 +1899,117 @@ class TestRemediationsMigration:
             ("repo_scan_results", "json", "YES"),
             ("scans", "json", "YES"),
         ]
+
+
+class TestFixPlansMigration:
+    """f1a2b3c4d5e6: package_index credential type (native enum value on PostgreSQL),
+    repo_credentials.index_url/index_username, repo_scans.fix_plans_enabled,
+    repo_scan_results.fix_plan, and the repo_scan_package_indexes link table.
+
+    Seeded before the migration, per CLAUDE.md: an existing enum type must accept the
+    new value while holding rows, and the downgrade must keep rows.
+    """
+
+    PRE_REVISION = "e4c1a9d2b7f3"
+
+    @staticmethod
+    def _seed(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,"
+                    "role,is_active,totp_enabled,created_at,token_epoch) VALUES "
+                    "(1,'fix@example.invalid','Fix','x','viewer',true,false,now(),0)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_credentials (id,name,credential_type,created_at,updated_at) "
+                    "VALUES (1,'git','https_token',now(),now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,"
+                    "is_enabled,created_by_id,created_at,updated_at,credential_id) "
+                    "VALUES (1,'r','https://example.invalid/r','main','high',true,1,now(),now(),1)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scan_results (id,repo_scan_id,status,finding_count,"
+                    "risk_failures,osv_failures,triggered_by,started_at,notified) VALUES "
+                    "(1,1,'success',0,0,0,'manual',now(),false)"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def migrated(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REVISION).returncode == 0
+        self._seed(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_package_index_is_accepted_by_the_native_enum_type(self, migrated):
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO repo_credentials (id,name,credential_type,index_url,index_username,"
+                "created_at,updated_at) VALUES (2,'idx','package_index','https://pypi.example.invalid/simple',"
+                "'reader',now(),now())"
+            ))
+            row = conn.execute(sa.text(
+                "SELECT credential_type, index_url FROM repo_credentials WHERE id = 2")).one()
+        assert row.credential_type == "package_index"
+
+    def test_existing_rows_get_defaults(self, migrated):
+        with migrated.connect() as conn:
+            enabled = conn.execute(sa.text("SELECT fix_plans_enabled FROM repo_scans WHERE id = 1")).scalar_one()
+            plan = conn.execute(sa.text("SELECT fix_plan FROM repo_scan_results WHERE id = 1")).scalar_one()
+        assert enabled is False
+        assert plan is None
+
+    def test_link_cascades_with_the_repo_scan_and_blocks_credential_delete(self, migrated):
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO repo_credentials (id,name,credential_type,index_url,created_at,updated_at) "
+                "VALUES (3,'idx3','package_index','https://p.example.invalid',now(),now())"))
+            conn.execute(sa.text("INSERT INTO repo_scan_package_indexes VALUES (1,3)"))
+            with pytest.raises(sa.exc.IntegrityError):
+                conn.execute(sa.text("DELETE FROM repo_credentials WHERE id = 3"))
+            conn.execute(sa.text("DELETE FROM repo_scan_results WHERE repo_scan_id = 1"))
+            conn.execute(sa.text("DELETE FROM repo_scans WHERE id = 1"))
+            left = conn.execute(sa.text("SELECT count(*) FROM repo_scan_package_indexes")).scalar_one()
+        assert left == 0
+
+    def test_downgrade_keeps_rows(self, migrated, postgres_url):
+        with migrated.connect() as conn:
+            conn.execute(sa.text("UPDATE repo_scan_results SET fix_plan = '{\"status\":\"planned\"}' WHERE id = 1"))
+            conn.execute(sa.text("UPDATE repo_scans SET fix_plans_enabled = true WHERE id = 1"))
+        r = alembic(postgres_url, "downgrade", self.PRE_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        with migrated.connect() as conn:
+            assert conn.execute(sa.text("SELECT count(*) FROM repo_scans")).scalar_one() == 1
+            assert conn.execute(sa.text("SELECT count(*) FROM repo_scan_results")).scalar_one() == 1
+            cols = {r.column_name for r in conn.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns WHERE table_name IN "
+                "('repo_scans','repo_scan_results','repo_credentials')"))}
+        assert not {"fix_plans_enabled", "fix_plan", "index_url", "index_username"} & cols
+
+    def test_downgrade_refuses_while_a_package_index_credential_exists(self, migrated, postgres_url):
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO repo_credentials (id,name,credential_type,index_url,created_at,updated_at) "
+                "VALUES (4,'idx4','package_index','https://p.example.invalid',now(),now())"))
+        r = alembic(postgres_url, "downgrade", self.PRE_REVISION)
+        assert r.returncode != 0
+        assert "package_index" in r.stderr
+
+    def test_upgrade_replays_after_a_partial_failure(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REVISION).returncode == 0
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text("ALTER TABLE repo_scan_results ADD COLUMN fix_plan JSON"))
+            r = alembic(postgres_url, "upgrade", "head")
+        finally:
+            engine.dispose()
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"

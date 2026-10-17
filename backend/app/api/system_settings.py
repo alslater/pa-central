@@ -29,11 +29,22 @@ from app.models import (
     setting_is_true,
     utcnow,
 )
-from app.schemas import PasswordResetReadinessOut, SystemSettingOut, SystemSettingPatch
+from app.schemas import (
+    PasswordResetReadinessOut,
+    SystemSettingOut,
+    SystemSettingPatch,
+    normalize_pa_version,
+)
 from app.services.finding_lifecycle import (
     DEFAULT_FINDING_RETENTION,
     DEFAULT_SLA_HIGH,
     DEFAULT_SLA_MEDIUM,
+)
+from app.services.fix_plan_budget import (
+    FIX_PLAN_TIMEOUT_KEY,
+    MAX_FIX_PLAN_TIMEOUT,
+    MIN_FIX_PLAN_TIMEOUT,
+    fix_plan_timeout_is_usable,
 )
 
 router = APIRouter(prefix="/system-settings", tags=["system-settings"])
@@ -59,6 +70,7 @@ KEY_TYPES: dict[str, SettingValueType] = {
     "sla_medium_days": SettingValueType.int,
     "finding_retention_days": SettingValueType.int,
     "self_service_password_reset": SettingValueType.bool,
+    FIX_PLAN_TIMEOUT_KEY: SettingValueType.int,
 }
 
 # Keys whose runtime consumer (get_global_sla's parse_int) silently discards
@@ -416,6 +428,12 @@ async def patch_settings(body: SystemSettingPatch, db: DbDep, user: AdminDep) ->
             )
 
     for key, raw_value in body.updates.items():
+        if key == "pa_version" and raw_value is not None:
+            try:
+                # Stored normalised: " 0.10.0 " as "0.10.0", and a blank value as unset ("").
+                raw_value = normalize_pa_version(raw_value) or ""
+            except ValueError as exc:
+                raise HTTPException(400, f"Setting 'pa_version': {exc}") from None
         vtype = KEY_TYPES.get(key, SettingValueType.string)
         if vtype == SettingValueType.int and raw_value is not None:
             try:
@@ -426,6 +444,12 @@ async def patch_settings(body: SystemSettingPatch, db: DbDep, user: AdminDep) ->
                 raise HTTPException(400, f"Setting '{key}' requires a positive integer, got: {raw_value!r}")
             if key in NON_NEGATIVE_INT_KEYS and int_value < 0:
                 raise HTTPException(400, f"Setting '{key}' requires a non-negative integer, got: {raw_value!r}")
+            if key == FIX_PLAN_TIMEOUT_KEY and not fix_plan_timeout_is_usable(int_value):
+                raise HTTPException(
+                    400,
+                    f"Setting '{key}' requires a whole number of seconds from "
+                    f"{MIN_FIX_PLAN_TIMEOUT} to {MAX_FIX_PLAN_TIMEOUT}, got: {raw_value!r}",
+                )
         # smtp_port is neither in POSITIVE_INT_KEYS nor NON_NEGATIVE_INT_KEYS
         # (see parse_smtp_port's own docstring), so the generic int check
         # above only confirms it parses as *an* integer — an out-of-range

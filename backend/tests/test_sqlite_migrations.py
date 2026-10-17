@@ -23,6 +23,7 @@ PRE_KIND_REVISION = "b3f81c4d9e27"
 KIND_REVISION = "c7a2e5f01d38"
 PRE_OSV_FAILURES_REVISION = "594fb09ecdfc"
 PRE_REMEDIATIONS_REVISION = "7b0e9bd83541"
+PRE_FIX_PLANS_REVISION = "e4c1a9d2b7f3"
 
 
 def alembic(db_path: str, *args: str) -> subprocess.CompletedProcess:
@@ -454,3 +455,72 @@ class TestRemediationsOnSqlite:
         r = alembic(db_path, "upgrade", "head")
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
         assert self._remediation_tables(db_path) == {"scans": 1, "repo_scan_results": 1}
+
+
+class TestFixPlansOnSqlite:
+    """f1a2b3c4d5e6 on SQLite: credential_type is a bare VARCHAR (no create_constraint), so
+    'package_index' needs no schema change; batch drops on downgrade rebuild tables, so prove
+    rows survive, and prove the link table's FKs enforce under PRAGMA foreign_keys."""
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        path = str(tmp_path / "scratch.db")
+        assert alembic(path, "upgrade", PRE_FIX_PLANS_REVISION).returncode == 0
+        _seed_pre_osv_failures_rows(path)
+        engine = sa.create_engine(f"sqlite:///{path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,is_enabled,"
+                    "created_by_id,created_at,updated_at) VALUES "
+                    "(1,'r','https://example.invalid/r','main','high',1,1,'2026-01-01','2026-01-01')"))
+        finally:
+            engine.dispose()
+        return path
+
+    def test_upgrade_adds_columns_and_accepts_package_index(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO repo_credentials (id,name,credential_type,index_url,created_at,updated_at) "
+                    "VALUES (1,'idx','package_index','https://p.example.invalid','2026-01-01','2026-01-01')"))
+                enabled = conn.execute(sa.text("SELECT fix_plans_enabled FROM repo_scans WHERE id=1")).scalar_one()
+        finally:
+            engine.dispose()
+        assert enabled == 0
+
+    def test_link_rows_cascade_with_foreign_keys_on(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text("PRAGMA foreign_keys = ON"))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_credentials (id,name,credential_type,index_url,created_at,updated_at) "
+                    "VALUES (1,'idx','package_index','https://p.example.invalid','2026-01-01','2026-01-01')"))
+                conn.execute(sa.text("INSERT INTO repo_scan_package_indexes VALUES (1,1)"))
+                conn.execute(sa.text("DELETE FROM repo_scans WHERE id=1"))
+                left = conn.execute(sa.text("SELECT count(*) FROM repo_scan_package_indexes")).scalar_one()
+        finally:
+            engine.dispose()
+        assert left == 0
+
+    def test_downgrade_keeps_rows(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        r = alembic(db_path, "downgrade", PRE_FIX_PLANS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                ids = [row.id for row in conn.execute(sa.text("SELECT id FROM repo_scans"))]
+                ddl = conn.execute(sa.text(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='repo_scans'")).scalar_one()
+                link = conn.execute(sa.text(
+                    "SELECT count(*) FROM sqlite_master WHERE name='repo_scan_package_indexes'")).scalar_one()
+        finally:
+            engine.dispose()
+        assert ids == [1]
+        assert "fix_plans_enabled" not in ddl
+        assert link == 0

@@ -269,6 +269,7 @@ async def _send_result_email(result_id: int) -> None:
                         repo_name=scan.name, branch=scan.branch, pa_version=result.pa_version or "",
                         findings=findings, min_severity=scan.min_notify_severity,
                         recipients=all_recipients, from_addr=smtp_cfg.from_addr,
+                        fix_plan=result.fix_plan,
                     )
                     sent = await svc.send_with_dedup(msg, all_recipients, valkey, lock_key)
 
@@ -308,6 +309,7 @@ async def ingest_repo_scan_result(
     result.osv_failures = body.osv_failures
     result.sources = body.sources
     result.remediations = _dump_remediations(body.remediations)
+    result.fix_plan = body.fix_plan.model_dump() if body.fix_plan is not None else None
     result.error_message = body.error_message
     result.completed_at = utcnow()
 

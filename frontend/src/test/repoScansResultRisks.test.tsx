@@ -33,6 +33,7 @@ vi.mock('@/lib/api', () => ({
 import { useAuth } from '@/hooks/useAuth'
 import { api } from '@/lib/api'
 import RepoScans from '@/pages/RepoScans'
+import { TAG_MUTED, TAG_PASS, TAG_REVIEW } from '@/components/tags'
 
 const mockUser = { id: 1, email: 'u@example.com', display_name: 'U', role: 'admin' as const }
 
@@ -162,5 +163,72 @@ describe('RepoScans result row — risk count', () => {
 
     await screen.findByRole('button', { name: /collapse results/i })
     expect(screen.queryByText(/unchecked/)).not.toBeInTheDocument()
+  })
+})
+
+describe('fix plan chips', () => {
+  const result = (fix_plan: unknown) => ({ id: 9, repo_scan_id: 1, status: 'success', triggered_by: 'manual',
+    pa_version: '0.10.0', finding_count: 0, findings: [], risks: [], risk_failures: 0, osv_failures: 0,
+    sources: null, remediations: null, error_message: null, ecs_task_arn: null, notified: false,
+    started_at: '2026-10-14T00:00:00Z', completed_at: null, fix_plan })
+
+  it.each([
+    [{ status: 'planned', near_timeout: true, duration_seconds: 744, timeout_seconds: 900, plan: { planned: [{}],
+      held: [], verified: true } }, /near time limit \(12m 24s of 15m\)/],
+    [{ status: 'timeout', near_timeout: false, duration_seconds: 900, timeout_seconds: 900, plan: null },
+      /fix plan timed out \(15m\)/],
+    [{ status: 'planned', near_timeout: false, duration_seconds: 60, timeout_seconds: 900, plan: { planned: [{}, {}],
+      held: [], verified: true } }, /2 fixable/],
+  ])('shows the chip', async (fp, text) => {
+    vi.mocked(api.repoScans.results).mockResolvedValue([result(fp)] as any)
+    await expandResults()
+    expect(await screen.findByText(text)).toBeInTheDocument()
+  })
+
+  it.each([
+    ['verified with fixes', { status: 'planned', near_timeout: false, duration_seconds: 60, timeout_seconds: 900,
+      plan: { planned: [{}, {}], held: [], verified: true } }, /^2 fixable$/, TAG_PASS],
+    ['verified with nothing fixable', { status: 'planned', near_timeout: false, duration_seconds: 60,
+      timeout_seconds: 900, plan: { planned: [], held: [{}], verified: true } }, /^nothing fixable$/, TAG_MUTED],
+    ['unverified', { status: 'planned', near_timeout: false, duration_seconds: 60, timeout_seconds: 900,
+      plan: { planned: [{}], held: [], verified: false } }, /^plan unverified$/, TAG_REVIEW],
+    ['near time limit', { status: 'planned', near_timeout: true, duration_seconds: 744, timeout_seconds: 900,
+      plan: { planned: [{}], held: [], verified: true } }, /near time limit/, TAG_REVIEW],
+    ['timed out', { status: 'timeout', near_timeout: false, duration_seconds: 900, timeout_seconds: 900,
+      plan: null }, /fix plan timed out/, TAG_REVIEW],
+  ])('uses the design-system tag class: %s', async (_label, fp, text, cls) => {
+    vi.mocked(api.repoScans.results).mockResolvedValue([result(fp)] as any)
+    await expandResults()
+    const chip = await screen.findByText(text)
+    expect(chip.className).toBe(cls)
+  })
+
+  it('never shows a green "0 fixable" for a verified plan with nothing planned', async () => {
+    vi.mocked(api.repoScans.results).mockResolvedValue([result({ status: 'planned', near_timeout: false,
+      duration_seconds: 60, timeout_seconds: 900, plan: { planned: [], held: [{}], verified: true } })] as any)
+    await expandResults()
+    await screen.findByText('nothing fixable')
+    expect(screen.queryByText(/0 fixable/)).not.toBeInTheDocument()
+  })
+
+  it('reports trials that all failed instead of "nothing fixable"', async () => {
+    // A shared trial failure keeps verified set and plans nothing: a registry error, not a conclusion.
+    vi.mocked(api.repoScans.results).mockResolvedValue([result({ status: 'planned', near_timeout: false,
+      duration_seconds: 60, timeout_seconds: 900, plan: { planned: [], held: [{}], verified: true,
+        trial_failure: 'uv lock failed: 401 Unauthorized' } })] as any)
+    await expandResults()
+    const chip = await screen.findByText('trials failed')
+    expect(chip.className).toBe(TAG_REVIEW)
+    expect(chip).toHaveAttribute('title', 'uv lock failed: 401 Unauthorized')
+    expect(screen.queryByText('nothing fixable')).not.toBeInTheDocument()
+  })
+
+  it('makes a row with only a fix plan expandable', async () => {
+    vi.mocked(api.repoScans.results).mockResolvedValue([result({ status: 'error', error: 'boom',
+      near_timeout: false, duration_seconds: 5, timeout_seconds: 900, plan: null })] as any)
+    const user = await expandResults()
+    const row = await screen.findByText('success')
+    await user.click(row)
+    expect(await screen.findByText('boom')).toBeInTheDocument()
   })
 })

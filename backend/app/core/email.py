@@ -61,6 +61,58 @@ def filter_deliverable_recipients(recipients: list[str]) -> list[str]:
     return result
 
 
+def _fix_plan_section(fix_plan: dict | None) -> tuple[str, int]:
+    """The email's fix-plan text and how many upgrades it proposes ("" and 0 when there is no plan).
+
+    The stored plan was redacted by the scan task; it is re-validated leniently, as on ingest.
+    """
+    import shlex
+
+    from app.schemas import FixPlanResult
+
+    if not isinstance(fix_plan, dict):
+        return "", 0
+    result = FixPlanResult.model_validate(fix_plan)
+    reason = f": {result.error[:300]}" if result.error else ""
+    if result.status == "timeout":
+        return f"Fix plan: timed out after {result.timeout_seconds or '?'}s; see PA Central.\n", 0
+    if result.status == "error":
+        return f"Fix plan: failed{reason}\n", 0
+    if result.status == "unsupported":
+        return f"Fix plan: not supported for this project{reason}\n", 0
+    if result.status != "planned" or result.plan is None:
+        return (f"Fix plan: skipped{reason}\n" if result.status == "skipped" else ""), 0
+    plan = result.plan
+    lockfile = f" ({plan.lockfile or result.lockfile})" if (plan.lockfile or result.lockfile) else ""
+    held = f"Held: {len(plan.held)} (see PA Central for reasons)\n" if plan.held else ""
+    # A failure shared by every trial (registry or network) leaves nothing planned and verified set:
+    # it is not a conclusion that nothing can be upgraded, so it is reported first.
+    failed = f"Trial resolves failed: {plan.trial_failure[:300]}\n" if plan.trial_failure else ""
+    if not plan.planned:
+        if failed:
+            return f"Fix plan{lockfile}: upgrades could not be checked.\n{failed}{held}", 0
+        return f"Fix plan{lockfile}: no upgrades available.\n{held}", 0
+    verdict = "verified" if plan.verified else (
+        f"not verified ({plan.unverified_reason})" if plan.unverified_reason else "not verified")
+    width = max(len(p.package or "?") for p in plan.planned) + 2
+    rows = "\n".join(f"  {(p.package or '?'):<{width}} {p.version or '?'} -> {p.target or '?'}" for p in plan.planned)
+    commands = [shlex.join(str(a) for a in c) if isinstance(c, list) else str(c) for c in plan.commands]
+    cmd_text = "Commands:\n" + "".join(f"  {c}\n" for c in commands) if commands else ""
+    if cmd_text and plan.lock_drift_unchecked:
+        # As package-alert words it; its own --apply refuses such a plan.
+        cmd_text = (f"Warning: {plan.lock_drift_unchecked} version(s) that re-locking the project installs could "
+                    "not be checked for withdrawn releases.\n" + cmd_text)
+    if cmd_text and plan.separate:
+        # As package-alert prints it: these commands apply only the first fix.
+        why = f": {plan.separate_reason}" if plan.separate_reason else ""
+        cmd_text = f"These fixes could not be verified as one command{why}. Only the first is printed.\n{cmd_text}"
+    deferred = [str(d) for d in plan.deferred]
+    if cmd_text and deferred:
+        cmd_text += f"Next, after applying that and re-running pa fix: {', '.join(deferred)}\n"
+    n = len(plan.planned)
+    return (f"Fix plan{lockfile}: {n} upgrade{'s' if n != 1 else ''}, {verdict}:\n{rows}\n{failed}{cmd_text}{held}", n)
+
+
 def build_findings_email(
     repo_name: str,
     branch: str,
@@ -69,10 +121,14 @@ def build_findings_email(
     min_severity: AlertSeverity,
     recipients: list[str],
     from_addr: str,
+    fix_plan: dict | None = None,
 ) -> EmailMessage:
     filtered = filter_findings_by_severity(findings, min_severity)
+    fix_text, fix_count = _fix_plan_section(fix_plan)
     msg = EmailMessage()
-    msg["Subject"] = f"[PA Central] {len(filtered)} vulnerabilities found in {repo_name} ({min_severity.value}+)"
+    fixes = f" — {fix_count} fix{'es' if fix_count != 1 else ''} available" if fix_count else ""
+    msg["Subject"] = (f"[PA Central] {len(filtered)} vulnerabilities found in {repo_name} "
+                      f"({min_severity.value}+){fixes}")
     msg["From"] = from_addr
     msg["To"] = ", ".join(recipients)
 
@@ -87,6 +143,7 @@ def build_findings_email(
         f"{'Package':<30} {'Severity':<10} {'Advisory':<20} Summary\n"
         f"{'-'*80}\n"
         f"{rows}\n"
+        + (f"\n{fix_text}" if fix_text else "")
     )
     return msg
 

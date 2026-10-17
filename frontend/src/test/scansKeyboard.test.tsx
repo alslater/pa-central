@@ -15,7 +15,8 @@ vi.mock('@/hooks/useLiveAlerts', () => ({
 
 vi.mock('@/lib/api', () => ({
   api: {
-    repoScans: { headlines: vi.fn(), exposureHistory: vi.fn().mockResolvedValue({ points: [], window_days: 0 }) },
+    repoScans: { headlines: vi.fn(), exposureHistory: vi.fn().mockResolvedValue({ points: [], window_days: 0 }),
+                 latestFixPlan: vi.fn().mockResolvedValue(null) },
     findings:  { listAllForRepo: vi.fn(), accept: vi.fn(), revokeAccept: vi.fn() },
     risks:     { listAllForRepo: vi.fn(), accept: vi.fn(), revokeAccept: vi.fn() },
   },
@@ -37,6 +38,7 @@ const baseHeadline = {
   open_risks_by_level: { critical: 0, warning: 0, info: 0 },
   breach: false,
   breach_count: 0,
+  fix_count: null,
 }
 
 function renderScans() {

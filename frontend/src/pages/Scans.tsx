@@ -1,9 +1,10 @@
-// Scans page — one row per repo scan project, expand for Findings/Risks
+// Scans page — one row per repo scan project, expand for Findings/Risks/Fix plan
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, RepoScanHeadline, FindingRecord, RiskRecord, ExposureHistory } from '@/lib/api'
+import { api, RepoScanHeadline, FindingRecord, RiskRecord, ExposureHistory, FixPlanResult } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, RepoScanStatusBadge, SeverityBadge, RiskLevelBadge, RecordTabs, Empty, Input, timeAgo, useToast } from '@/components/ui'
 import { ExposureChart } from '@/components/ExposureChart'
+import { TAG_PASS } from '@/components/tags'
 import { useAuth } from '@/hooks/useAuth'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 
@@ -22,6 +23,7 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
   const [findings, setFindings] = useState<FindingRecord[] | null>(null)
   const [risks, setRisks] = useState<RiskRecord[] | null>(null)
   const [exposureHistory, setExposureHistory] = useState<ExposureHistory | null>(null)
+  const [fixPlan, setFixPlan] = useState<FixPlanResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [detailError, setDetailError] = useState(false)
   // Guards against overlapping loadDetail calls (e.g. rapid accept/revoke,
@@ -38,10 +40,12 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
       api.findings.listAllForRepo(headline.id),
       api.risks.listAllForRepo(headline.id),
       isAdmin ? api.repoScans.exposureHistory(headline.id).catch(() => null) : Promise.resolve(null),
+      // A plan that fails to load must not hide the findings; the headline chip still shows the count.
+      api.repoScans.latestFixPlan(headline.id).catch(() => null),
     ])
-      .then(([f, r, eh]) => {
+      .then(([f, r, eh, fp]) => {
         if (seq !== requestSeq.current) return
-        setFindings(f); setRisks(r); setExposureHistory(eh)
+        setFindings(f); setRisks(r); setExposureHistory(eh); setFixPlan(fp?.fix_plan ?? null)
       })
       .catch((e: Error) => {
         if (seq !== requestSeq.current) return
@@ -84,6 +88,9 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
               <span className="text-[11px] font-semibold">{headline.open_risks_by_level[l]}</span>
             </span>
           ))}
+          {!!headline.fix_count && (
+            <span className={TAG_PASS}>{headline.fix_count} {headline.fix_count === 1 ? 'fix' : 'fixes'}</span>
+          )}
           {headline.breach && (
             <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-status-fail/12 text-status-fail-text">
               SLA breach ×{headline.breach_count}
@@ -115,7 +122,7 @@ function ProjectRow({ headline, isExpanded, onToggle, show, onChanged }: {
                   desc="Weighted severity of open, unaccepted findings for this repo scan, by day."
                 />
               )}
-              <RecordTabs findings={findings} risks={risks} show={show} onChanged={() => { loadDetail(true); onChanged() }} />
+              <RecordTabs findings={findings} risks={risks} fixPlan={fixPlan} show={show} onChanged={() => { loadDetail(true); onChanged() }} />
             </>
           )}
         </div>
