@@ -80,6 +80,7 @@ def post_result(
     remediations: list[dict] | None = None,
     error_message: str | None = None,
     fix_plan: dict | None = None,
+    checks: dict[str, Any] | None = None,
 ) -> None:
     import httpx
     payload: dict[str, Any] = {
@@ -88,6 +89,7 @@ def post_result(
         "finding_count": finding_count,
         "risk_failures": risk_failures,
         "osv_failures": osv_failures,
+        **(checks or {}),
     }
     if pa_version:
         payload["pa_version"] = pa_version
@@ -217,14 +219,18 @@ def scan_env() -> dict[str, str]:
     return {k: os.environ[k] for k in _SCAN_ENV_KEYS if k in os.environ}
 
 
+# How much of the scan was really checked, forwarded from pa scan-project's JSON as sent.
+SCAN_CHECK_KEYS = ("not_public", "yank_checked", "yanked", "yank_failures")
+
+
 def run_pa_scan(
     repo_path: Path,
     config_toml: str,
     scan_flags: str = "",
     subfolder: str = "",
-) -> tuple[int, list[dict], list[dict] | None, int, int, list[str], list[dict] | None]:
+) -> tuple[int, list[dict], list[dict] | None, int, int, list[str], list[dict] | None, dict[str, Any]]:
     """Run pa scan-project. Returns (finding_count, findings, risks, risk_failures,
-    osv_failures, sources, remediations).
+    osv_failures, sources, remediations, checks).
 
     risks is None (not []) when the key is absent from pa's JSON output — an
     older package-alert binary that predates risk scoring — so the backend
@@ -243,6 +249,10 @@ def run_pa_scan(
     package-alert < 0.9.0 — so the backend can tell "no advice available" (old pa)
     apart from "no vulnerable packages" (clean scan). package-alert >= 0.9.0
     includes the key even for a clean scan.
+
+    checks holds the SCAN_CHECK_KEYS pa sent, as sent (package-alert #121: not_public,
+    yank_checked, and yanked / yank_failures, null when the yank check did not run). A
+    key an older pa does not send stays absent, so the server applies its own default.
     """
     import shlex
     cmd = [str(Path(sys.executable).parent / "pa"), "scan-project", "--format", "json"]
@@ -309,7 +319,8 @@ def run_pa_scan(
     remediations = data.get("remediations")
     if not isinstance(remediations, list):
         remediations = None
-    return len(findings), findings, risks, risk_failures, osv_failures, sources, remediations
+    checks = {k: data[k] for k in SCAN_CHECK_KEYS if k in data}
+    return len(findings), findings, risks, risk_failures, osv_failures, sources, remediations, checks
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -368,7 +379,7 @@ def main() -> None:
         try:
             scan_flags = get_env("PA_SCAN_FLAGS", "")
             subfolder = get_env("PA_SUBFOLDER", "")
-            finding_count, findings, risks, risk_failures, osv_failures, sources, remediations = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
+            finding_count, findings, risks, risk_failures, osv_failures, sources, remediations, checks = run_pa_scan(repo_path, config_toml, scan_flags, subfolder)
         except RuntimeError as exc:
             post_result(fleet_url, fleet_key, result_id, "failed",
                         pa_version=pa_version, error_message=str(exc))
@@ -408,6 +419,7 @@ def main() -> None:
             osv_failures=osv_failures,
             sources=sources or None,
             remediations=remediations,
+            checks=checks,
         )
         try:
             post_result(fleet_url, fleet_key, result_id, "success", fix_plan=fix_result, **success)

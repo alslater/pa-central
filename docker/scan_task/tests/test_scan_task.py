@@ -170,7 +170,7 @@ def test_run_pa_scan_parses_json_output(tmp_path):
     output = json.dumps({"findings": findings, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout=output, stderr="")
-        count, result, risks, risk_failures, _, sources, _ = scan_task.run_pa_scan(tmp_path, "")
+        count, result, risks, risk_failures, _, sources, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert count == 1
     assert result[0]["package"] == "requests"
     assert risks is None
@@ -207,7 +207,7 @@ def test_run_pa_scan_missing_risks_key_is_none_not_empty_list(tmp_path):
     output = json.dumps({"findings": [], "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        _, _, risks, _, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        _, _, risks, _, _, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert risks is None
 
 
@@ -216,7 +216,7 @@ def test_run_pa_scan_parses_risks(tmp_path):
     output = json.dumps({"findings": [], "risks": risks, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        count, result, result_risks, risk_failures, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        count, result, result_risks, risk_failures, _, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert count == 0
     assert result == []
     assert result_risks == risks
@@ -227,7 +227,7 @@ def test_run_pa_scan_parses_risk_failures(tmp_path):
     output = json.dumps({"findings": [], "risks": [], "risk_failures": 3, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        _, _, risks, risk_failures, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        _, _, risks, risk_failures, _, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert risks == []
     assert risk_failures == 3
 
@@ -236,7 +236,7 @@ def test_run_pa_scan_parses_osv_failures(tmp_path):
     output = json.dumps({"findings": [], "osv_failures": 5, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        _, _, _, _, osv_failures, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        _, _, _, _, osv_failures, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert osv_failures == 5
 
 
@@ -244,14 +244,14 @@ def test_run_pa_scan_missing_osv_failures_defaults_to_zero(tmp_path):
     output = json.dumps({"findings": [], "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        _, _, _, _, osv_failures, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        _, _, _, _, osv_failures, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert osv_failures == 0
 
 
 def test_run_pa_scan_empty_findings(tmp_path):
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = _fake_run()
-        count, result, risks, risk_failures, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
+        count, result, risks, risk_failures, _, _, _, _ = scan_task.run_pa_scan(tmp_path, "")
     assert count == 0
     assert result == []
     assert risks is None
@@ -407,7 +407,7 @@ def test_main_success_posts_success_result(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(1, findings, [], 0, 0, [], None)), \
+         patch("scan_task.run_pa_scan", return_value=(1, findings, [], 0, 0, [], None, {})), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -423,7 +423,7 @@ def test_main_success_forwards_risks(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], risks, 0, 0, [], None)), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], risks, 0, 0, [], None, {})), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -436,7 +436,7 @@ def test_main_success_forwards_risk_failures(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], [], 2, 0, [], None)), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 2, 0, [], None, {})), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -449,7 +449,7 @@ def test_main_success_forwards_osv_failures(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 5, [], None)), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 5, [], None, {})), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -462,7 +462,7 @@ def test_main_cleans_up_tempdir_on_success(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 0, [], None)), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 0, [], None, {})), \
          patch("scan_task.post_result"), \
          patch("shutil.rmtree") as mock_rm, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
@@ -492,7 +492,7 @@ def test_run_pa_scan_parses_remediations(tmp_path):
     output = json.dumps({"findings": [], "remediations": remediations, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=1, stdout=output, stderr="")
-        *_, result_remediations = scan_task.run_pa_scan(tmp_path, "")
+        *_, result_remediations, _ = scan_task.run_pa_scan(tmp_path, "")
     assert result_remediations == remediations
 
 
@@ -502,7 +502,7 @@ def test_run_pa_scan_missing_remediations_is_none(tmp_path):
     reads as "no advice available" rather than "no vulnerable packages"."""
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = _fake_run()
-        *_, remediations = scan_task.run_pa_scan(tmp_path, "")
+        *_, remediations, _ = scan_task.run_pa_scan(tmp_path, "")
     assert remediations is None
 
 
@@ -510,7 +510,7 @@ def test_run_pa_scan_non_list_remediations_is_none(tmp_path):
     output = json.dumps({"findings": [], "remediations": {"oops": 1}, "sources": []})
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
-        *_, remediations = scan_task.run_pa_scan(tmp_path, "")
+        *_, remediations, _ = scan_task.run_pa_scan(tmp_path, "")
     assert remediations is None
 
 
@@ -520,7 +520,7 @@ def test_main_success_forwards_remediations(tmp_path):
          patch("scan_task.install_pa"), \
          patch("scan_task.fetch_secret", return_value="token"), \
          patch("scan_task.clone_repo"), \
-         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 0, [], remediations)), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 0, [], remediations, {})), \
          patch("scan_task.post_result") as mock_post, \
          patch("tempfile.mkdtemp", return_value=str(tmp_path)):
         scan_task.main()
@@ -542,6 +542,69 @@ def test_post_result_omits_remediations_when_none():
     assert "remediations" not in mock_post.call_args[1]["json"]
 
 
+
+# --- not_public and yank results (package-alert #121) ---
+
+def test_run_pa_scan_returns_the_scan_checks_as_sent(tmp_path):
+    yanked = [{"ecosystem": "PyPI", "package": "requests", "version": "2.32.0", "reason": "broken"}]
+    output = json.dumps({"findings": [], "sources": [], "not_public": 2, "yank_checked": True,
+                         "yanked": yanked, "yank_failures": 1})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
+        *_, checks = scan_task.run_pa_scan(tmp_path, "")
+    assert checks == {"not_public": 2, "yank_checked": True, "yanked": yanked, "yank_failures": 1}
+
+
+def test_run_pa_scan_forwards_null_yank_results_for_an_unchecked_scan(tmp_path):
+    """--no-yank / --scan-installed: package-alert sends null, which must reach the server as null."""
+    output = json.dumps({"findings": [], "sources": [], "not_public": 0, "yank_checked": False,
+                         "yanked": None, "yank_failures": None})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
+        *_, checks = scan_task.run_pa_scan(tmp_path, "")
+    assert checks == {"not_public": 0, "yank_checked": False, "yanked": None, "yank_failures": None}
+
+
+def test_run_pa_scan_omits_checks_an_older_package_alert_does_not_send(tmp_path):
+    """Absent keys stay absent, so the server applies its own defaults (not checked)."""
+    output = json.dumps({"findings": [], "sources": [], "yanked": [], "yank_failures": 0})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
+        *_, checks = scan_task.run_pa_scan(tmp_path, "")
+    assert checks == {"yanked": [], "yank_failures": 0}
+
+
+def test_run_pa_scan_ignores_unrelated_keys(tmp_path):
+    output = json.dumps({"findings": [], "sources": [], "repo_scan_result_id": 999, "status": "failed"})
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=output, stderr="")
+        *_, checks = scan_task.run_pa_scan(tmp_path, "")
+    assert checks == {}
+
+
+def test_post_result_includes_the_scan_checks():
+    with patch("httpx.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=204, raise_for_status=lambda: None)
+        scan_task.post_result("http://f", "k", 1, "success",
+                              checks={"not_public": 2, "yank_checked": False, "yanked": None})
+    payload = mock_post.call_args[1]["json"]
+    assert (payload["not_public"], payload["yank_checked"], payload["yanked"]) == (2, False, None)
+
+
+def test_main_success_forwards_the_scan_checks(tmp_path):
+    checks = {"not_public": 3, "yank_checked": True, "yanked": [], "yank_failures": 0}
+    with patch.dict(os.environ, BASE_ENV), \
+         patch("scan_task.install_pa"), \
+         patch("scan_task.fetch_secret", return_value="token"), \
+         patch("scan_task.clone_repo"), \
+         patch("scan_task.run_pa_scan", return_value=(0, [], [], 0, 0, [], None, checks)), \
+         patch("scan_task.post_result") as mock_post, \
+         patch("tempfile.mkdtemp", return_value=str(tmp_path)):
+        scan_task.main()
+    mock_post.assert_called_once()
+    assert mock_post.call_args[1]["checks"] == checks
+
+
 # --- fix plans wiring ---
 
 def _main_with(monkeypatch, *, fix_plans, finding_count, fix_result=None, remote_clean=True):
@@ -553,7 +616,7 @@ def _main_with(monkeypatch, *, fix_plans, finding_count, fix_result=None, remote
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: remote_clean)
     monkeypatch.setattr(scan_task, "run_pa_scan",
-                        lambda *a, **k: (finding_count, [], [], 0, 0, [], None))
+                        lambda *a, **k: (finding_count, [], [], 0, 0, [], None, {}))
     result = fix_result or {"status": "planned"}
     monkeypatch.setattr(scan_task.fix_plan, "run_fix", lambda *a, **k: result)
     monkeypatch.setattr(scan_task, "post_result", lambda *a, **k: posted.update(k, status=a[3]))
@@ -599,7 +662,7 @@ def test_a_malformed_package_indexes_error_carries_timing_fields(monkeypatch):
     monkeypatch.setattr(scan_task, "install_pa", lambda v: None)
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: True)
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None, {}))
     monkeypatch.setattr(scan_task, "post_result", lambda *a, **k: posted.update(k, status=a[3]))
     scan_task.main()
     fp = posted["fix_plan"]
@@ -636,7 +699,7 @@ def test_a_non_numeric_fix_plan_timeout_falls_back_to_900(monkeypatch):
     monkeypatch.setattr(scan_task, "fetch_secret", lambda *a, **k: "token")
     monkeypatch.setattr(scan_task, "install_pa", lambda v: None)
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None, {}))
     monkeypatch.setenv("FIX_PLANS", "1")
     scan_task.main()
     assert posted["fix_plan"]["timeout_seconds"] == 900
@@ -656,7 +719,7 @@ def test_subfolder_reaches_run_fix_as_scan_dir(monkeypatch):
     monkeypatch.setattr(scan_task, "install_pa", lambda v: None)
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: True)
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None, {}))
     scan_task.main()
     assert got["scan_dir"].name == "backend"
     assert got["scan_dir"].parent.resolve() == got["repo"].resolve()
@@ -677,7 +740,7 @@ def test_an_unexpected_run_fix_exception_still_posts_success(monkeypatch):
     monkeypatch.setattr(scan_task, "install_pa", lambda v: None)
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: True)
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None, {}))
     scan_task.main()
     assert posted["status"] == "success" and posted["fix_plan"]["status"] == "error"
     assert "kaboom" in posted["fix_plan"]["error"]
@@ -703,7 +766,7 @@ def test_run_fix_gets_resolved_paths_when_the_workdir_is_behind_a_symlink(monkey
     monkeypatch.setattr(scan_task, "install_pa", lambda v: None)
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: True)
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [], [], 0, 0, [], None, {}))
     with patch("tempfile.mkdtemp", return_value=str(link)):
         scan_task.main()
     assert got["repo"] == (real / "repo").resolve()
@@ -730,7 +793,7 @@ def _run_main_posting(monkeypatch, responses, *, fix_plans="1"):
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: True)
     findings = [{"package": "flask"}]
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, findings, [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, findings, [], 0, 0, [], None, {}))
     monkeypatch.setattr(scan_task.fix_plan, "run_fix", lambda *a, **k: {"status": "planned", "plan": {"x": 1}})
     statuses = iter(responses)
 
@@ -778,7 +841,7 @@ def test_a_plan_httpx_cannot_encode_is_replaced_by_an_error_and_posted(monkeypat
     monkeypatch.setattr(scan_task, "install_pa", lambda v: None)
     monkeypatch.setattr(scan_task, "clone_repo", lambda *a, **k: None)
     monkeypatch.setattr(scan_task.fix_plan, "strip_remote_credentials", lambda *a: True)
-    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [{"package": "flask"}], [], 0, 0, [], None))
+    monkeypatch.setattr(scan_task, "run_pa_scan", lambda *a, **k: (1, [{"package": "flask"}], [], 0, 0, [], None, {}))
     monkeypatch.setattr(scan_task.fix_plan, "run_fix",
                         lambda *a, **k: {"status": "planned", "plan": {"duration": float("nan")}})
     sent = []

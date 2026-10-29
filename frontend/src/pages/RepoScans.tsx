@@ -4,7 +4,7 @@ import {
 } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { useAuth } from '@/hooks/useAuth'
-import { Card, Button, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, ScanDetailTabs, timeAgo } from '@/components/ui'
+import { Card, Button, Input, Select, Modal, useToast, Empty, RepoScanStatusBadge, ScanDetailTabs, ScanCheckChips, yankedOf, timeAgo } from '@/components/ui'
 import { Plus, Trash2, Play, ChevronDown, ChevronUp, RefreshCw, KeyRound, Settings2 } from 'lucide-react'
 import { CronField } from '@/components/CronField'
 import { formatDuration } from '@/components/FixPlanPanel'
@@ -243,16 +243,18 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
         const hasRiskFailures = (r.risk_failures ?? 0) > 0
         const hasOsvFailures = (r.osv_failures ?? 0) > 0
         const hasFixPlan = !!r.fix_plan
+        const yanked = yankedOf(r)
+        const hasDetail = !!hasFindings || !!hasRisks || hasFixPlan || yanked.length > 0
         const isExpanded = expandedId === r.id
         return (
           <div key={r.id} className="result-row">
             <div
-              className={`result-row-content ${(hasFindings || hasRisks || hasFixPlan) ? 'result-row-clickable' : 'result-row-static'}`}
-              onClick={() => (hasFindings || hasRisks || hasFixPlan) && setExpandedId(isExpanded ? null : r.id)}
-              onKeyDown={e => { if ((hasFindings || hasRisks || hasFixPlan) && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
-              role={(hasFindings || hasRisks || hasFixPlan) ? 'button' : undefined}
-              tabIndex={(hasFindings || hasRisks || hasFixPlan) ? 0 : undefined}
-              aria-expanded={(hasFindings || hasRisks || hasFixPlan) ? isExpanded : undefined}
+              className={`result-row-content ${hasDetail ? 'result-row-clickable' : 'result-row-static'}`}
+              onClick={() => hasDetail && setExpandedId(isExpanded ? null : r.id)}
+              onKeyDown={e => { if (hasDetail && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setExpandedId(isExpanded ? null : r.id) } }}
+              role={hasDetail ? 'button' : undefined}
+              tabIndex={hasDetail ? 0 : undefined}
+              aria-expanded={hasDetail ? isExpanded : undefined}
             >
               <RepoScanStatusBadge status={r.status} />
               <span className="result-trigger-label">
@@ -291,6 +293,7 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
                   ⚠ {r.osv_failures} unchecked
                 </span>
               )}
+              <ScanCheckChips scan={r} chipClass="result-finding-count" />
               {r.fix_plan?.status === 'planned' && r.fix_plan.plan && (
                 // A failure shared by every trial leaves verified set and nothing planned: not "nothing fixable".
                 r.fix_plan.plan.trial_failure ? (
@@ -323,7 +326,7 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
               <span className="result-timestamp">
                 {r.started_at ? timeAgo(r.started_at) : ''}
               </span>
-              {(hasFindings || hasRisks || hasFixPlan) && (
+              {hasDetail && (
                 <span className="result-chevron">
                   {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </span>
@@ -340,9 +343,9 @@ function ResultsPanel({ scan, refreshKey }: { scan: RepoScan; refreshKey?: numbe
             {r.error_message && (
               <pre className="result-error-pre">{r.error_message}</pre>
             )}
-            {isExpanded && (hasFindings || hasRisks || hasFixPlan) && (
+            {isExpanded && hasDetail && (
               <div className="result-findings-expanded">
-                <ScanDetailTabs findings={r.findings} risks={r.risks} remediations={r.remediations} fixPlan={r.fix_plan} />
+                <ScanDetailTabs findings={r.findings} risks={r.risks} remediations={r.remediations} fixPlan={r.fix_plan} yanked={yanked} />
               </div>
             )}
           </div>

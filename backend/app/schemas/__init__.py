@@ -18,6 +18,7 @@ from pydantic import (
     ValidationError,
     computed_field,
     field_validator,
+    model_validator,
 )
 
 from app.core.security import MAX_PASSWORD_BYTES
@@ -532,6 +533,64 @@ def _drop_invalid_remediations(v: Any) -> Any:
 IngestRemediations = Annotated[list[Remediation] | None, BeforeValidator(_drop_invalid_remediations)]
 
 
+class YankedVersion(BaseModel):
+    """A locked version its registry has yanked (package-alert's yank check)."""
+    model_config = ConfigDict(extra="ignore")
+
+    ecosystem: str | None = None
+    package: str | None = None
+    version: str | None = None
+    reason: str | None = None
+
+
+def _drop_invalid_yanked(v: Any) -> Any:
+    """As _drop_invalid_remediations: keep valid entries, treat a non-list as absent."""
+    if v is None:
+        return None
+    if not isinstance(v, list):
+        log.warning("Ignoring non-list yanked value (%s)", type(v).__name__)
+        return None
+    kept: list[YankedVersion] = []
+    for entry in v:
+        try:
+            kept.append(YankedVersion.model_validate(entry))
+        except ValidationError:
+            log.warning("Dropping malformed yanked entry: %.200r", entry)
+    return kept
+
+
+class ScanChecks(BaseModel):
+    """How much of a scan was really checked, beyond osv_failures/risk_failures (package-alert #121).
+
+    Sent by the central plugin and by `pa scan-project --format json`. Without yank_checked
+    (a package-alert older than the field) whether the yank check ran is unknown, so it is
+    treated as not run; when it did not run, yanked and yank_failures are stored as null
+    whatever was sent, since "nothing yanked" would claim a check that never happened.
+    """
+
+    # See RepoScanResultIngest.risk_failures for why negative counts are rejected.
+    not_public: int = Field(0, ge=0)
+    yank_checked: bool = False
+    yanked: Annotated[list[YankedVersion] | None, BeforeValidator(_drop_invalid_yanked)] = None
+    yank_failures: int | None = Field(None, ge=0)
+
+    @model_validator(mode="after")
+    def _no_yank_results_without_a_check(self) -> ScanChecks:
+        if not self.yank_checked:
+            self.yanked = None
+            self.yank_failures = None
+        return self
+
+    def dump_checks(self) -> dict[str, Any]:
+        """The columns these fields map to, for Scan and RepoScanResult alike."""
+        return {
+            "not_public": self.not_public,
+            "yank_checked": self.yank_checked,
+            "yanked": [y.model_dump() for y in self.yanked] if self.yanked is not None else None,
+            "yank_failures": self.yank_failures,
+        }
+
+
 # ── Fix plan (package-alert `pa fix --format json`) ───────────────────────────
 #
 # Stored as the scan task posted it and displayed verbatim: pa-central never re-derives a
@@ -786,7 +845,7 @@ IngestFixPlan = Annotated[FixPlanResult | None, BeforeValidator(_fix_plan_or_non
 
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
-class ScanPayload(BaseModel):
+class ScanPayload(ScanChecks):
     """Uploaded by pa agent (output of pa scan-project --format json).
 
     Accepts both `project_path` and `root` (package-alert's JSON key) for
@@ -829,6 +888,10 @@ class ScanOut(OrmBase):
     risks: list[dict] | None
     risk_failures: int
     osv_failures: int
+    not_public: int
+    yank_checked: bool
+    yanked: list[YankedVersion] | None
+    yank_failures: int | None
     sources: list[str] | None
     remediations: list[Remediation] | None = None
     scanned_at: datetime
@@ -1179,6 +1242,10 @@ class RepoScanResultOut(OrmBase):
     risks: list[dict] | None
     risk_failures: int
     osv_failures: int
+    not_public: int
+    yank_checked: bool
+    yanked: list[YankedVersion] | None
+    yank_failures: int | None
     sources: list[str] | None
     remediations: list[Remediation] | None = None
     fix_plan: FixPlanResultOut | None = None
@@ -1198,7 +1265,7 @@ class RepoScanResultWithName(RepoScanResultOut):
     scan_breach_count: int
 
 
-class RepoScanResultIngest(BaseModel):
+class RepoScanResultIngest(ScanChecks):
     """Posted by scan task to report outcome."""
     repo_scan_result_id: int
     status: RepoScanStatus
