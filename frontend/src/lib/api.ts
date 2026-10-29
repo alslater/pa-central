@@ -143,6 +143,11 @@ export interface Remediation {
   in_cooldown: boolean | null
 }
 
+/** A locked version its registry has yanked (package-alert's yank check). */
+export interface YankedVersion {
+  ecosystem: string | null; package: string | null; version: string | null; reason: string | null
+}
+
 export interface Scan {
   id: number; host_id: number; project_path: string
   scan_type: string; status: ScanStatus; finding_count: number
@@ -152,6 +157,12 @@ export interface Scan {
   risk_failures: number
   /** Packages package-alert could not check against OSV this scan. Nonzero means an empty `findings` list may reflect a failed OSV lookup, not a clean scan — see ScanStatus 'degraded'. */
   osv_failures: number
+  /** Packages from a private registry, git or a local path, deliberately never looked up publicly. Informational, never a failure. */
+  not_public: number
+  /** Whether package-alert's yank check ran. When false, yanked and yank_failures are null: "nothing yanked" would claim a check that never ran. */
+  yank_checked: boolean
+  yanked: YankedVersion[] | null
+  yank_failures: number | null
   sources: string[] | null
   /** Per-package upgrade advice; null for scans from package-alert < 0.9.0 (and host scans until the plugin sends it). */
   remediations: Remediation[] | null
@@ -286,6 +297,12 @@ export interface RepoScanResult {
    *  not a clean scan — see finding_lifecycle.update_finding_records on the
    *  backend for the same rule. */
   osv_failures: number
+  /** Packages from a private registry, git or a local path, deliberately never looked up publicly. Informational, never a failure. */
+  not_public: number
+  /** Whether package-alert's yank check ran. When false, yanked and yank_failures are null: "nothing yanked" would claim a check that never ran. */
+  yank_checked: boolean
+  yanked: YankedVersion[] | null
+  yank_failures: number | null
   sources: string[] | null
   /** Per-package upgrade advice; null for scans from package-alert < 0.9.0 (and host scans until the plugin sends it). */
   remediations: Remediation[] | null

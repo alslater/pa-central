@@ -119,6 +119,7 @@ async def ingest_scan(
         risks=body.risks,
         risk_failures=body.risk_failures,
         osv_failures=body.osv_failures,
+        **body.dump_checks(),
         sources=body.sources,
         remediations=_dump_remediations(body.remediations),
         scanned_at=body.scanned_at or utcnow(),
@@ -307,6 +308,8 @@ async def ingest_repo_scan_result(
     result.risks = body.risks
     result.risk_failures = body.risk_failures
     result.osv_failures = body.osv_failures
+    for column, value in body.dump_checks().items():
+        setattr(result, column, value)
     result.sources = body.sources
     result.remediations = _dump_remediations(body.remediations)
     result.fix_plan = body.fix_plan.model_dump() if body.fix_plan is not None else None

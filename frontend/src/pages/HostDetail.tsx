@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router'
 import { api, Host, Alert, Scan, ConfigTemplate } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
-import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, Input, useToast, Empty, ScanDetailTabs, timeAgo } from '@/components/ui'
+import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, Input, useToast, Empty, ScanDetailTabs, ScanCheckChips, yankedOf, timeAgo } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useRovingTabs } from '@/lib/hooks'
 import { ArrowLeft, Bell, ScanSearch, Settings2 } from 'lucide-react'
@@ -208,7 +208,8 @@ function HostScans({ hostId }: { hostId: number }) {
         const hasRisks = !!s.risks?.length
         const hasRiskFailures = (s.risk_failures ?? 0) > 0
         const hasOsvFailures = (s.osv_failures ?? 0) > 0
-        const hasDetail = hasFindings || hasRisks
+        const yanked = yankedOf(s)
+        const hasDetail = hasFindings || hasRisks || yanked.length > 0
         const isExpanded = expanded === s.project_path
         return (
         <Card key={s.project_path}>
@@ -263,11 +264,12 @@ function HostScans({ hostId }: { hostId: number }) {
                 ⚠ {s.osv_failures} unchecked
               </span>
             )}
+            <ScanCheckChips scan={s} chipClass="host-scan-count" />
             <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>
           </div>
           {isExpanded && hasDetail && (
             <div className="host-scan-findings-panel">
-              <ScanDetailTabs findings={s.findings} risks={s.risks} remediations={s.remediations} />
+              <ScanDetailTabs findings={s.findings} risks={s.risks} remediations={s.remediations} yanked={yanked} />
             </div>
           )}
         </Card>

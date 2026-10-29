@@ -263,6 +263,11 @@ class Scan(Base):
     risk_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Packages package-alert could not check against OSV — see ScanStatus.degraded.
     osv_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # See RepoScanResult.not_public / yank_checked.
+    not_public: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    yank_checked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    yanked: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    yank_failures: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # e.g. ["Python (requirements.txt)", "Node.js (package-lock.json)"]
     # package-alert >= 0.9.0 per-package upgrade advice, stored as emitted
     # (schemas.Remediation). NULL for older pa versions and for host scans
@@ -455,6 +460,16 @@ class RepoScanResult(Base):
     # scan — see finding_lifecycle.update_finding_records, which reads this
     # to decide whether it's safe to close absent findings.
     osv_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Packages from a private registry, git or a local path, deliberately never looked up
+    # publicly. Unlike osv_failures it does not affect closing absent findings: such a
+    # package is skipped the same way on every scan, so it can never look fixed.
+    not_public: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Whether package-alert's yank check ran. When it did not (scheduled scans,
+    # --scan-installed, --no-yank, or a pa older than the field), yanked and yank_failures
+    # are NULL: "nothing yanked" would claim a check that never happened.
+    yank_checked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    yanked: Mapped[list | None] = mapped_column(JSON, nullable=True)  # schemas.YankedVersion
+    yank_failures: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # package-alert >= 0.9.0 per-package upgrade advice, stored as emitted
     # (schemas.Remediation). NULL for scans run on older pa versions.

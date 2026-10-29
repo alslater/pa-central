@@ -1,6 +1,6 @@
 import { useState, useEffect, useEffectEvent, useRef, useCallback, useMemo, useId, forwardRef } from 'react'
 import type { CSSProperties, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
-import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus, type Remediation, type FixPlanResult } from '@/lib/api'
+import { api, AlertSeverity, DaemonStatus, FindingRecord, RiskRecord, ScanStatus, type Remediation, type FixPlanResult, type YankedVersion } from '@/lib/api'
 import { FixPlanPanel } from '@/components/FixPlanPanel'
 import { TAG, TAG_REVIEW, TAG_MUTED } from '@/components/tags'
 
@@ -1249,20 +1249,24 @@ export function RisksTable({ risks }: { risks: Record<string, unknown>[] }) {
 // the reader to scroll past one to reach the other. When only one of the two
 // is present, that table renders directly with no tab bar — a single-type
 // result shouldn't gain tab chrome it doesn't need.
-type ScanDetailTab = 'findings' | 'risks' | 'fix'
+type ScanDetailTab = 'findings' | 'risks' | 'fix' | 'yanked'
 
 export function ScanDetailTabs({
-  findings, risks, remediations, fixPlan,
+  findings, risks, remediations, fixPlan, yanked,
 }: {
   findings: Record<string, unknown>[] | null | undefined
   risks: Record<string, unknown>[] | null | undefined
   remediations?: Remediation[] | null
   fixPlan?: FixPlanResult | null
+  /** Locked versions their registry has yanked; null when the yank check did not run. */
+  yanked?: YankedVersion[] | null
 }) {
   const hasFindings = !!findings?.length
   const hasRisks = !!risks?.length
-  const present = (['findings', 'risks', 'fix'] as const).filter(
-    t => t === 'findings' ? hasFindings : t === 'risks' ? hasRisks : !!fixPlan)
+  const has: Record<ScanDetailTab, boolean> = {
+    findings: hasFindings, risks: hasRisks, fix: !!fixPlan, yanked: !!yanked?.length,
+  }
+  const present = (['findings', 'risks', 'fix', 'yanked'] as const).filter(t => has[t])
   // The requested tab can vanish when the data changes (a refresh drops the fix plan): show the
   // first tab present then, or every panel is hidden and keyboard navigation finds no current tab.
   const [requested, setTab] = useState<ScanDetailTab>(present[0] ?? 'findings')
@@ -1279,6 +1283,7 @@ export function ScanDetailTabs({
     },
     risks: { label: `Risks (${risks?.length ?? 0})`, panel: <RisksTable risks={risks ?? []} /> },
     fix: { label: 'Fix plan', panel: fixPlan ? <FixPlanPanel fixPlan={fixPlan} /> : null },
+    yanked: { label: `Yanked (${yanked?.length ?? 0})`, panel: <YankedTable yanked={yanked ?? []} /> },
   }
 
   if (present.length === 1) return <>{tabs[present[0]].panel}</>
@@ -1310,6 +1315,62 @@ export function ScanDetailTabs({
         </div>
       ))}
     </div>
+  )
+}
+
+function YankedTable({ yanked }: { yanked: YankedVersion[] }) {
+  return (
+    <table className="w-full text-left">
+      <thead><tr className="text-style-caption"><th scope="col" className="px-3">Package</th><th scope="col" className="px-3">Version</th>
+        <th scope="col" className="px-3">Ecosystem</th><th scope="col" className="px-3">Reason</th></tr></thead>
+      <tbody>
+        {yanked.map((y, i) => (
+          <tr key={`${y.ecosystem}-${y.package}-${y.version}-${i}`} className="text-style-body-small">
+            <td className="px-3">{y.package}</td><td className="px-3">{y.version}</td>
+            <td className="px-3">{y.ecosystem}</td><td className="px-3">{y.reason}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+// ── Scan check chips (package-alert #121) ──────────────────────────────────────
+
+type ScanChecks = { not_public: number; yank_checked: boolean; yanked: YankedVersion[] | null; yank_failures: number | null }
+
+/** Yanked versions to show for a scan; empty when the yank check did not run. */
+export function yankedOf(scan: ScanChecks): YankedVersion[] {
+  return scan.yank_checked ? scan.yanked ?? [] : []
+}
+
+/** The not-public and yank chips beside a scan's other counts, in the caller's chip class.
+ *  Yank results show only when the check ran: "0 yanked" would claim a check that never
+ *  happened, and a clean check needs no chip. */
+export function ScanCheckChips({ scan, chipClass }: { scan: ScanChecks; chipClass: string }) {
+  const yankedCount = yankedOf(scan).length
+  const yankFailures = scan.yank_checked ? scan.yank_failures ?? 0 : 0
+  return (
+    <>
+      {scan.not_public > 0 && (
+        <span className={`${chipClass} no-findings`}
+              title={`${scan.not_public} package(s) come from a private registry, git or a local path and were not looked up in public advisory databases`}>
+          {scan.not_public} not public
+        </span>
+      )}
+      {yankedCount > 0 && (
+        <span className={`${chipClass} has-findings`}
+              title={`${yankedCount} locked version(s) have been yanked by their registry`}>
+          ⚠ {yankedCount} yanked
+        </span>
+      )}
+      {yankFailures > 0 && (
+        <span className={`${chipClass} has-findings`}
+              title={`Yank status could not be checked for ${yankFailures} package(s)`}>
+          ⚠ {yankFailures} yank-unchecked
+        </span>
+      )}
+    </>
   )
 }
 

@@ -24,6 +24,7 @@ KIND_REVISION = "c7a2e5f01d38"
 PRE_OSV_FAILURES_REVISION = "594fb09ecdfc"
 PRE_REMEDIATIONS_REVISION = "7b0e9bd83541"
 PRE_FIX_PLANS_REVISION = "e4c1a9d2b7f3"
+PRE_SCAN_CHECKS_REVISION = "f1a2b3c4d5e6"
 
 
 def alembic(db_path: str, *args: str) -> subprocess.CompletedProcess:
@@ -524,3 +525,92 @@ class TestFixPlansOnSqlite:
         assert ids == [1]
         assert "fix_plans_enabled" not in ddl
         assert link == 0
+
+
+class TestScanChecksOnSqlite:
+    """a7d3c9e1f5b2 on SQLite: existing rows get the server defaults (not public 0, yank check
+    not run), and the downgrade's batch drop_column rebuilds both tables, so prove rows survive."""
+
+    _COLUMNS = ("not_public", "yank_checked", "yanked", "yank_failures")
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        path = str(tmp_path / "scratch.db")
+        assert alembic(path, "upgrade", PRE_SCAN_CHECKS_REVISION).returncode == 0
+        _seed_pre_osv_failures_rows(path)
+        engine = sa.create_engine(f"sqlite:///{path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,is_enabled,"
+                    "created_by_id,created_at,updated_at) VALUES "
+                    "(1,'r','https://example.invalid/r','main','high',1,1,'2026-01-01','2026-01-01')"))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scan_results (id,repo_scan_id,status,finding_count,risk_failures,"
+                    "osv_failures,triggered_by,started_at,notified) VALUES "
+                    "(1,1,'success',0,0,0,'manual','2026-01-01',0)"))
+        finally:
+            engine.dispose()
+        return path
+
+    def _columns(self, db_path):
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                return {
+                    t: sorted(c for c in (r[1] for r in conn.execute(sa.text(f"PRAGMA table_info({t})")))
+                              if c in self._COLUMNS)
+                    for t in ("scans", "repo_scan_results")
+                }
+        finally:
+            engine.dispose()
+
+    @pytest.mark.parametrize("table", ["scans", "repo_scan_results"])
+    def test_existing_rows_read_as_not_checked(self, db_path, table):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(sa.text(
+                    f"SELECT not_public, yank_checked, yanked, yank_failures FROM {table} WHERE id=1")).one()
+        finally:
+            engine.dispose()
+        assert tuple(row) == (0, 0, None, None)
+
+    def test_downgrade_keeps_rows(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        r = alembic(db_path, "downgrade", PRE_SCAN_CHECKS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                scans = [row.id for row in conn.execute(sa.text("SELECT id FROM scans"))]
+                results = [row.id for row in conn.execute(sa.text("SELECT id FROM repo_scan_results"))]
+        finally:
+            engine.dispose()
+        assert (scans, results) == ([1], [1])
+        assert self._columns(db_path) == {"scans": [], "repo_scan_results": []}
+
+    def test_upgrade_converges_when_one_column_already_exists(self, db_path):
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text("ALTER TABLE scans ADD COLUMN yanked JSON"))
+        finally:
+            engine.dispose()
+        r = alembic(db_path, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        expected = sorted(self._COLUMNS)
+        assert self._columns(db_path) == {"scans": expected, "repo_scan_results": expected}
+
+    def test_downgrade_converges_when_one_column_is_already_gone(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa.text("ALTER TABLE repo_scan_results DROP COLUMN yank_failures"))
+        finally:
+            engine.dispose()
+        r = alembic(db_path, "downgrade", PRE_SCAN_CHECKS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert self._columns(db_path) == {"scans": [], "repo_scan_results": []}

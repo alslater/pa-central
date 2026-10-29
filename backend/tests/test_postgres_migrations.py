@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "f1a2b3c4d5e6"
+HEAD_REVISION = "a7d3c9e1f5b2"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -2013,3 +2013,108 @@ class TestFixPlansMigration:
         finally:
             engine.dispose()
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+
+
+class TestScanChecksMigration:
+    """a7d3c9e1f5b2: not_public, yank_checked, yanked and yank_failures on scans and
+    repo_scan_results (package-alert #121).
+
+    Seeded before the migration, per CLAUDE.md: existing rows must read as "nothing not
+    public, yank check not run" (NOT NULL columns need a working server default on a
+    populated table), and the downgrade must keep rows on PostgreSQL's ALTER TABLE path.
+    """
+
+    PRE_REVISION = "f1a2b3c4d5e6"
+    _COLUMNS = ("not_public", "yank_checked", "yanked", "yank_failures")
+
+    @staticmethod
+    def _seed(url: str) -> None:
+        engine = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text(
+                    "INSERT INTO users (id,email,display_name,hashed_password,"
+                    "role,is_active,totp_enabled,created_at,token_epoch) VALUES "
+                    "(1,'checks@example.invalid','Checks','x','viewer',true,false,now(),0)"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO hosts (id,owner_user_id,name,daemon_status,created_at) "
+                    "VALUES (1,1,'host-1','running',now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO scans (id,host_id,project_path,scan_type,status,"
+                    "finding_count,risk_failures,osv_failures,scanned_at,received_at) VALUES "
+                    "(1,1,'/app','project','clean',0,0,0,now(),now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scans (id,name,url,branch,min_notify_severity,"
+                    "is_enabled,created_by_id,created_at,updated_at) "
+                    "VALUES (1,'r','https://example.invalid/r','main','high',true,1,now(),now())"
+                ))
+                conn.execute(sa.text(
+                    "INSERT INTO repo_scan_results (id,repo_scan_id,status,finding_count,"
+                    "risk_failures,osv_failures,triggered_by,started_at,notified) VALUES "
+                    "(1,1,'success',0,0,0,'manual',now(),false)"
+                ))
+        finally:
+            engine.dispose()
+
+    @pytest.fixture
+    def migrated(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REVISION).returncode == 0
+        self._seed(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    @pytest.mark.parametrize("table", ["scans", "repo_scan_results"])
+    def test_existing_rows_read_as_not_checked(self, migrated, table):
+        with migrated.connect() as conn:
+            row = conn.execute(sa.text(
+                f"SELECT not_public, yank_checked, yanked, yank_failures FROM {table} WHERE id = 1"
+            )).one()
+        assert tuple(row) == (0, False, None, None)
+
+    @pytest.mark.parametrize("table", ["scans", "repo_scan_results"])
+    def test_column_nullability(self, migrated, table):
+        with migrated.connect() as conn:
+            nullable = dict(conn.execute(sa.text(
+                "SELECT column_name, is_nullable FROM information_schema.columns "
+                "WHERE table_name = :t AND column_name IN "
+                "('not_public','yank_checked','yanked','yank_failures')"), {"t": table}).all())
+        assert nullable == {"not_public": "NO", "yank_checked": "NO", "yanked": "YES", "yank_failures": "YES"}
+
+    def test_downgrade_keeps_rows_and_drops_the_columns(self, migrated, postgres_url):
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "UPDATE scans SET not_public = 2, yank_checked = true, "
+                "yanked = '[{\"package\": \"a\"}]', yank_failures = 1 WHERE id = 1"))
+            conn.execute(sa.text("UPDATE repo_scan_results SET not_public = 3 WHERE id = 1"))
+        r = alembic(postgres_url, "downgrade", self.PRE_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        with migrated.connect() as conn:
+            assert conn.execute(sa.text("SELECT count(*) FROM scans")).scalar_one() == 1
+            assert conn.execute(sa.text("SELECT count(*) FROM repo_scan_results")).scalar_one() == 1
+            cols = {r.column_name for r in conn.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns WHERE table_name IN "
+                "('scans','repo_scan_results')"))}
+        assert not set(self._COLUMNS) & cols
+
+    def test_upgrade_replays_after_a_partial_failure(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REVISION).returncode == 0
+        self._seed(postgres_url)
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text("ALTER TABLE scans ADD COLUMN not_public INTEGER NOT NULL DEFAULT 0"))
+            r = alembic(postgres_url, "upgrade", "head")
+            with engine.connect() as conn:
+                count = conn.execute(sa.text(
+                    "SELECT count(*) FROM information_schema.columns WHERE table_name = 'scans' "
+                    "AND column_name IN ('not_public','yank_checked','yanked','yank_failures')")).scalar_one()
+        finally:
+            engine.dispose()
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert count == 4
