@@ -89,7 +89,7 @@ class AlertKind(str, enum.Enum):
 class ScanStatus(str, enum.Enum):
     clean = "clean"
     findings = "findings"
-    degraded = "degraded"  # scanned, but some packages could not be checked against OSV
+    degraded = "degraded"  # scanned, but some packages could not be checked (OSV lookups failed, or unreadable tools dirs)
     error = "error"
 
 
@@ -273,6 +273,24 @@ class Scan(Base):
     # (schemas.Remediation). NULL for older pa versions and for host scans
     # until the pa-central plugin sends it.
     remediations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # A `pa scan-tools` scan (scan_type "tools", package-alert #117): one per pipx or uv tools
+    # directory (project_path). NULL / default for every other scan type.
+    # manager: "pipx" | "uv". active: false for a leftover pipx layout. root_exists: false for
+    # a scanned manager with no directory (sent so the run still reports what it looked at).
+    manager: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    root_exists: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # The run that produced it: every result of one run shares run_id and scanned_at.
+    # managers_scanned and run_roots say what the run covered, and home whose tools these are;
+    # GET /hosts/{id}/latest-scans retires a root the newest run per (home, manager) left out.
+    run_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    home: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    managers_scanned: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    run_roots: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # The inventory, a tool without findings included (schemas.ToolEntry), and the
+    # directories whose packages were not checked (status "degraded" unless there are findings).
+    tools: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    unchecked: Mapped[list | None] = mapped_column(JSON, nullable=True)
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     scanned_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
     received_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
@@ -281,13 +299,19 @@ class Scan(Base):
 
     __table_args__ = (
         # Supports GET /hosts/{id}/latest-scans' row_number() ranking: filter
-        # by host_id, partition by project_path, order by scanned_at desc,
-        # received_at desc, id desc. That endpoint has no row cap (unlike
-        # GET /scans), so an unindexed scan+sort here means a full table scan
-        # on every host-detail page load.
+        # by host_id, partition by (project_path, scan_type, home, manager),
+        # order by scanned_at desc, received_at desc, id desc. That endpoint
+        # has no row cap (unlike GET /scans), so an unindexed scan+sort here
+        # means a full table scan on every host-detail page load.
         Index(
-            "ix_scans_host_project_scanned_received_id",
-            "host_id", "project_path", "scanned_at", "received_at", "id",
+            "ix_scans_host_project_type_home_manager_scanned_received_id",
+            "host_id", "project_path", "scan_type", "home", "manager", "scanned_at", "received_at", "id",
+        ),
+        # The same endpoint's newest tools run per (home, manager), read newest
+        # first until a scan covers the manager (hosts._newest_run_stmt).
+        Index(
+            "ix_scans_host_type_home_scanned_received_id",
+            "host_id", "scan_type", "home", "scanned_at", "received_at", "id",
         ),
     )
 

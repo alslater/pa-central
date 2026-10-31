@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router'
 import { api, Host, Alert, Scan, ConfigTemplate } from '@/lib/api'
 import { Shell, PageHeader } from '@/components/Shell'
 import { Card, StatusDot, SeverityBadge, ScanBadge, Button, Select, Input, useToast, Empty, ScanDetailTabs, ScanCheckChips, yankedOf, timeAgo } from '@/components/ui'
+import { isToolsScan, toolsScanHasDetail, ToolsScanChips, ToolsScanPanel, ManagerTag } from '@/components/ToolsScanPanel'
 import { useAuth } from '@/hooks/useAuth'
 import { useRovingTabs } from '@/lib/hooks'
 import { ArrowLeft, Bell, ScanSearch, Settings2 } from 'lucide-react'
@@ -176,7 +177,8 @@ function HostAlerts({ hostId, isOperator, show }: { hostId: number; isOperator: 
 function HostScans({ hostId }: { hostId: number }) {
   const [scans, setScans] = useState<Scan[]>([])
   const [loading, setLoading] = useState(true)
-  const [expanded, setExpanded] = useState<string | null>(null)
+  // Keyed by scan id: a project and its --scan-installed environment share a path.
+  const [expanded, setExpanded] = useState<number | null>(null)
   const [filter, setFilter] = useState('')
 
   // GET /hosts/{id}/latest-scans returns one row per project (already the
@@ -209,21 +211,24 @@ function HostScans({ hostId }: { hostId: number }) {
         const hasRiskFailures = (s.risk_failures ?? 0) > 0
         const hasOsvFailures = (s.osv_failures ?? 0) > 0
         const yanked = yankedOf(s)
-        const hasDetail = hasFindings || hasRisks || yanked.length > 0
-        const isExpanded = expanded === s.project_path
+        const tools = isToolsScan(s)
+        const hasDetail = tools ? toolsScanHasDetail(s) : hasFindings || hasRisks || yanked.length > 0
+        const isExpanded = expanded === s.id
         return (
-        <Card key={s.project_path}>
+        <Card key={s.id}>
           <div
             className={`host-scan-card-row ${hasDetail ? 'data-tr-clickable' : 'data-tr-static'}`}
-            onClick={hasDetail ? () => setExpanded(isExpanded ? null : s.project_path) : undefined}
-            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(isExpanded ? null : s.project_path) } }) : undefined}
+            onClick={hasDetail ? () => setExpanded(isExpanded ? null : s.id) : undefined}
+            onKeyDown={hasDetail ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(isExpanded ? null : s.id) } }) : undefined}
             role={hasDetail ? 'button' : undefined}
             tabIndex={hasDetail ? 0 : undefined}
             aria-expanded={hasDetail ? isExpanded : undefined}
           >
             <ScanBadge status={s.status} />
             <div className="host-scan-info">
-              <div className="project-path-cell">{s.project_path}</div>
+              <div className="project-path-cell">
+                {tools && <><ManagerTag manager={s.manager} />{' '}</>}{s.project_path}
+              </div>
               {s.sources && s.sources.length > 0 && (
                 <div className="sources-row">
                   {s.sources.map(src => (
@@ -265,11 +270,14 @@ function HostScans({ hostId }: { hostId: number }) {
               </span>
             )}
             <ScanCheckChips scan={s} chipClass="host-scan-count" />
+            {tools && <ToolsScanChips scan={s} chipClass="host-scan-count" />}
             <span className="host-scan-when">{timeAgo(s.scanned_at)}</span>
           </div>
           {isExpanded && hasDetail && (
             <div className="host-scan-findings-panel">
-              <ScanDetailTabs findings={s.findings} risks={s.risks} remediations={s.remediations} yanked={yanked} />
+              {tools
+                ? <ToolsScanPanel scan={s} />
+                : <ScanDetailTabs findings={s.findings} risks={s.risks} remediations={s.remediations} yanked={yanked} />}
             </div>
           )}
         </Card>

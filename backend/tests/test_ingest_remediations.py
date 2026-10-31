@@ -24,6 +24,7 @@ REMEDIATION = {
     "verified": True,
     "recommended_age_days": 12.5,
     "in_cooldown": False,
+    "source": None,
 }
 
 

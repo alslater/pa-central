@@ -141,11 +141,36 @@ export interface Remediation {
   verified: boolean | null
   recommended_age_days: number | null
   in_cooldown: boolean | null
+  /** The tool a `pa scan-tools` remediation belongs to (e.g. "pipx:awscli"); absent otherwise. */
+  source?: string | null
 }
 
 /** A locked version its registry has yanked (package-alert's yank check). */
 export interface YankedVersion {
   ecosystem: string | null; package: string | null; version: string | null; reason: string | null
+}
+
+/** Where a `pa scan-tools` tool came from. Unknown keys are kept as package-alert sent them. */
+export interface ToolProvenance {
+  kind?: 'pypi' | 'index' | 'url' | 'git' | 'local' | 'unknown' | string
+  editable?: boolean
+  path?: string
+  url?: string
+  /** "config" when pip or uv configuration at scan time kept the packages from public lookup. */
+  index_source?: string
+  /** An extra index sat beside PyPI; the packages were still looked up publicly. */
+  extra_index?: boolean
+}
+
+/** One tool in a tools scan's inventory, a tool without findings included. */
+export interface ToolEntry {
+  name: string
+  manager: string | null; version: string | null; python: string | null; venv_root: string | null
+  provenance: ToolProvenance | null
+  /** Another interpreter's dirs in the tool's venv, not scanned. Not a deletability claim. */
+  orphaned: string[]
+  /** The tool's directories whose packages were not checked. */
+  unchecked: string[]
 }
 
 export interface Scan {
@@ -166,6 +191,18 @@ export interface Scan {
   sources: string[] | null
   /** Per-package upgrade advice; null for scans from package-alert < 0.9.0 (and host scans until the plugin sends it). */
   remediations: Remediation[] | null
+  // A `pa scan-tools` scan (scan_type "tools"), one per pipx or uv tools directory
+  // (project_path). Null/default for every other scan type.
+  manager: string | null
+  /** False for a leftover pipx layout pipx no longer uses. Not a deletability claim. */
+  active: boolean
+  /** False for a scanned manager with no directory. */
+  exists: boolean
+  run_id: string | null; home: string | null
+  managers_scanned: string[] | null; run_roots: string[] | null
+  tools: ToolEntry[] | null
+  /** Directories whose packages were not checked; non-empty means not a clean result, whatever the status. */
+  unchecked: string[]
   scanned_at: string; received_at: string
 }
 

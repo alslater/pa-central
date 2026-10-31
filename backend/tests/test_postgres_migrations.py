@@ -26,7 +26,7 @@ from tests.conftest_postgres import _SUPPORTED_QUERY_OPTIONS
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 BASE_REVISION = "cd36263592ce"
-HEAD_REVISION = "a7d3c9e1f5b2"
+HEAD_REVISION = "e949089b9b28"
 
 # The revision immediately before the acceptance-events migration (two index
 # migrations still sit between this and HEAD_REVISION) — the point the
@@ -479,29 +479,36 @@ class TestMigrationChain:
         )
 
     def test_scans_latest_scan_index_exists(self, postgres_url):
-        """`ix_scans_host_project_scanned_received_id` supports the
-        row_number() ranking query in GET /hosts/{id}/latest-scans (filter
-        by host_id, partition by project_path, order by scanned_at desc,
-        received_at desc, id desc). That endpoint has no row cap, so a
-        missing index would mean a full table scan + sort on every
-        host-detail page load. This confirms the index exists with its
-        columns in the expected order on a real PostgreSQL server.
+        """`ix_scans_host_project_type_home_manager_scanned_received_id`
+        supports the row_number() ranking query in GET /hosts/{id}/latest-scans
+        (filter by host_id, partition by (project_path, scan_type, home,
+        manager), order by scanned_at desc, received_at desc, id desc), and
+        `ix_scans_host_type_home_scanned_received_id` the same endpoint's
+        newest-tools-run lookup. That endpoint has no row cap, so a missing
+        index would mean a full table scan + sort on every host-detail page
+        load. This confirms both exist with their columns in the expected
+        order on a real PostgreSQL server, and that e949089b9b28 dropped the
+        per-project_path index it replaces.
         """
         assert alembic(postgres_url, "upgrade", "head").returncode == 0
         engine = sa.create_engine(postgres_url)
         try:
             with engine.connect() as conn:
-                indexdef = conn.execute(sa.text(
-                    "SELECT indexdef FROM pg_indexes "
-                    "WHERE indexname = 'ix_scans_host_project_scanned_received_id'"
-                )).scalar()
+                indexes = dict(conn.execute(sa.text(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE tablename = 'scans' AND indexname LIKE 'ix_scans_host_%'"
+                )).all())
         finally:
             engine.dispose()
-        assert indexdef is not None, "scans ranking index was not created"
-        assert "(host_id, project_path, scanned_at, received_at, id)" in indexdef, (
+        assert sorted(indexes) == ["ix_scans_host_project_type_home_manager_scanned_received_id",
+                                   "ix_scans_host_type_home_scanned_received_id"], indexes
+        indexdef = indexes["ix_scans_host_project_type_home_manager_scanned_received_id"]
+        assert "(host_id, project_path, scan_type, home, manager, scanned_at, received_at, id)" in indexdef, (
             f"index column order does not match the query's filter/partition/sort "
             f"columns: {indexdef}"
         )
+        indexdef = indexes["ix_scans_host_type_home_scanned_received_id"]
+        assert "(host_id, scan_type, home, scanned_at, received_at, id)" in indexdef, indexdef
 
     def test_repo_scan_results_latest_result_index_exists(self, postgres_url):
         """`ix_repo_scan_results_scan_started_id` supports the row_number()
@@ -2118,3 +2125,90 @@ class TestScanChecksMigration:
             engine.dispose()
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
         assert count == 4
+
+
+class TestToolsScansMigration:
+    """e949089b9b28: pa scan-tools fields on scans, and the latest-scans index widened to
+    (project_path, scan_type) (pa-central #26).
+
+    Seeded before the migration, per CLAUDE.md: existing rows must read as an active,
+    existing, non-tools scan (NOT NULL booleans need a working server default on a populated
+    table), and the downgrade must keep rows (including a populated tools scan) on
+    PostgreSQL's ALTER TABLE path and restore the old index.
+    """
+
+    PRE_REVISION = "a7d3c9e1f5b2"
+    _COLUMNS = ("manager", "active", "root_exists", "run_id", "home", "managers_scanned",
+                "run_roots", "tools", "unchecked")
+
+    @pytest.fixture
+    def migrated(self, postgres_url):
+        assert alembic(postgres_url, "upgrade", self.PRE_REVISION).returncode == 0
+        TestScanChecksMigration._seed(postgres_url)
+        r = alembic(postgres_url, "upgrade", "head")
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        yield engine
+        engine.dispose()
+
+    def test_existing_rows_read_as_active_non_tools_scans(self, migrated):
+        with migrated.connect() as conn:
+            row = conn.execute(sa.text(
+                f"SELECT {', '.join(self._COLUMNS)} FROM scans WHERE id = 1")).one()
+        assert tuple(row) == (None, True, True, None, None, None, None, None, None)
+
+    def test_column_nullability(self, migrated):
+        with migrated.connect() as conn:
+            nullable = dict(conn.execute(sa.text(
+                "SELECT column_name, is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'scans' AND column_name = ANY(:cols)"), {"cols": list(self._COLUMNS)}).all())
+        assert nullable == {c: ("NO" if c in ("active", "root_exists") else "YES") for c in self._COLUMNS}
+
+    def test_downgrade_keeps_rows_and_restores_the_index(self, migrated, postgres_url):
+        with migrated.connect() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO scans (id,host_id,project_path,scan_type,status,finding_count,risk_failures,"
+                "osv_failures,not_public,yank_checked,scanned_at,received_at,manager,active,root_exists,"
+                "run_id,home,managers_scanned,run_roots,tools,unchecked) VALUES "
+                "(2,1,'/home/al/.local/pipx/venvs','tools','degraded',0,0,0,0,false,now(),now(),'pipx',false,"
+                "true,'run-1','/home/al','[\"pipx\"]','[\"/home/al/.local/pipx/venvs\"]',"
+                "'[{\"name\": \"awscli\"}]','[\"/x\"]')"))
+        r = alembic(postgres_url, "downgrade", self.PRE_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        with migrated.connect() as conn:
+            ids = sorted(conn.execute(sa.text("SELECT id FROM scans")).scalars())
+            cols = set(conn.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'scans'")).scalars())
+            indexes = set(conn.execute(sa.text(
+                "SELECT indexname FROM pg_indexes WHERE tablename = 'scans'")).scalars())
+        assert ids == [1, 2]
+        assert not set(self._COLUMNS) & cols
+        assert "ix_scans_host_project_scanned_received_id" in indexes
+        assert "ix_scans_host_project_type_home_manager_scanned_received_id" not in indexes
+        assert "ix_scans_host_type_home_scanned_received_id" not in indexes
+
+    def test_upgrade_replays_after_a_partial_failure(self, postgres_url):
+        """A column and one new index already there, the other not, the old index still present."""
+        assert alembic(postgres_url, "upgrade", self.PRE_REVISION).returncode == 0
+        TestScanChecksMigration._seed(postgres_url)
+        engine = sa.create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                conn.execute(sa.text("ALTER TABLE scans ADD COLUMN manager VARCHAR(20)"))
+                conn.execute(sa.text("ALTER TABLE scans ADD COLUMN home VARCHAR(500)"))
+                conn.execute(sa.text(
+                    "CREATE INDEX ix_scans_host_type_home_scanned_received_id ON scans "
+                    "(host_id, scan_type, home, scanned_at, received_at, id)"))
+            r = alembic(postgres_url, "upgrade", "head")
+            with engine.connect() as conn:
+                cols = set(conn.execute(sa.text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'scans'")).scalars())
+                indexes = set(conn.execute(sa.text(
+                    "SELECT indexname FROM pg_indexes WHERE tablename = 'scans'")).scalars())
+        finally:
+            engine.dispose()
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert set(self._COLUMNS) <= cols
+        assert "ix_scans_host_project_scanned_received_id" not in indexes
+        assert {"ix_scans_host_project_type_home_manager_scanned_received_id",
+                "ix_scans_host_type_home_scanned_received_id"} <= indexes

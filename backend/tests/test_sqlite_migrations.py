@@ -25,6 +25,7 @@ PRE_OSV_FAILURES_REVISION = "594fb09ecdfc"
 PRE_REMEDIATIONS_REVISION = "7b0e9bd83541"
 PRE_FIX_PLANS_REVISION = "e4c1a9d2b7f3"
 PRE_SCAN_CHECKS_REVISION = "f1a2b3c4d5e6"
+PRE_TOOLS_SCANS_REVISION = "a7d3c9e1f5b2"
 
 
 def alembic(db_path: str, *args: str) -> subprocess.CompletedProcess:
@@ -614,3 +615,44 @@ class TestScanChecksOnSqlite:
         r = alembic(db_path, "downgrade", PRE_SCAN_CHECKS_REVISION)
         assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
         assert self._columns(db_path) == {"scans": [], "repo_scan_results": []}
+
+
+class TestToolsScansOnSqlite:
+    """e949089b9b28 on SQLite: existing rows get the server defaults (an active, existing,
+    non-tools scan), and the downgrade's batch drop_column rebuilds scans, so prove rows
+    survive and the old index comes back."""
+
+    _COLUMNS = ("manager", "active", "root_exists", "run_id", "home", "managers_scanned",
+                "run_roots", "tools", "unchecked")
+
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        path = str(tmp_path / "scratch.db")
+        assert alembic(path, "upgrade", PRE_TOOLS_SCANS_REVISION).returncode == 0
+        _seed_pre_osv_failures_rows(path)
+        return path
+
+    def _query(self, db_path, sql):
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.connect() as conn:
+                return conn.execute(sa.text(sql)).all()
+        finally:
+            engine.dispose()
+
+    def test_existing_rows_read_as_active_non_tools_scans(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        [row] = self._query(db_path, f"SELECT {', '.join(self._COLUMNS)} FROM scans WHERE id=1")
+        assert tuple(row) == (None, 1, 1, None, None, None, None, None, None)
+
+    def test_downgrade_keeps_rows_and_restores_the_index(self, db_path):
+        assert alembic(db_path, "upgrade", "head").returncode == 0
+        r = alembic(db_path, "downgrade", PRE_TOOLS_SCANS_REVISION)
+        assert r.returncode == 0, f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+        assert [row.id for row in self._query(db_path, "SELECT id FROM scans")] == [1]
+        cols = {row[1] for row in self._query(db_path, "PRAGMA table_info(scans)")}
+        assert not set(self._COLUMNS) & cols
+        indexes = {row[1] for row in self._query(db_path, "PRAGMA index_list(scans)")}
+        assert "ix_scans_host_project_scanned_received_id" in indexes
+        assert "ix_scans_host_project_type_home_manager_scanned_received_id" not in indexes
+        assert "ix_scans_host_type_home_scanned_received_id" not in indexes
