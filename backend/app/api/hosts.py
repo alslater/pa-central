@@ -1,5 +1,7 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import Select, String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin, require_operator
@@ -44,7 +46,8 @@ async def get_host_latest_scans(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[ScanOut]:
-    """One row per distinct project_path on this host — its most recent scan.
+    """One row per distinct (project_path, scan_type) on this host — its most recent scan,
+    less any tools directory a newer `pa scan-tools` run no longer reports (_retired_tools_roots).
 
     GET /scans applies a default/max row limit (it's also the package-alert
     CLI's live surface and must not change shape), so grouping its results
@@ -74,7 +77,10 @@ async def get_host_latest_scans(
     rank = (
         func.row_number()
         .over(
-            partition_by=Scan.project_path,
+            # scan_type too: a project and its --scan-installed environment share a path. And
+            # home and manager (NULL for other scan types): a system-wide tools root is one
+            # path for several accounts, each with its own runs that list or retire it.
+            partition_by=(Scan.project_path, Scan.scan_type, Scan.home, Scan.manager),
             order_by=(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc()),
         )
         .label("rank")
@@ -89,7 +95,59 @@ async def get_host_latest_scans(
         select(Scan).where(Scan.id.in_(latest_ids))
         .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
     )
-    return result.scalars().all()
+    scans = list(result.scalars().all())
+    retired = await _retired_tools_roots(db, host_id, scans)
+    return [s for s in scans if s.id not in retired]
+
+
+async def _retired_tools_roots(db: AsyncSession, host_id: int, latest: list[Scan]) -> set[int]:
+    """The ids of tools scans whose directory the newest run for their (home, manager) left out.
+
+    A tools directory that disappears (a leftover pipx layout deleted, PIPX_HOME moved) is
+    never reported again, so its last scan would otherwise show forever. For each (home,
+    manager), only the newest run counts, by its shared scanned_at with received_at breaking
+    a tie, so a late or retried older payload never retires a root or brings one back. Every
+    payload of a run carries the run_roots of all its managers_scanned, so any one of them
+    speaks for each of those managers, even when another manager's payload is lost. A
+    payload without home (an older client) is a scope of its own; one without run_roots
+    retires nothing. Retired scans are only hidden here: they stay in GET /scans.
+
+    The newest run is looked up in the host's history, not in *latest*: a later run of
+    another manager can replace the row that carried it there.
+    """
+    scopes = {(s.home, s.manager) for s in latest if s.scan_type == "tools" and s.manager is not None}
+    run_roots = {scope: await _newest_run_roots(db, host_id, *scope) for scope in scopes}
+    return {
+        s.id for s in latest
+        if s.scan_type == "tools"
+        and (roots := run_roots.get((s.home, s.manager))) is not None
+        and s.project_path not in roots
+    }
+
+
+async def _newest_run_roots(db: AsyncSession, host_id: int, home: str | None, manager: str) -> list[str] | None:
+    """run_roots of the newest tools scan for *home* that covers *manager*, as its own manager
+    or in managers_scanned. managers_scanned is matched in its JSON text, quoted so "pip"
+    cannot match "pipx"; contains() escapes LIKE wildcards. There is always such a scan: the
+    latest row the scope came from."""
+    row = (await db.execute(_newest_run_stmt(host_id, home, manager))).first()
+    return row.run_roots if row is not None else None
+
+
+def _newest_run_stmt(host_id: int, home: str | None, manager: str) -> Select[tuple[int, Any]]:
+    """The query behind _newest_run_roots. ix_scans_host_type_home_scanned_received_id serves
+    its filter and order, so it reads newest first and stops at the first match."""
+    return (
+        select(Scan.id, Scan.run_roots)
+        .where(
+            Scan.host_id == host_id, Scan.scan_type == "tools",
+            Scan.home.is_(None) if home is None else Scan.home == home,
+            or_(Scan.manager == manager,
+                cast(Scan.managers_scanned, String).contains(f'"{manager}"', autoescape=True)),
+        )
+        .order_by(Scan.scanned_at.desc(), Scan.received_at.desc(), Scan.id.desc())
+        .limit(1)
+    )
 
 
 @router.patch("/{host_id}", response_model=HostOut)

@@ -7,6 +7,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import (
     AfterValidator,
@@ -506,6 +507,9 @@ class Remediation(BaseModel):
     verified: bool | None = None
     recommended_age_days: float | None = None
     in_cooldown: bool | None = None
+    # The tool a `pa scan-tools` remediation belongs to (e.g. "pipx:awscli"). Two tools with
+    # the same vulnerable package give two remediations, one per source.
+    source: str | None = None
 
 
 def _drop_invalid_remediations(v: Any) -> Any:
@@ -843,6 +847,79 @@ def _fix_plan_or_none(v: Any) -> Any:
 IngestFixPlan = Annotated[FixPlanResult | None, BeforeValidator(_fix_plan_or_none)]
 
 
+# ── Tools scan inventory (package-alert `pa scan-tools`, #117) ─────────────────
+#
+# Lenient like remediations: a malformed entry is dropped, never a 422, since that would
+# lose the whole scan. Unknown keys are kept (provenance has grown index_source and
+# extra_index already), and pa-central only displays them.
+
+def _str_list(v: Any) -> list[str]:
+    """The string entries of a list; anything else is treated as empty."""
+    return [e for e in v if isinstance(e, str)] if isinstance(v, list) else []
+
+
+def _strict_str_list(v: Any) -> list[str] | None:
+    """A list of strings as given, or None for anything else. For run_roots and
+    managers_scanned, which retire roots: a mangled or partial list read as an inventory
+    would hide live ones, so it counts as absent, and an absent one retires nothing."""
+    if isinstance(v, list) and all(isinstance(e, str) for e in v):
+        return v
+    return None
+
+
+def _strip_userinfo(url: str) -> str:
+    """*url* without credentials (user:password@ or token@), a backstop to package-alert's own
+    stripping. Anything without a network location is returned unchanged."""
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+
+
+def _provenance(v: Any) -> dict[str, Any] | None:
+    if not isinstance(v, dict):
+        return None
+    if isinstance(v.get("url"), str):
+        return {**v, "url": _strip_userinfo(v["url"])}
+    return v
+
+
+class ToolEntry(BaseModel):
+    """One tool in a tools scan's inventory, a tool without findings included."""
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    manager: str | None = None
+    version: str | None = None
+    python: str | None = None
+    venv_root: str | None = None
+    # {kind: pypi|index|url|git|local|unknown, editable, path?, url?, index_source?, extra_index?}
+    provenance: Annotated[dict[str, Any] | None, BeforeValidator(_provenance)] = None
+    orphaned: Annotated[list[str], BeforeValidator(_str_list)] = []
+    unchecked: Annotated[list[str], BeforeValidator(_str_list)] = []
+
+
+def _drop_invalid_tools(v: Any) -> Any:
+    """As _drop_invalid_remediations: keep valid entries, treat a non-list as absent."""
+    if v is None:
+        return None
+    if not isinstance(v, list):
+        log.warning("Ignoring non-list tools value (%s)", type(v).__name__)
+        return None
+    kept: list[ToolEntry] = []
+    for entry in v:
+        try:
+            kept.append(ToolEntry.model_validate(entry))
+        except ValidationError:
+            # Not the entry itself: its provenance url is only stripped once it validates.
+            log.warning("Dropping malformed tools entry (%s)", type(entry).__name__)
+    return kept
+
+
+def _true_if_none(v: Any) -> Any:
+    return True if v is None else v
+
+
 # ── Scan ──────────────────────────────────────────────────────────────────────
 
 class ScanPayload(ScanChecks):
@@ -868,6 +945,16 @@ class ScanPayload(ScanChecks):
     unpinned: list[dict] | None = None  # packages without pinned versions
     scanned_at: datetime | None = None
     raw: dict | None = None
+    # A tools scan only (scan_type "tools"); see models.Scan.
+    manager: str | None = None
+    active: Annotated[bool, BeforeValidator(_true_if_none)] = True
+    exists: Annotated[bool, BeforeValidator(_true_if_none)] = True
+    run_id: str | None = None
+    home: str | None = None
+    managers_scanned: Annotated[list[str] | None, BeforeValidator(_strict_str_list)] = None
+    run_roots: Annotated[list[str] | None, BeforeValidator(_strict_str_list)] = None
+    tools: Annotated[list[ToolEntry] | None, BeforeValidator(_drop_invalid_tools)] = None
+    unchecked: Annotated[list[str], BeforeValidator(_str_list)] = []
 
     @field_validator("project_path", mode="before")
     @classmethod
@@ -894,6 +981,16 @@ class ScanOut(OrmBase):
     yank_failures: int | None
     sources: list[str] | None
     remediations: list[Remediation] | None = None
+    manager: str | None = None
+    active: bool = True
+    exists: bool = Field(True, validation_alias="root_exists")
+    run_id: str | None = None
+    home: str | None = None
+    managers_scanned: list[str] | None = None
+    run_roots: list[str] | None = None
+    tools: list[dict[str, Any]] | None = None
+    # [] for a scan stored before the column existed, as for any non-tools scan.
+    unchecked: Annotated[list[str], BeforeValidator(_str_list)] = []
     scanned_at: datetime
     received_at: datetime
 

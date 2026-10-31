@@ -948,6 +948,39 @@ class TestHostLatestScansRanking:
 
 # ── Test fixture URL conversion ───────────────────────────────────────────────
 
+    async def test_tools_root_retirement_matches_managers_scanned_json_text(self, session, client):
+        """The newest run per (home, manager) is found by matching managers_scanned's JSON text
+        (CAST to VARCHAR, then LIKE). JSON-to-text rendering is dialect-specific: this pins that
+        on PostgreSQL a combined run's uv row still covers pipx after a later uv-only run, and
+        that a run listing "pipx" counts as neither "pip" nor (a LIKE wildcard) "pip_"."""
+        owner = User(email="owner-tools@x.com", display_name="Tools", role=UserRole.admin,
+                     hashed_password=hash_password("x"))
+        session.add(owner)
+        await session.flush()
+        token = create_access_token(owner.id, owner.token_epoch)
+        host = Host(name="ht", hostname="ht.local", owner_user_id=owner.id)
+        session.add(host)
+        await session.flush()
+        t0 = datetime(2026, 10, 30, tzinfo=UTC)
+
+        def tools(root, manager, managers, roots, hours):
+            return Scan(host_id=host.id, project_path=root, scan_type="tools", manager=manager,
+                        home="/home/al", managers_scanned=managers, run_roots=roots,
+                        scanned_at=t0 + timedelta(hours=hours), finding_count=0)
+
+        session.add_all([
+            tools("/pipx-old", "pipx", ["pipx"], ["/pipx-old"], 0),
+            tools("/uv", "uv", ["pipx", "uv"], ["/pipx", "/uv"], 1),
+            tools("/uv", "uv", ["uv"], ["/uv"], 2),
+            tools("/pip", "pip", ["pip"], ["/pip"], 0),       # a run listing "pipx" is not one of "pip"
+            tools("/pip_", "pip_", ["pip_"], ["/pip_"], 0),   # nor of "pip_", LIKE wildcard and all
+        ])
+        await session.commit()
+
+        r = await client.get(f"/api/hosts/{host.id}/latest-scans", headers=auth(token))
+        assert r.status_code == 200
+        assert {s["project_path"] for s in r.json()} == {"/uv", "/pip", "/pip_"}
+
 class TestFixtureUrlConversionTranslatesSslAliases:
     """conftest_postgres.py's driver-swap helpers must rename sslmode <-> ssl.
 
